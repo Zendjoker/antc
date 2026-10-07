@@ -1,0 +1,3 @@
+faster-whisper
+piper-tts
+sherpa-onnx  # speaker verification (only your voice can interrupt): python main.py --enroll-voice

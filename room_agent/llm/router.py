@@ -1,0 +1,106 @@
+"""Picks the model for each turn, in code (no extra model call to decide):
+
+  cheap model (OpenAI, LLM_DEFAULT)  everyday conversation and simple tool use
+  smart model (Claude, LLM_SMART)    you ask for it ("ask Claude", "think hard"), or the request is long/complex,
+                                     or the cheap model fails before saying anything
+  local model (Ollama)               LLM_PROVIDER=ollama, or today's paid budget is used up
+"""
+
+import datetime
+import logging
+
+import requests
+
+from room_agent import runtime as rt
+from room_agent import trace
+from room_agent.audio.speaker import finish_speaking, say
+from room_agent.config import (BUDGET_FALLBACK, LLM_COMPLEX_TOPICS, LLM_COMPLEX_WORDS, LLM_DEFAULT,
+                               LLM_PROVIDER, LLM_SMART, LLM_SMART_TRIGGERS, MODEL, OLLAMA_URL, OPENAI_KEY, OPENAI_MODEL)
+from room_agent.llm.budget import budget
+from room_agent.llm.claude import ask_claude
+from room_agent.llm.ollama import ask_ollama
+from room_agent.llm.openai_backend import ask_openai
+
+log = logging.getLogger("room-agent")
+NAMES = {"openai": OPENAI_MODEL, "claude": MODEL}
+
+
+def choose(text):
+    """(provider, why) for this request."""
+    t = " ".join((text or "").lower().split())
+    default = LLM_DEFAULT if (LLM_DEFAULT != "openai" or OPENAI_KEY) else "claude"
+    if default == LLM_SMART:
+        return default, "default"
+    if any(trigger in t for trigger in LLM_SMART_TRIGGERS):
+        return LLM_SMART, "you asked"
+    if len(t.split()) >= LLM_COMPLEX_WORDS:
+        return LLM_SMART, "long request"
+    if any(topic in t for topic in LLM_COMPLEX_TOPICS):
+        return LLM_SMART, "complex request"
+    return default, "default"
+
+
+def ask(history):
+    """Answer the last message in `history`: speaks the reply and appends it (and any tool calls) to `history`."""
+    budget.start_turn()
+    if LLM_PROVIDER == "ollama":
+        return ask_ollama(history)
+    if budget.exceeded():
+        return over_budget(history)
+    provider, why = choose(rt.turn_text)
+    log.info("model: %s (%s)", NAMES.get(provider, provider), why)
+    trace.note("MODEL", f"{NAMES.get(provider, provider)} ({why})")
+    if provider != "openai":
+        return ask_claude(history)
+    spoken_before, size_before = rt.spoken_count, len(history)
+    try:
+        return ask_openai(history)
+    except Exception as e:
+        if rt.spoken_count != spoken_before:
+            raise  # it already said something: answering again from the top would repeat it
+        del history[size_before:]
+        log.warning("OpenAI failed (%s: %s), Claude answers instead", e.__class__.__name__, str(e)[:120])
+        trace.note("MODEL", f"{MODEL} (fallback: OpenAI failed)")
+        return ask_claude(history)
+
+
+def _ollama_up():
+    try:
+        return requests.get(f"{OLLAMA_URL}/api/tags", timeout=2).ok
+    except requests.RequestException:
+        return False
+
+
+def _plain(history):
+    """Text-only copy of the conversation for the local model (tool details left out)."""
+    out = []
+    for m in history:
+        c = m["content"]
+        if not isinstance(c, str):
+            c = " ".join(getattr(b, "text", None) or (b.get("text", "") if isinstance(b, dict) else "") for b in c).strip()
+        if c:
+            out.append({"role": m["role"], "content": c})
+    return out
+
+
+def over_budget(history):
+    """Today's paid budget is used up: say so once, then use the free local model, or don't answer."""
+    log.warning("daily budget reached: $%.2f of $%.2f", budget.total(), budget.limit)
+    today = datetime.date.today().isoformat()
+    local = BUDGET_FALLBACK == "ollama" and _ollama_up()
+    if budget.warned_on != today:
+        budget.warned_on = today
+        say("Heads up, I've hit today's spending limit, so I'm switching to the free local model."
+            if local else "I've hit today's spending limit for the AI, so I can't answer until tomorrow.")
+        if not local:
+            finish_speaking()
+    elif not local:
+        say("I'm still over today's spending limit, so I can't answer that until tomorrow.")
+    if not local:
+        return
+    temp = _plain(history)
+    n = len(temp)
+    ask_ollama(temp)
+    for m in temp[n:]:  # keep what the local model said, as plain text, in the real history
+        if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip():
+            history.append({"role": "assistant", "content": m["content"]})

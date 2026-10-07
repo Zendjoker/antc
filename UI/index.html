@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2318181b'/%3E%3Crect x='9' y='12' width='3' height='8' rx='1.5' fill='white'/%3E%3Crect x='14.5' y='8' width='3' height='16' rx='1.5' fill='white'/%3E%3Crect x='20' y='11' width='3' height='10' rx='1.5' fill='white'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="offline">
+<div class="app">
+  <!-- ============ sidebar ============ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sb-head">
+      <div class="mark"><i></i><i></i><i></i></div>
+      <div class="sb-id">
+        <div class="sb-title">Jarvis</div>
+        <div class="sb-sub" id="sb-user">Personal assistant</div>
+      </div>
+    </div>
+
+    <button class="sb-search" id="open-palette" type="button">
+      <span data-icon="search"></span><span class="grow">Search or ask</span><kbd>Ctrl K</kbd>
+    </button>
+
+    <nav class="sb-nav">
+      <a href="#home" data-page="home"><span data-icon="home"></span>Home</a>
+      <a href="#chat" data-page="chat"><span data-icon="chat"></span>Chat</a>
+      <a href="#memory" data-page="memory"><span data-icon="memory"></span>Memory</a>
+      <a href="#activity" data-page="activity"><span data-icon="activity"></span>Activity</a>
+      <div class="sb-label">System</div>
+      <a href="#status" data-page="status"><span data-icon="cpu"></span>Status</a>
+      <a href="#connections" data-page="connections"><span data-icon="plug"></span>Connections</a>
+      <a href="#settings" data-page="settings"><span data-icon="settings"></span>Settings</a>
+    </nav>
+
+    <div class="sb-foot">
+      <div class="presence">
+        <div class="orb sm" data-state="offline"><span></span></div>
+        <div class="presence-text">
+          <div class="presence-state" data-bind="state">Offline</div>
+          <div class="presence-sub" data-bind="sub">Not running</div>
+        </div>
+      </div>
+      <label class="sb-toggle" title="Only the wake word gets an answer; nothing proactive">
+        <span data-icon="moon"></span><span class="grow">Quiet mode</span>
+        <span class="switch"><input type="checkbox" id="quiet-toggle"><span class="slider"></span></span>
+      </label>
+      <div class="spend">
+        <div class="spend-row"><span>Spend today</span><b id="spend-text">--</b></div>
+        <div class="meter"><i id="spend-fill"></i></div>
+      </div>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <!-- ============ main ============ -->
+  <div class="main">
+    <div class="mobile-bar">
+      <button class="icon-btn" id="menu-btn" type="button" aria-label="Menu"><span data-icon="menu"></span></button>
+      <div class="mark sm"><i></i><i></i><i></i></div><b>Jarvis</b>
+      <button class="icon-btn push" type="button" data-palette aria-label="Search"><span data-icon="search"></span></button>
+    </div>
+
+    <div class="alert ringing hidden" id="ring-banner">
+      <span data-icon="bell"></span><span class="grow" id="ring-text">Timer is ringing</span>
+      <button class="btn sm dark" id="ring-stop" type="button">Stop</button>
+    </div>
+    <div class="alert offline-alert" id="offline-banner">
+      <span data-icon="power"></span>
+      <span class="grow">Jarvis isn't running. Start it from the project folder with <code>python main.py</code></span>
+      <button class="btn sm" type="button" id="copy-start"><span data-icon="copy"></span>Copy</button>
+    </div>
+
+    <!-- Home -->
+    <section class="page" id="page-home">
+      <header class="page-head">
+        <div>
+          <h1 id="greeting">Hello</h1>
+          <p class="sub" id="home-sub"></p>
+        </div>
+        <div class="head-actions">
+          <button class="btn" type="button" id="undo-btn" disabled title="Undo the last change Jarvis made"><span data-icon="undo"></span>Undo</button>
+        </div>
+      </header>
+
+      <div class="hero">
+        <div class="orb lg" data-state="offline"><span></span></div>
+        <div class="hero-main">
+          <div class="hero-state"><b data-bind="state">Offline</b><span data-bind="sub"></span></div>
+          <form class="ask" id="home-ask" autocomplete="off">
+            <input id="home-input" placeholder="Ask Jarvis anything" maxlength="500">
+            <button type="submit" class="send" aria-label="Send"><span data-icon="arrowUp"></span></button>
+          </form>
+          <div class="suggest" id="home-suggest"></div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div class="card-head"><span data-icon="music"></span><h3>Now playing</h3></div>
+          <div id="media"></div>
+          <div class="volume" id="volume">
+            <button class="icon-btn" type="button" id="mute-btn" aria-label="Mute"><span data-icon="volume"></span></button>
+            <input type="range" min="0" max="100" step="1" id="volume-range" aria-label="Volume">
+            <span class="vol-num" id="volume-num">--</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span data-icon="timer"></span><h3>Timers & alarms</h3>
+            <button class="btn sm ghost push" type="button" id="new-timer-btn"><span data-icon="plus"></span>New</button></div>
+          <form class="new-timer hidden" id="new-timer" autocomplete="off">
+            <div class="presets" id="timer-presets"></div>
+            <div class="nt-row">
+              <input id="nt-min" type="number" min="1" max="1440" placeholder="Minutes">
+              <input id="nt-label" type="text" maxlength="40" placeholder="Label (optional)">
+              <button class="btn sm dark" type="submit">Start</button>
+            </div>
+          </form>
+          <div id="timers"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span data-icon="phone"></span><h3>Phone</h3><span class="tag push" id="phone-tag">Off</span></div>
+          <div class="kv" id="phone-kv"></div>
+          <button class="btn wide" type="button" id="call-btn" disabled><span data-icon="phone"></span>Call my phone</button>
+        </div>
+
+        <div class="card span2">
+          <div class="card-head"><span data-icon="activity"></span><h3>Recent activity</h3>
+            <a class="link push" href="#activity">View all</a></div>
+          <div class="timeline" id="activity-home"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span data-icon="pin"></span><h3>Around you</h3></div>
+          <div class="kv" id="env-kv"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chat -->
+    <section class="page page-chat" id="page-chat">
+      <div class="chat-scroll" id="chat-scroll"><div class="chat-col" id="feed"></div></div>
+      <div class="chat-dock">
+        <div class="chat-col">
+          <form class="composer" id="chat-form" autocomplete="off">
+            <textarea id="chat-input" rows="1" placeholder="Message Jarvis" maxlength="500"></textarea>
+            <button type="submit" class="send" id="chat-send" aria-label="Send"><span data-icon="arrowUp"></span></button>
+          </form>
+          <div class="composer-note">Jarvis also answers out loud in your room. <kbd>Enter</kbd> to send, <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Memory -->
+    <section class="page" id="page-memory">
+      <header class="page-head">
+        <div><h1>Memory</h1><p class="sub">What Jarvis knows about you. It's stored only on this PC, and you can remove anything.</p></div>
+        <div class="head-actions"><button class="btn" type="button" id="mem-refresh"><span data-icon="refresh"></span>Refresh</button></div>
+      </header>
+      <div class="mem-layout">
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head"><h2>About you</h2></div>
+            <div class="kv lg" id="mem-profile"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Recent conversations</h2></div>
+            <div id="mem-summaries"></div>
+          </section>
+        </div>
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-head"><h2>Preferences</h2><span class="count" id="pref-count"></span></div>
+            <p class="desc">Learned from what you tell Jarvis ("always put Spotify on my left monitor") and from your corrections over time.</p>
+            <div id="mem-prefs"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Things Jarvis remembers</h2><span class="count" id="fact-count"></span></div>
+            <div class="filter"><span data-icon="search"></span><input id="fact-filter" placeholder="Filter"></div>
+            <div id="mem-facts"></div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- Activity -->
+    <section class="page" id="page-activity">
+      <header class="page-head">
+        <div><h1>Activity</h1><p class="sub">What Jarvis has done since it started. Email and calendar details are never shown here.</p></div>
+        <div class="head-actions"><button class="btn" type="button" id="undo-btn-2" disabled><span data-icon="undo"></span>Undo last change</button></div>
+      </header>
+      <section class="panel"><div class="timeline lg" id="activity-full"></div></section>
+    </section>
+
+    <!-- Status -->
+    <section class="page" id="page-status">
+      <header class="page-head"><div><h1>Status</h1><p class="sub">How Jarvis is set up and how fast it's answering.</p></div></header>
+      <div id="status-cards" class="cards"></div>
+      <div class="two-col">
+        <section class="panel">
+          <div class="panel-head"><h2>Right now</h2></div>
+          <div class="kv lg" id="sys-kv"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Last response</h2></div>
+          <div id="timing"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Connections -->
+    <section class="page" id="page-connections">
+      <header class="page-head"><div><h1>Connections</h1>
+        <p class="sub">Accounts and services Jarvis can use. You sign in on the provider's own page: Jarvis never sees your
+          password, and its access keys are kept in Windows Credential Manager.</p></div></header>
+      <div id="conn-banner" class="banner hidden"></div>
+      <div id="providers"></div>
+      <div class="provider" id="phone-provider">
+        <div class="provider-head">
+          <div class="logo"><span data-icon="phone"></span></div>
+          <div class="name">Phone line<div class="meta">Twilio. Jarvis can call you while you drive, and you can call it.</div></div>
+          <span class="pill" id="phone-pill">Off</span>
+        </div>
+        <div class="meta" id="phone-detail"></div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="page" id="page-settings">
+      <header class="page-head"><div><h1>Settings</h1><p class="sub">Saved to <code>.env</code>. Restart Jarvis after saving for changes to take effect.</p></div></header>
+      <div id="banner" class="banner hidden"></div>
+      <div id="settings-sections"></div>
+      <div class="save-bar">
+        <span id="save-hint">No changes</span>
+        <button class="btn dark" id="save-btn" type="button" disabled>Save changes</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- command menu -->
+<div class="palette hidden" id="palette">
+  <div class="palette-box" role="dialog" aria-label="Command menu">
+    <div class="palette-input"><span data-icon="search"></span>
+      <input id="palette-input" placeholder="Ask Jarvis, or search actions and pages" autocomplete="off"><kbd>Esc</kbd></div>
+    <div class="palette-list" id="palette-list"></div>
+    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>Enter</kbd> to run</span></div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script src="app.js"></script>
+<script src="jarvis.js"></script>
+</body>
+</html>

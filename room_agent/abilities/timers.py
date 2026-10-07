@@ -1,0 +1,143 @@
+"""Timers, alarms and reminders (implementation: tools/timers.py)."""
+
+import re
+import time
+
+from room_agent import config
+from room_agent import runtime as rt
+from room_agent.abilities._kit import CONFIDENCE, FOLLOW_UP_S, NO_ARGS, params, tool
+from room_agent.actions.core import Group, Risk, register_claim, register_context, register_group, register_line
+
+
+def _live():
+    from room_agent.tools.timers import list_timers
+
+    return (not list_timers().startswith("OK: no timers") or bool(rt.ringing)
+            or bool(rt.last_ring and time.time() - rt.last_ring["at"] < FOLLOW_UP_S))
+
+
+register_group(Group(
+    "timers", re.compile(r"timer|alarm|remind|wake|snooze|countdown|ring|cancel|minute|second|hour|o'?clock|\d|tomorrow|"
+                         r"tonight|morning|later|stop it|turn it off", re.I), _live,
+    title="countdown timers", summary=f"{config.TIMER_MIN_S} second to {config.TIMER_MAX_S // 86400} days, no other limit; "
+                                      "rings until the user speaks",
+    rules=["- A timer can be any length from 1 second up. \"Set a timer for 5 seconds\" or \"10 seconds\" or \"remind me in 30 "
+           "seconds\" is just a countdown timer: call set_timer right away. Anything phrased as an alarm, reminder or wake-up "
+           "\"in N seconds/minutes/hours\" is also set_timer; set_alarm is only for a clock time like 7:30. A label is "
+           "optional, so never ask for one and never refuse. Never claim a minimum length or any limit the tool doesn't "
+           "state, even if earlier messages in this conversation said so (they were wrong).",
+           "- For a clock time (\"wake me at 7:30\", \"remind me at 5 to call mom\", \"every morning at 8\"), use set_alarm "
+           "with a 24-hour time, and daily=true if they say every day. Work out the time and date from the current time in "
+           "the runtime context. Those survive restarts.",
+           "- When you set a timer or alarm, give it a natural `message` to say when it rings, like a friend would (\"Hey, "
+           "your pasta's ready!\"). For wake-up calls, set a message like \"Hey, time to wake up!\". Every timer and alarm "
+           "keeps ringing until they say something, so when you confirm one, mention they can just say anything to stop "
+           "it. Use ring_once only if they ask for a single ping."]))
+register_line("alarms and reminders at a clock time", "optional date or every day; rings until the user speaks")
+register_line("snoozing an alarm", "a new timer with the same label and message")
+register_claim("timer", r"\btimer\b.{0,30}\b(is\s+)?(set|started|running|going|on|ticking)\b|\b(set|started)\b.{0,30}\btimer\b"
+                        r"|\btimer'?s\s+(set|on|running|going|ticking)\b|\b(cancel+ed|stopped|killed)\b.{0,30}\btimers?\b"
+                        r"|\bi'?ll (remind|ping|alert|buzz|wake) you\b|\bi will (remind|ping|alert|wake) you\b"
+                        r"|\b(alarm|reminder)(?:'s|\s+is)?\s+(?:all\s+)?(set|added|created|scheduled|saved)\b"
+                        r"|\b(set|scheduled)\b.{0,30}\b(reminder|alarm)\b")
+
+
+def _context(user_text):
+    from room_agent.tools.timers import list_timers
+
+    lines = ["- timers_and_alarms_now (live from code; this overrides anything said earlier in the conversation): "
+             + list_timers().removeprefix("OK: ") + ". A request to set one now is a NEW one: call the tool, even if "
+             "something similar was set before or is listed here; never say it's already set."]
+    if rt.last_ring and time.time() - rt.last_ring["at"] < 300:
+        r = rt.last_ring
+        how = "rang and was stopped when they spoke" if r.get("stopped") else "rang"
+        lines.append(f"- just_rang: the {r['kind']} '{r['label']}' ({r['message']!r}) {how}. It is FINISHED: not running, not "
+                     "counting down, nothing left to stop or cancel, so never offer to. "
+                     + ("Their message is a reaction to it: reply naturally and briefly, never <silent>. " if r.get("stopped") else "")
+                     + "If they ask to snooze it or be reminded again later, call set_timer for the time they say with the same "
+                     "label and message.")
+    return lines
+
+
+register_context(_context, order=30)
+
+
+# ---------------------------------------------------------------- checks and undo
+def _ids(args, before=None):
+    from room_agent.tools import timers
+
+    with timers._lock:
+        return {"ids": sorted(timers._items)}
+
+
+def _undo(args, before, after):
+    from room_agent.tools import timers
+
+    new = [i for i in after["ids"] if i not in before["ids"]]
+    if not new:
+        return "FAILED: couldn't tell which timer or alarm was just set, so nothing was cancelled."
+    labels = [timers.cancel_id(i) for i in new]
+    if not all(labels):
+        return "FAILED: it already rang or was cancelled, so there's nothing to undo."
+    return f"OK: cancelled the {', '.join(labels)} {'timer or alarm' if len(labels) == 1 else 'timers and alarms'} I just set."
+
+
+def _grew(args, before, after):
+    return len(after["ids"]) > len(before["ids"])
+
+
+def _set_timer(args):
+    from room_agent.tools.timers import set_timer
+
+    return set_timer(int(args["seconds"]), args.get("label", ""), args.get("message", ""), bool(args.get("ring_once")))
+
+
+def _set_alarm(args):
+    from room_agent.tools.timers import set_alarm
+
+    return set_alarm(args["time"], args.get("label", ""), args.get("message", ""), bool(args.get("ring_once")),
+                     bool(args.get("daily")), args.get("date", ""))
+
+
+def _list(args):
+    from room_agent.tools.timers import list_timers
+
+    return list_timers()
+
+
+def _cancel(args):
+    from room_agent.tools.timers import cancel_timer
+
+    return cancel_timer(args["label"])
+
+
+tool("set_timer", "Anything that should go off after a length of time from now, whatever they call it: a timer, an alarm, "
+     "a wake-up or a reminder (\"5 seconds\", \"alarm in 30 seconds\", \"wake me in 10 minutes\"). Any length from 1 second "
+     "up. Set it immediately, then confirm; don't ask for a label first. When it rings it says your `message`.",
+     params({"seconds": {"type": "integer", "minimum": config.TIMER_MIN_S, "maximum": config.TIMER_MAX_S,
+                         "description": "Whole seconds, at least 1. 5 seconds = 5, 2 minutes = 120."},
+             "label": {"type": "string", "description": "Optional: what it's for, e.g. 'pasta' or 'call mom'. Leave out if "
+                                                        "they didn't say."},
+             "message": {"type": "string", "description": "What you say out loud when it rings, in your own casual words, "
+                                                          "e.g. 'Hey, the pasta's ready!' or 'Hey, time to wake up!'"},
+             "ring_once": {"type": "boolean", "description": "Only if they want a single ping. By default it keeps ringing "
+                                                             "every few seconds until they say something."}}, ["seconds"]),
+     _set_timer, group="timers", claim="timer", event="timer.set", observe=_ids, verify=_grew, undo=_undo)
+tool("set_alarm", "Set an alarm or reminder for a clock time, e.g. 'wake me at 7:30' or 'remind me at 5pm to call mom'. For a "
+     "length of time from now ('alarm in 10 seconds'), use set_timer instead. Rings at the next time it's that time, unless "
+     "a date is given. Survives restarts. When it rings it says your `message`. Use the current time in the runtime context "
+     "to get the time and date right.",
+     params({"time": {"type": "string", "description": "24-hour HH:MM, e.g. '07:30' or '17:00'"},
+             "date": {"type": "string", "description": "Only if they name a day other than the next one: YYYY-MM-DD"},
+             "label": {"type": "string", "description": "Optional: what it's for, e.g. 'wake up' or 'call mom'"},
+             "message": {"type": "string", "description": "What you say out loud when it rings, in your own casual words"},
+             "ring_once": {"type": "boolean", "description": "Only if they want a single ping. By default it keeps ringing "
+                                                             "until they say something"},
+             "daily": {"type": "boolean", "description": "True if they want it every day"}}, ["time"]),
+     _set_alarm, group="timers", claim="timer", event="alarm.set", observe=_ids, verify=_grew, undo=_undo)
+tool("list_timers", "List running timers and set alarms with time remaining.", NO_ARGS, _list, group="timers",
+     changes_state=False, claim="timer")
+tool("cancel_timer", "Cancel a running timer or an alarm by its label (or 'all').",
+     params({"label": {"type": "string", "description": "The label of the timer or alarm, or 'all'"},
+             "confidence": CONFIDENCE}, ["label"]),
+     _cancel, group="timers", claim="timer", event="timer.cancelled", risk=Risk.CONFIRM, min_confidence=0.7)

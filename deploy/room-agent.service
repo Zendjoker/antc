@@ -1,0 +1,18 @@
+# Installed by install-service.sh (it fills in USER and DIR)
+[Unit]
+Description=Room Agent (Claude voice assistant)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__DIR__
+Environment=PYTHONUNBUFFERED=1
+# PipeWire/PulseAudio session of that user, so the USB speakerphone is reachable
+Environment=XDG_RUNTIME_DIR=/run/user/__UID__
+ExecStart=__DIR__/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

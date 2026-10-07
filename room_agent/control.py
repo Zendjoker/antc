@@ -1,0 +1,355 @@
+"""Jarvis's live link for the dashboard (UI/server.py): what it's doing right now, typed commands, and the dashboard's
+buttons. Local only (127.0.0.1:CONTROL_PORT); only the dashboard's own page may change anything.
+
+    GET  /live       state, the conversation, timers, where you are, what's playing, volume, activity, spend, timing
+    GET  /knowledge  what Jarvis remembers about you (memory) and how you like things done (learned preferences)
+    POST /command    {"text": "..."} -> Jarvis answers (out loud in the room, like a spoken request) -> {"reply": "..."}
+    POST /action     {"do": "...", ...} -> a button: media, volume, timers, undo, quiet mode, forget, call me...
+
+Buttons that change something on the PC go through the executor (actions/executor.py), exactly like a spoken request:
+the same checks, the same verification, and they can be undone the same way.
+"""
+
+import asyncio
+import logging
+import threading
+import time
+
+from aiohttp import web
+
+from room_agent import config
+from room_agent import runtime as rt
+
+log = logging.getLogger("room-agent")
+_history = []  # typed commands are one ongoing conversation of their own (the transcript shows everything)
+_media = {"at": 0.0, "text": None}
+_volume = {"at": 0.0, "level": None, "muted": False}
+_last_timing = {}
+_activity = []  # [{"at", "text", "kind"}], newest last: what Jarvis did (from the event bus; no private details)
+
+# event -> (kind, how it reads). Email and calendar events never show their content here.
+_SAY = {
+    "app.opened": ("app", "Opened {app}"), "app.closed": ("app", "Closed {app}"), "app.focused": ("app", "Switched to {app}"),
+    "window.moved": ("window", "Moved {app} to another monitor"), "window.minimized": ("window", "Minimized {app}"),
+    "window.maximized": ("window", "Maximized {app}"), "window.restored": ("window", "Restored {app}"),
+    "volume.changed": ("volume", "Changed the volume"), "volume.muted": ("volume", "Muted the sound"),
+    "volume.unmuted": ("volume", "Unmuted the sound"), "media.changed": ("media", "Changed playback"),
+    "timer.set": ("timer", "Set a timer"), "alarm.set": ("timer", "Set an alarm"),
+    "timer.cancelled": ("timer", "Cancelled a timer"), "timer.finished": ("timer", "Timer finished: {label}"),
+    "alarm.ringing": ("timer", "Alarm went off: {label}"), "email.drafted": ("mail", "Drafted an email"),
+    "email.sent": ("mail", "Sent an email"), "calendar.created": ("calendar", "Added a calendar event"),
+    "calendar.updated": ("calendar", "Changed a calendar event"), "calendar.deleted": ("calendar", "Deleted a calendar event"),
+    "driving.started": ("phone", "You started driving"), "driving.stopped": ("phone", "You stopped driving"),
+}
+
+
+def _on_event(e):
+    kind, text = _SAY.get(e["name"], (None, None))
+    if not text:
+        return
+    label = e.get("label") or (e.get("args") or {}).get("label") or ""
+    text = text.format(app=e.get("app") or "an app", label=label or "unnamed")
+    if e["name"] in ("timer.set", "alarm.set") and label:
+        text += f": {label}"
+    _activity.append({"at": e["at"], "text": text, "kind": kind})
+    del _activity[:-40]
+
+
+# ---------------------------------------------------------------- reading
+def _now_playing():
+    """What's playing (checked at most every 4 s: it's a Windows call)."""
+    if time.time() - _media["at"] > 4:
+        _media["at"] = time.time()
+        try:
+            from room_agent.tools import media
+
+            snap = media._winrt(media._snapshot)
+            _media["text"] = (None if snap is None else
+                              {"title": snap["title"], "artist": snap["artist"], "app": snap["app"],
+                               "playing": snap["status"] == media.PLAYING})
+        except Exception:
+            _media["text"] = None
+    return _media["text"]
+
+
+def _read_volume(force=False):
+    if force or time.time() - _volume["at"] > 3:
+        _volume["at"] = time.time()
+        try:
+            from room_agent.tools import media
+
+            ev = media._endpoint()
+            _volume.update(level=media._level(ev), muted=bool(ev.GetMute()))
+        except Exception:
+            _volume.update(level=None)
+    return {"level": _volume["level"], "muted": _volume["muted"]}
+
+
+def _timers():
+    from room_agent.tools import timers
+
+    now = time.time()
+    with timers._lock:
+        items = sorted(timers._items.items(), key=lambda kv: kv[1]["due"])
+    return [{"id": tid, "label": i["label"], "kind": i["kind"], "in_s": max(0, int(i["due"] - now)),
+             "total_s": int(i["due"] - i["set_at"]) if i.get("set_at") else None, "daily": bool(i.get("daily")),
+             "at": time.strftime("%I:%M %p", time.localtime(i["due"])).lstrip("0")} for tid, i in items]
+
+
+def _phone():
+    from room_agent.phone import state as phone
+
+    missing = []
+    try:
+        from room_agent.phone.server import ready
+
+        missing = ready()
+    except Exception:
+        missing = ["phone"]
+    number = config.MY_PHONE
+    return {"mode": bool(config.PHONE_MODE), "ready": bool(config.PHONE_MODE) and not missing,
+            "driving": phone.is_driving(), "driving_source": (phone.driving or {}).get("source"),
+            "in_call": bool(phone.in_call), "number": f"••• {number[-4:]}" if number else None}
+
+
+def _undo_hint():
+    from room_agent.actions.context import env
+
+    r = env.undoable()
+    return r.undo_hint.replace("_", " ") if r else None
+
+
+def snapshot():
+    from room_agent.llm.budget import budget
+    from room_agent.tools import location
+
+    if rt.turn.timing:
+        _last_timing.update(rt.turn.timing)
+    loc = location.locate() if location.enabled() else None
+    google = "not set up"
+    try:
+        from room_agent.integrations import provider
+
+        g = provider("google")
+        google = {"not_configured": "not set up", "disconnected": "not connected", "expired": "needs reconnecting",
+                  "connected": f"connected ({g.active()})"}[g.connection_status()]
+    except Exception:
+        pass
+    ringing, phone = rt.ringing, _phone()
+    return {
+        "online": True,
+        "state": {"name": rt.state.state.name.lower(), "label": rt.state.state.value},
+        "conversation": [{"role": m["role"], "text": m["text"], "time": m.get("time", "")} for m in list(rt.recent)[-40:]],
+        "timers": _timers(),
+        "ringing": {"label": ringing["label"], "kind": ringing["kind"]} if ringing else None,
+        "location": location.describe(loc) if loc else None,
+        "now_playing": _now_playing(),
+        "volume": _read_volume(),
+        "app": (rt.last_active_app or {}).get("name"),
+        "phone": phone, "driving": phone["driving"], "in_call": phone["in_call"],
+        "activity": list(reversed(_activity[-15:])),
+        "undo": _undo_hint(),
+        "timing": dict(_last_timing),
+        "spend": {"today": round(budget.total(), 4), "limit": config.DAILY_BUDGET_USD},
+        "brain": config.OPENAI_MODEL if config.LLM_DEFAULT == "openai" else config.MODEL,
+        "voice": config.TTS_PROVIDER, "hearing": config.STT_PROVIDER, "wake_word": config.WAKE_WORD,
+        "user": config.USER_NAME,
+        "connections": {"google": google, "phone": "on" if config.PHONE_MODE else "off"},
+    }
+
+
+def knowledge():
+    """What Jarvis knows about you: facts (memory) and learned preferences, each with where it came from."""
+    out = {"profile": [], "facts": [], "preferences": [], "summaries": []}
+    try:
+        snap = rt.memory.snapshot()
+        out["profile"] = [{"key": k, "label": k.replace("_", " ").capitalize(), "value": v} for k, v in snap["profile"].items()]
+        out["facts"] = [{"id": f["id"], "text": f["fact"], "saved": f["saved"], "category": f["category"]}
+                        for f in reversed(snap["facts"])]
+        out["summaries"] = snap["summaries"][-6:][::-1]
+    except Exception as e:
+        log.debug("dashboard: memory unavailable: %s", e)
+    try:
+        from room_agent import learning
+        from room_agent.learning import model as um
+
+        m = learning.user_model()
+        sure = {p["key"] for p in m.all()}
+        for p in m.all(include_tentative=True):
+            kind, subject = um.split_key(p["key"])
+            out["preferences"].append({
+                "key": p["key"], "kind": kind.replace("_", " "), "text": um.KINDS[kind]["say"](subject, p["value"]),
+                "source": p["source"], "confidence": round(p["confidence"], 2), "evidence": p["evidence"],
+                "auto": bool(p["auto"]), "applied": p["key"] in sure, "because": p.get("because") or ""})
+    except Exception as e:
+        log.debug("dashboard: learning unavailable: %s", e)
+    return out
+
+
+# ---------------------------------------------------------------- doing
+def run_command(text):
+    """A typed command: answered like a spoken one (out loud in the room). -> the reply text."""
+    from room_agent.conversation.history import reply_text
+    from room_agent.conversation.turn import take_turn
+
+    mark = len(_history)
+    take_turn(_history, text, final=True)
+    return reply_text(_history[mark + 1:]) if len(_history) > mark else ""
+
+
+# button -> (capability, what the user is asking for, in words: the executor reads it like a spoken request)
+_CAPS = {
+    "play_pause": ("play_pause", "pause or play the music"), "next": ("next_track", "next song"),
+    "previous": ("previous_track", "previous song"), "mute": ("mute", "mute the sound"), "unmute": ("unmute", "unmute"),
+    "volume": ("set_volume", "set the volume to {percent} percent"), "undo": ("undo_last_action", "undo that"),
+    "timer": ("set_timer", "set a timer for {seconds} seconds"), "routine": ("run_routine", "{trigger}"),
+}
+
+
+def _execute(name, args, words):
+    from room_agent.actions import executor
+
+    with rt.brain:  # one thing at a time, like a spoken turn
+        rt.new_turn(words)
+        result = executor.execute(name, args)
+    msg = result.message.split(":", 1)[-1].strip()
+    return {"ok": result.success, "message": msg}
+
+
+def do(body):
+    """One dashboard button. -> {"ok", "message"}."""
+    what = str(body.get("do") or "")
+    if what in _CAPS:
+        name, words = _CAPS[what]
+        args = {k: v for k, v in body.items() if k != "do"}
+        if what == "volume":
+            args = {"percent": max(0, min(100, int(body.get("percent", 0))))}
+        if what == "timer":
+            args = {"seconds": max(1, int(body.get("seconds", 60))), "label": str(body.get("label") or "")[:60],
+                    "message": f"Hey, your {body.get('label') or 'timer'} is done!"}
+        out = _execute(name, args, words.format(**args))
+        if what == "undo" and out["ok"]:
+            _activity.append({"at": time.time(), "text": "Undid the last change", "kind": "undo"})
+        if what in ("volume", "mute", "unmute"):
+            _read_volume(force=True)
+        if what in ("play_pause", "next", "previous"):
+            _media["at"] = 0
+        return out
+    if what == "cancel_timer":
+        from room_agent.tools import timers
+
+        label = timers.cancel_id(int(body.get("id")))
+        if label is None:
+            return {"ok": False, "message": "That one isn't set anymore."}
+        _on_event({"name": "timer.cancelled", "at": time.time()})
+        return {"ok": True, "message": f"Cancelled {label}."}
+    if what == "stop_ringing":
+        from room_agent.tools import timers
+
+        return {"ok": timers.acknowledge_ring(), "message": "Stopped."}
+    if what == "quiet":
+        from room_agent.conversation.states import State
+
+        on = bool(body.get("on"))
+        if rt.state.awake:
+            return {"ok": False, "message": "Jarvis is in a conversation right now; try again in a moment."}
+        rt.state.go(State.QUIET if on else State.WAKE_WORD_ONLY, "from the dashboard")
+        return {"ok": True, "message": "Quiet mode is on." if on else "Quiet mode is off."}
+    if what == "forget_fact":
+        n = rt.memory.remove_ids([int(body.get("id"))])
+        rt.memory.generation += 1
+        return {"ok": bool(n), "message": "Forgotten." if n else "Already gone."}
+    if what in ("forget_preference", "auto_preference"):
+        from room_agent import learning
+
+        m = learning.user_model()
+        key = str(body.get("key") or "")
+        if not m.store.preference(m.user, key):
+            return {"ok": False, "message": "That preference is already gone."}
+        if what == "forget_preference":
+            m.forget(key)
+            return {"ok": True, "message": "Forgotten, along with what it was learned from."}
+        m.set_auto(key, bool(body.get("on")))
+        return {"ok": True, "message": "Saved."}
+    if what == "call_me":
+        p = _phone()
+        if not p["ready"]:
+            return {"ok": False, "message": "The phone line isn't set up. See phone.md."}
+        if p["in_call"]:
+            return {"ok": False, "message": "You're already on a call with Jarvis."}
+        from room_agent.phone.server import place_call
+
+        place_call("dashboard", "Hey, it's Jarvis. You asked me to call from the dashboard. What's up?")
+        return {"ok": True, "message": "Calling your phone now."}
+    return {"ok": False, "message": "Unknown action."}
+
+
+# ---------------------------------------------------------------- the link
+def _allowed(request):
+    origin = request.headers.get("Origin", "")
+    return request.headers.get("X-Jarvis") == "1" and (not origin or origin.startswith(("http://127.0.0.1:", "http://localhost:")))
+
+
+async def live(request):
+    return web.json_response(await asyncio.get_running_loop().run_in_executor(None, snapshot))
+
+
+async def knowledge_view(request):
+    return web.json_response(await asyncio.get_running_loop().run_in_executor(None, knowledge))
+
+
+async def command(request):
+    if not _allowed(request):
+        return web.json_response({"error": "refused"}, status=403)
+    try:
+        text = str((await request.json()).get("text", "")).strip()[:500]
+    except ValueError:
+        text = ""
+    if not text:
+        return web.json_response({"error": "say something"}, status=400)
+    log.info("typed: %s", text)
+    reply = await asyncio.get_running_loop().run_in_executor(None, run_command, text)
+    return web.json_response({"reply": reply})
+
+
+async def action(request):
+    if not _allowed(request):
+        return web.json_response({"error": "refused"}, status=403)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    log.info("dashboard: %s", body.get("do"))
+    try:
+        out = await asyncio.get_running_loop().run_in_executor(None, do, body)
+    except (TypeError, ValueError):
+        out = {"ok": False, "message": "That didn't look right."}
+    except Exception as e:
+        log.warning("dashboard action %s failed: %s", body.get("do"), e)
+        out = {"ok": False, "message": f"That didn't work ({e.__class__.__name__})."}
+    return web.json_response(out)
+
+
+def start():
+    from room_agent.actions.events import events
+
+    events.on("*", _on_event)
+
+    def run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        app = web.Application()
+        app.add_routes([web.get("/live", live), web.get("/knowledge", knowledge_view),
+                        web.post("/command", command), web.post("/action", action)])
+        runner = web.AppRunner(app, access_log=None)
+        loop.run_until_complete(runner.setup())
+        try:
+            loop.run_until_complete(web.TCPSite(runner, "127.0.0.1", config.CONTROL_PORT).start())
+        except OSError as e:
+            log.warning("dashboard link couldn't start on port %d (%s)", config.CONTROL_PORT, e)
+            return
+        loop.run_forever()
+
+    threading.Thread(target=run, daemon=True, name="control").start()
