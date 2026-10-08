@@ -199,6 +199,18 @@ def api_knowledge():
         return jsonify(error="Jarvis isn't running. Start it with: python main.py"), 503
 
 
+@app.get("/api/missions")
+def api_missions():
+    """One mission in detail (steps, leads with evidence, demo sites, drafts, approvals), from the running Jarvis."""
+    import requests
+
+    try:
+        r = requests.get(f"{JARVIS}/missions", params={"id": request.args.get("id", "")[:40]}, timeout=6)
+        return jsonify(r.json()), r.status_code
+    except Exception:
+        return jsonify(error="Jarvis isn't running. Start it with: python main.py"), 503
+
+
 @app.post("/api/action")
 def api_action():
     """A dashboard button (media, volume, timers, undo, quiet mode, forget, call me): run by Jarvis."""

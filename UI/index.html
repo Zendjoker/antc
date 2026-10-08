@@ -30,6 +30,7 @@
       <a href="#chat" data-page="chat"><span data-icon="chat"></span>Chat</a>
       <a href="#memory" data-page="memory"><span data-icon="memory"></span>Memory</a>
       <a href="#activity" data-page="activity"><span data-icon="activity"></span>Activity</a>
+      <a href="#missions" data-page="missions"><span data-icon="route"></span>Missions</a>
       <div class="sb-label">System</div>
       <a href="#status" data-page="status"><span data-icon="cpu"></span>Status</a>
       <a href="#connections" data-page="connections"><span data-icon="plug"></span>Connections</a>
@@ -216,6 +217,28 @@
         <div class="head-actions"><button class="btn" type="button" id="undo-btn-2" disabled><span data-icon="undo"></span>Undo last change</button></div>
       </header>
       <section class="panel"><div class="timeline lg" id="activity-full"></div></section>
+    </section>
+
+    <!-- Missions -->
+    <section class="page" id="page-missions">
+      <header class="page-head">
+        <div><h1>Missions</h1><p class="sub">Long jobs Jarvis runs in the background: finding businesses, checking their websites, building demo sites and outreach drafts. Nothing is sent or published without your approval.</p></div>
+        <div class="head-actions"><select class="mission-pick" id="mission-pick" aria-label="Mission"></select></div>
+      </header>
+      <div id="mission-empty"></div>
+      <div class="mission-body" id="mission-body" hidden>
+        <section class="panel mission-summary" id="mission-summary"></section>
+        <div class="mission-cols">
+          <section class="panel"><div class="panel-head"><h2>Leads</h2><span class="tag plain push" id="mission-leads-tag"></span></div><div id="mission-leads"></div></section>
+          <section class="panel"><div class="panel-head"><h2>Waiting for your approval</h2></div><div id="mission-approvals"></div>
+            <div class="panel-head mt"><h2>Demo sites</h2></div><div id="mission-projects"></div>
+            <div class="panel-head mt"><h2>Outreach drafts</h2></div><div id="mission-drafts"></div></section>
+        </div>
+        <div class="mission-cols">
+          <section class="panel"><div class="panel-head"><h2>Steps</h2><span class="tag plain push" id="mission-steps-tag"></span></div><div id="mission-steps"></div></section>
+          <section class="panel"><div class="panel-head"><h2>Log</h2></div><div class="timeline lg" id="mission-events"></div></section>
+        </div>
+      </div>
     </section>
 
     <!-- Status -->

@@ -86,6 +86,14 @@ def stop_everything(via="voice"):
             done.append(f"{len(running)} running action{'s' if len(running) != 1 else ''}")
     except Exception:
         pass
+    try:
+        from room_agent.missions import engine
+
+        paused = engine.pause_all("emergency stop")
+        if paused:
+            done.append(f"{paused} background mission{'s' if paused != 1 else ''} (paused, resumable)")
+    except Exception:
+        pass
     from room_agent import audit
 
     audit.event("emergency_stop", via=via, stopped=done)

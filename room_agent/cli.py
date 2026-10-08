@@ -149,6 +149,12 @@ def main():
     from room_agent.actions import tasks
 
     tasks.load()  # (multi-step tasks cut off by the last shutdown: their running step is UNKNOWN, resumable on a yes)
+    try:
+        from room_agent.missions import business, engine  # noqa: F401 (business registers its workflow)
+
+        engine.load()  # (background missions cut off by the last shutdown come back paused: "resume the mission")
+    except Exception as e:  # (missions are optional: never block the voice loop)
+        log.warning("missions not loaded: %s", e)
     if config.PHONE_MODE:
         from room_agent.phone import server
 

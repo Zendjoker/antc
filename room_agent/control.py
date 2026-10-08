@@ -11,6 +11,7 @@ the same checks, the same verification, and they can be undone the same way.
 """
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -170,6 +171,89 @@ def _tasks():
         return []
 
 
+def _missions():
+    """The latest missions with their progress (from missions.db), for the Missions page."""
+    try:
+        from room_agent.missions import business, engine  # noqa: F401 (registers the workflow)
+        from room_agent.missions.store import store
+
+        return [engine.progress(m["id"]) for m in store().missions(6)]
+    except Exception as e:
+        log.debug("dashboard: missions unavailable: %s", e)
+        return []
+
+
+def mission_detail(mid):
+    """Everything about one mission: steps, leads (with evidence), demo sites, drafts, approvals, events."""
+    from room_agent.missions import business, engine, preview  # noqa: F401
+    from room_agent.missions.store import store
+
+    s = store()
+    m = s.mission(mid)
+    if m is None:
+        return None
+    keep = ("id", "name", "category", "address", "phone", "email", "website", "website_status", "score", "level",
+            "reasons", "confidence", "missing", "status", "contact_status", "sources")
+    leads = []
+    for x in s.leads(mission_id=mid, limit=300):
+        row = {k: x.get(k) for k in keep}
+        row["evidence"] = ((x.get("analysis") or {}).get("evidence") or [])[:4]
+        leads.append(row)
+    projects = []
+    for p in s.projects(mid):
+        lead = s.lead(p["lead_id"]) or {}
+        try:
+            url = preview.url_for(p["path"])
+        except ValueError:
+            url = ""
+        projects.append({"id": p["id"], "lead": lead.get("name", ""), "path": p["path"], "preview": url,
+                         "status": p["status"], "history": (p.get("history") or [])[-5:]})
+    return {"mission": engine.progress(mid), "params": m["params"],
+            "steps": [{k: st[k] for k in ("key", "kind", "title", "state", "attempts", "evidence", "error", "cost_usd")}
+                      for st in s.steps(mid)],
+            "leads": leads, "projects": projects,
+            "outreach": [{k: o[k] for k in ("id", "lead_id", "kind", "recipient", "subject", "body", "status", "problems")}
+                         for o in s.outreach(mid)],
+            "approvals": [{k: a[k] for k in ("id", "lead_id", "action", "summary", "status", "result")}
+                          for a in s.approvals(mid)],
+            "events": [{k: e[k] for k in ("at", "level", "text")} for e in s.events(mid, 60)]}
+
+
+def _mission_action(what, body):
+    from room_agent.missions import business, engine, outreach, preview
+    from room_agent.missions.store import store
+
+    s = store()
+    mid = str(body.get("id") or "")
+    if what == "mission_pause":
+        return {"ok": engine.pause(mid, "paused from the dashboard"), "message": "Paused."}
+    if what == "mission_resume":
+        ok = engine.resume(mid, float(body.get("extra_budget_usd") or 0))
+        return {"ok": ok, "message": "Resumed." if ok else "Not resumed (budget used up? raise it first)."}
+    if what == "mission_stop":
+        return {"ok": engine.stop(mid, "stopped from the dashboard"), "message": "Stopped; the work so far is kept."}
+    if what == "mission_demos":
+        picked = business.build_demos(mid, int(body.get("count") or 3))
+        return {"ok": bool(picked), "message": ("Queued: " + ", ".join(x["name"] for x in picked)) if picked
+                else "Nothing to build (no qualifying business without a demo)."}
+    if what == "mission_preview":
+        p = next((x for x in s.projects(mid) if x["id"] == int(body.get("project_id") or 0)), None)
+        if p is None or not preview.start():
+            return {"ok": False, "message": "That preview isn't available."}
+        return {"ok": True, "message": "Preview ready.", "url": preview.url_for(p["path"])}
+    if what in ("approval_approve", "approval_reject"):
+        a = s.approval(int(body.get("approval_id") or 0))
+        if a is None or a["status"] != "pending":
+            return {"ok": False, "message": "That item isn't waiting any more."}
+        if what == "approval_reject":
+            s.decide_approval(a["id"], "rejected", "dashboard")
+            return {"ok": True, "message": "Rejected; nothing was done."}
+        ok, result = outreach.execute_approval(a)
+        s.decide_approval(a["id"], "done" if ok else "failed", "dashboard", result)
+        return {"ok": ok, "message": result}
+    return {"ok": False, "message": "Unknown action."}
+
+
 def _browser():
     try:
         from room_agent.computer.browsers import KNOWN, host
@@ -224,6 +308,7 @@ def snapshot():
         "research": _research(),
         "lists": _lists(),
         "tasks": _tasks(),
+        "missions": _missions(),
         "browser": _browser(),
     }
 
@@ -346,6 +431,8 @@ def do(body):
             return {"ok": True, "message": "Forgotten, along with what it was learned from."}
         m.set_auto(key, bool(body.get("on")))
         return {"ok": True, "message": "Saved."}
+    if what.startswith(("mission_", "approval_")):
+        return _mission_action(what, body)
     if what == "emergency_stop":
         from room_agent import emergency
 
@@ -396,6 +483,13 @@ async def knowledge_view(request):
     return web.json_response(await asyncio.get_running_loop().run_in_executor(None, knowledge))
 
 
+async def mission_view(request):
+    mid = request.query.get("id", "")
+    out = await asyncio.get_running_loop().run_in_executor(None, mission_detail, mid)
+    return web.json_response(out if out is not None else {"error": "no such mission"}, status=200 if out else 404,
+                             dumps=lambda o: json.dumps(o, default=str))
+
+
 async def command(request):
     if not _allowed(request):
         return web.json_response({"error": "refused"}, status=403)
@@ -439,7 +533,7 @@ def start():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         app = web.Application(middlewares=[_only_local])
-        app.add_routes([web.get("/live", live), web.get("/knowledge", knowledge_view),
+        app.add_routes([web.get("/live", live), web.get("/knowledge", knowledge_view), web.get("/missions", mission_view),
                         web.post("/command", command), web.post("/action", action)])
         runner = web.AppRunner(app, access_log=None)
         loop.run_until_complete(runner.setup())

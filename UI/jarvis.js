@@ -103,7 +103,7 @@
   window.toast = toast;
 
   // ---------------------------------------------------------------- navigation
-  const PAGES = ["home", "chat", "memory", "activity", "status", "connections", "settings"];
+  const PAGES = ["home", "chat", "memory", "activity", "missions", "status", "connections", "settings"];
   function show(page) {
     if (!PAGES.includes(page)) page = "home";
     document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === `page-${page}`));
@@ -114,6 +114,7 @@
     if (page === "memory") loadKnowledge();
     if (page === "connections") loadConnections();
     if (page === "status") loadStatus();
+    if (page === "missions") loadMission();
     if (page === "chat") { scrollFeed(true); setTimeout(() => $("#chat-input").focus(), 50); }
     if (location.hash.slice(1) !== page) history.replaceState(null, "", `#${page}`);
   }
@@ -158,7 +159,7 @@
 
   function render() {
     document.body.classList.toggle("offline", !live.online);
-    renderPresence(); renderHome(); renderFeed(); renderActivity(); renderSystem(); renderPhoneProvider();
+    renderPresence(); renderHome(); renderFeed(); renderActivity(); renderSystem(); renderPhoneProvider(); renderMissions();
   }
 
   function stateKey() {
@@ -351,6 +352,186 @@
       t.steps.forEach((s, i) => steps.append(el("span", `step ${TASK_TONE[s.state] || ""}`, `${i + 1}. ${s.tool} ${s.state.toLowerCase()}`)));
       row.append(head, steps);
       box.append(row);
+    }
+  }
+
+  // ---- missions (from missions.db, through the running Jarvis): progress, leads with evidence, demos, drafts, approvals
+  const M_TONE = { running: "blue", completed: "green", finished_with_problems: "amber", paused: "amber", paused_budget: "amber",
+                   interrupted: "amber", cancelled: "", planned: "blue" };
+  const S_TONE = { completed: "green", skipped: "", running: "blue", pending: "", failed: "red", blocked: "red", cancelled: "" };
+  const W_TONE = { none_found: "amber", social_only: "amber", directory_only: "amber", broken: "red", poor: "amber", ok: "green" };
+  let missionId = "", missionAt = 0, missionSig = "";
+  function renderMissions() {
+    const items = (live.online && live.missions) || [], pick = $("#mission-pick"), empty = $("#mission-empty");
+    if (!pick) return;
+    const sig = items.map(m => `${m.id}:${m.state}:${m.steps_done}:${m.spent_usd}:${m.approvals_pending}`).join("|");
+    if (pick.dataset.sig !== sig) {
+      pick.dataset.sig = sig;
+      pick.innerHTML = "";
+      for (const m of items) { const o = el("option", null, `${m.title} (${m.state.replace(/_/g, " ")})`); o.value = m.id; pick.append(o); }
+      if (!items.some(m => m.id === missionId)) missionId = items.length ? items[0].id : "";
+      pick.value = missionId;
+    }
+    empty.innerHTML = "";
+    $("#mission-body").hidden = !items.length;
+    pick.hidden = !items.length;
+    if (!items.length) {
+      empty.append(emptyState("route", "No missions yet", live.online ? 'Say "find 20 restaurants in San Francisco without a good website and build demos for the best"' : "Waiting for Jarvis"));
+      return;
+    }
+    const cur = items.find(m => m.id === missionId);
+    if ($("#page-missions").classList.contains("active") && cur &&
+        (sig !== missionSig || (cur.state === "running" && Date.now() - missionAt > 4000))) loadMission();
+    missionSig = sig;
+  }
+  $("#mission-pick").addEventListener("change", e => { missionId = e.target.value; loadMission(); });
+
+  async function loadMission() {
+    if (!missionId) { const items = (live.online && live.missions) || []; missionId = items.length ? items[0].id : ""; }
+    if (!missionId) return;
+    missionAt = Date.now();
+    let d;
+    try {
+      const r = await fetch(`/api/missions?id=${encodeURIComponent(missionId)}`, { cache: "no-store" });
+      d = await r.json();
+      if (!r.ok || d.error) return;
+    } catch { return; }
+    drawMission(d);
+  }
+
+  function mBtn(label, icon, body, cls) {
+    const b = el("button", `btn sm ${cls || ""}`);
+    b.type = "button";
+    if (icon) b.append(ico(icon));
+    b.append(document.createTextNode(label));
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      const r = await act({ id: missionId, ...body });
+      if (r && r.url && /^http:\/\/127\.0\.0\.1:\d+\//.test(r.url)) window.open(r.url, "_blank", "noopener");
+      b.disabled = false;
+      loadMission();
+    });
+    return b;
+  }
+
+  function list(items, cls) {
+    const ul = el("ul", `m-list ${cls || ""}`);
+    items.forEach(t => ul.append(el("li", null, t)));
+    return ul;
+  }
+
+  function drawMission(d) {
+    const m = d.mission, sum = $("#mission-summary");
+    sum.innerHTML = "";
+    const head = el("div", "panel-head");
+    head.append(el("h2", null, m.title), tag(m.state.replace(/_/g, " "), M_TONE[m.state]));
+    const pct = m.steps_total ? Math.round(100 * (m.steps_done + m.steps_failed) / m.steps_total) : 0;
+    const bar = el("div", "m-bar"), fill = el("div", "m-fill");
+    fill.style.width = `${pct}%`;
+    bar.append(fill);
+    const stats = el("div", "m-stats");
+    const stat = (k, v) => { const s = el("div", "m-stat"); s.append(el("b", null, String(v)), el("span", null, k)); stats.append(s); };
+    stat("found", m.leads_found ?? 0); stat("checked", m.leads_researched ?? 0);
+    stat(`qualify (aim ${m.target ?? "?"})`, m.leads_qualifying ?? 0); stat("demo sites", m.demos ?? 0); stat("drafts", m.drafts ?? 0);
+    stat("spent", `$${(m.spent_usd || 0).toFixed(2)} of $${(m.budget_usd || 0).toFixed(2)}`);
+    stat("tokens", `${m.tokens_in || 0} in, ${m.tokens_out || 0} out`); stat("requests", m.requests || 0);
+    const acts = el("div", "m-actions");
+    if (["running", "planned"].includes(m.state)) acts.append(mBtn("Pause", "pause", { do: "mission_pause" }));
+    if (["paused", "paused_budget", "interrupted"].includes(m.state)) {
+      acts.append(mBtn("Resume", "play", { do: "mission_resume" }));
+      if (m.state === "paused_budget") acts.append(mBtn("Add $1 and resume", "dollar", { do: "mission_resume", extra_budget_usd: 1 }));
+    }
+    if (!["completed", "cancelled", "finished_with_problems"].includes(m.state)) acts.append(mBtn("Stop", "x", { do: "mission_stop" }, "danger"));
+    if ((m.leads_qualifying || 0) > (m.demos || 0)) acts.append(mBtn("Build 3 more demos", "plus", { do: "mission_demos", count: 3 }));
+    sum.append(head, el("div", "m-now", m.current ? `Now: ${m.current}` : (m.summary || "").split("\n")[0]), bar, stats, acts);
+    if (m.workspace) sum.append(el("div", "m-path", `Files: ${m.workspace}`));
+    if (m.errors && m.errors.length) { const er = el("div", "m-errors"); m.errors.slice(-3).forEach(e => er.append(el("div", null, e))); sum.append(er); }
+
+    // leads (researched ones, best first, each with its reasons, evidence and sources)
+    const lb = $("#mission-leads");
+    lb.innerHTML = "";
+    const researched = d.leads.filter(x => x.score != null);
+    $("#mission-leads-tag").textContent = `${researched.length} checked, ${d.leads.length} found`;
+    if (!researched.length) lb.append(emptyState("search", "Nothing checked yet", "Leads appear as each business is researched"));
+    for (const x of researched.slice(0, 60)) {
+      const r = el("details", "m-lead"), s = el("summary");
+      s.append(el("span", "m-score", String(x.score)), el("span", "m-name", x.name),
+               tag(x.website_status.replace(/_/g, " "), W_TONE[x.website_status]), el("span", "m-status", x.status));
+      const body = el("div", "m-lead-body");
+      body.append(row("Address", x.address), row("Phone", x.phone), row("Email", x.email || "none found"),
+                  row("Website", x.website || "none found"), row("Confidence", x.confidence),
+                  row("Missing", (x.missing || []).join(", ") || "—"));
+      if (x.reasons && x.reasons.length) body.append(el("div", "m-sub", "Why this score"), list(x.reasons.map(rr => `+${rr.points}: ${rr.why}`)));
+      if (x.evidence && x.evidence.length) body.append(el("div", "m-sub", "Evidence"), list(x.evidence));
+      if (x.sources && x.sources.length) {
+        const src = el("div", "m-sources");
+        x.sources.slice(0, 4).forEach(u => {
+          if (!/^https?:\/\//i.test(u)) return;
+          const a = el("a", "link", u.replace(/^https?:\/\/(www\.)?/, "").slice(0, 60));
+          a.href = u; a.target = "_blank"; a.rel = "noopener noreferrer";
+          src.append(a);
+        });
+        body.append(el("div", "m-sub", "Sources"), src);
+      }
+      r.append(s, body);
+      lb.append(r);
+    }
+
+    // approvals: approving an email only creates a Gmail draft
+    const ab = $("#mission-approvals");
+    ab.innerHTML = "";
+    const pend = d.approvals.filter(a => a.status === "pending");
+    if (!pend.length) ab.append(el("div", "m-none", "Nothing waiting."));
+    for (const a of pend) {
+      const r = el("div", "m-item"), bt = el("div", "m-actions");
+      bt.append(mBtn("Approve (Gmail draft, not sent)", "check", { do: "approval_approve", approval_id: a.id }),
+                mBtn("Reject", "x", { do: "approval_reject", approval_id: a.id }, "ghost"));
+      r.append(el("div", null, a.summary), bt);
+      ab.append(r);
+    }
+
+    // demo sites
+    const pb = $("#mission-projects");
+    pb.innerHTML = "";
+    if (!d.projects.length) pb.append(el("div", "m-none", "No demo sites yet."));
+    for (const p of d.projects) {
+      const r = el("div", "m-item"), bt = el("div", "m-actions");
+      bt.append(mBtn("Open preview", "window", { do: "mission_preview", project_id: p.id }));
+      r.append(el("b", null, p.lead), el("div", "m-path", p.path), bt);
+      pb.append(r);
+    }
+
+    // outreach drafts
+    const db = $("#mission-drafts");
+    db.innerHTML = "";
+    if (!d.outreach.length) db.append(el("div", "m-none", "No drafts yet."));
+    for (const o of d.outreach) {
+      const r = el("details", "m-item"), s = el("summary");
+      s.append(el("b", null, o.subject || o.kind), tag(o.status.replace(/_/g, " "), o.status === "draft" ? "" : "green"));
+      r.append(s, el("div", "m-path", `To: ${o.recipient || "no public email found"}`), el("pre", "m-draft", o.body));
+      if (o.problems && o.problems.length) r.append(list(o.problems, "warn"));
+      db.append(r);
+    }
+
+    // steps
+    const sb = $("#mission-steps");
+    sb.innerHTML = "";
+    $("#mission-steps-tag").textContent = `${m.steps_done} of ${m.steps_total} done${m.steps_failed ? `, ${m.steps_failed} failed` : ""}`;
+    for (const st of d.steps.slice(-80)) {
+      const r = el("div", "m-step");
+      r.append(tag(st.state, S_TONE[st.state]), el("span", "m-name", st.title),
+               el("span", "m-meta", `${st.attempts > 1 ? `${st.attempts} tries ` : ""}${st.cost_usd ? `$${st.cost_usd.toFixed(4)}` : ""}`));
+      if (st.error || st.evidence) r.append(el("div", `m-ev ${st.error && st.state !== "completed" ? "warn" : ""}`, st.error || st.evidence));
+      sb.append(r);
+    }
+
+    // log
+    const eb = $("#mission-events");
+    eb.innerHTML = "";
+    for (const e of d.events) {
+      const r = el("div", "ev");
+      r.append(el("span", `m-meta ${e.level}`, ago(e.at)), el("span", null, e.text));
+      eb.append(r);
     }
   }
 
