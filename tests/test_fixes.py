@@ -14,7 +14,7 @@ from types import SimpleNamespace as NS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from tests.harness import Checker, Conversation, setup_env  # noqa: E402
-TMP = setup_env(WEATHER_LOCATION="", ALARM_GAP_S="0.3")
+TMP = setup_env(WEATHER_LOCATION="", ALARM_GAP_S="0.3", TTS_PROVIDER="piper", PHONE_MODE="0")  # (independent of .env)
 
 import tiktoken  # noqa: E402
 

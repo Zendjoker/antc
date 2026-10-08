@@ -1,18 +1,26 @@
-"""Turn-taking: pauses while forming a request must not trigger an answer: python tests/test_turn_taking.py
-(the last part uses the real model; everything else is offline)"""
+"""Turn-taking: pauses while forming a request must not trigger an answer.
+
+    python -m tests.test_turn_taking             offline (free)
+    python -m tests.test_turn_taking --live-api  ...plus part 5, which calls the real (paid) model: only when approved
+"""
 import os
 import pathlib
 import sys
-import tempfile
 import threading
 import time
 
 import numpy as np
 
-tmp = pathlib.Path(tempfile.mkdtemp())
-os.environ.update(REMINDERS_FILE=str(tmp / "rem.json"), MEMORY_DB=str(tmp / "mem.db"), SETTINGS_FILE=str(tmp / "set.json"),
-                  PYTHONIOENCODING="utf-8")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from tests.harness import setup_env  # noqa: E402
+
+LIVE_API = "--live-api" in sys.argv
+KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_PROVIDER", "LLM_DEFAULT", "OPENAI_MODEL")
+before = {k: os.environ.get(k) for k in KEYS}
+setup_env()  # (temp files for everything that persists: never the real journal, spend, memory or reminders)
+if LIVE_API:  # (the real keys and model settings come back from .env)
+    for k, v in before.items():
+        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 from room_agent import config  # noqa: E402
 from room_agent import runtime as rt  # noqa: E402
@@ -72,6 +80,7 @@ def run(script, model=None):
 
     def fake_record(mic_q, start_timeout=0, already_heard=False, **kw):
         waits.append(start_timeout)
+        rt.tts_end, session.mic_input.last_speech_start = 0.0, time.time()  # (you, speaking well after the agent stopped)
         while left and texts[left[0]] is None:
             left.pop(0)  # a silence: the wait simply runs out
             return None
@@ -124,7 +133,7 @@ print("4) a long silence after an incomplete request: it answers, once")
 calls, phrases, waits = run(["Set an alarm...", None])
 check("asked after the wait", calls == [("Set an alarm", True)] and waits[1] == config.LISTEN_WAIT_S, f"{calls} {waits[:2]}")
 
-if "--offline" in sys.argv:
+if not LIVE_API:
     print("FAILED:" if failures else "ALL PASSED", failures or "")
     sys.exit(1 if failures else 0)
 
@@ -145,8 +154,18 @@ def drain():
 
 
 threading.Thread(target=drain, daemon=True).start()
-real_run_tool = claude.run_tool
-claude.run_tool = lambda name, args: (lambda out: (ran.append((name, args, out[:60])), out)[1])(real_run_tool(name, args))
+from room_agent.actions import executor as _executor  # noqa: E402
+
+_real_execute = _executor.execute  # (tools run through the executor now; record each call the same way as before)
+
+
+def _recording_execute(name, args):
+    result = _real_execute(name, args)
+    ran.append((name, args, result.message[:60]))
+    return result
+
+
+_executor.execute = _recording_execute
 
 
 def turn(history, text, final=False):

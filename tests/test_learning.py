@@ -90,6 +90,8 @@ core.ensure_loaded()
 core.REGISTRY["open_app"].execute = fake_open
 core.REGISTRY["open_app"].observe = lambda a, b=None: {"app": _app(a), "running": _app(a) in WORLD["running"]}
 core.REGISTRY["move_window_to_monitor"].execute = fake_move
+core.REGISTRY["move_window_to_monitor"].expect = lambda a, b: {"monitor.num": str(a.get("monitor")).strip()}  # (the fake's
+# monitors, not this PC's: the real expectation reads the real screens)
 core.REGISTRY["move_window_to_monitor"].observe = lambda a, b=None: {
     "app": _app(a), "monitor": {"num": WORLD["monitor"].get(_app(a))} if _app(a) in WORLD["running"] else None, "state": "normal"}
 L = learning.learner()

@@ -13,7 +13,7 @@ import numpy as np
 
 from tests.harness import Checker, Conversation, setup_env
 
-TMP = setup_env()
+TMP = setup_env(TTS_PROVIDER="piper", PHONE_MODE="0")  # (as written: independent of .env)
 from room_agent import runtime as rt  # noqa: E402
 from room_agent import social  # noqa: E402
 from room_agent.audio import speaker, styles  # noqa: E402
