@@ -251,11 +251,26 @@ class Hub:
                 log.debug("zigbee event %s: %s", event, e)
 
     # ---------------------------------------------------------------- commands
+    @staticmethod
+    def aliases():
+        """ZIGBEE_ALIASES="bed=Vibration sensor, desk light=LED strip" -> {"bed": "Vibration sensor", ...}"""
+        out = {}
+        for part in config.ZIGBEE_ALIASES.split(","):
+            if "=" in part:
+                a, name = part.split("=", 1)
+                if a.strip() and name.strip():
+                    out[a.strip().lower()] = name.strip()
+        return out
+
     def find(self, said="", kind=None):
-        """A device by what they called it ("the strip", "LED", "door"); with no name, the only one of that kind."""
+        """A device by what they called it ("the strip", "LED", "door", or one of your aliases); with no name, the only
+        one of that kind."""
         with self._lock:
             pool = [d for d in self.devices.values() if kind is None or d["kind"] == kind]
         said = str(said or "").lower().strip()
+        alias = self.aliases().get(said) or next((n for a, n in self.aliases().items() if a in said.split() or a == said), None)
+        if alias and any(d["name"] == alias for d in pool):
+            return next(d for d in pool if d["name"] == alias)
         if said:
             words = {w for w in said.replace("-", " ").split() if w not in {"the", "my", "a", "light", "lights", "sensor"}}
             hits = [d for d in pool if said == d["name"].lower() or words & set(d["name"].lower().split())
@@ -266,14 +281,21 @@ class Hub:
 
     def set(self, name, payload, wait=4.0):
         """Send a command; -> the device's state once it reports back (None if it didn't within `wait`)."""
-        if self.client is None:
-            return None
+        if self.client is None or name in self.offline:
+            return None  # (an offline device can't answer: fail at once instead of waiting)
         with self._lock:
             before = self.changed.get(name, {}).get("updated", 0)
         sent = time.time()
+        wanted = {k: v for k, v in payload.items() if k in ("state", "brightness", "color_temp", "effect")}
+
+        def answered():  # (its report reflects THIS command: rapid commands don't confirm each other)
+            st = self.state.get(name, {})
+            return (self.changed.get(name, {}).get("updated", 0) > max(before, sent)
+                    and all(st.get(k) == v for k, v in wanted.items()))
+
         self.client.publish(f"{config.ZIGBEE_TOPIC}/{name}/set", json.dumps(payload))
         with self._lock:
-            ok = self._updated.wait_for(lambda: self.changed.get(name, {}).get("updated", 0) > max(before, sent), timeout=wait)
+            ok = self._updated.wait_for(answered, timeout=wait)
             return dict(self.state.get(name, {})) if ok else None
 
     # ---------------------------------------------------------------- reading

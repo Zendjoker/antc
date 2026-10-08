@@ -4,6 +4,7 @@ the lights (on/off, brightness, color, white, effects). Reads are live; light ch
 import re
 import time
 
+from room_agent import runtime as rt
 from room_agent.abilities._kit import params, tool
 from room_agent.actions.core import Group, register_claim, register_context, register_group
 
@@ -54,7 +55,8 @@ def _context(user_text):
     h = _hub()
     if not h.ready() or not (HINTS.search(user_text or "") or _live()):
         return []
-    lines = ["Home devices (live): " + "; ".join(h.summary())]
+    lines = ["Home devices (live): " + "; ".join(h.summary())
+             + ". (A door sensor shows the door opened or closed, never who it was.)"]
     events = h.event_lines()
     lines.append("- home_events_recent (from the sensors, newest last; the only source for 'did you notice...'): "
                  + ("; ".join(events) if events else "none in the last 6 hours"))
@@ -91,9 +93,23 @@ tool("home_sensors", "What the home sensors say right now: whether the door is o
 
 
 # ---------------------------------------------------------------- lights
+PRONOUN = re.compile(r"^\s*(it|that|this|them|that one|the light|the lights?)\s*$", re.I)
+
+
 def _light(args):
+    """The light they mean: named (or an alias), 'it' = the light last changed, or the only light there is."""
     h = _hub()
-    dev = h.find(args.get("device") or "", kind="light") or h.find(args.get("device") or "", kind="switch")
+    said = str(args.get("device") or "")
+    referring = PRONOUN.match(said) or (not said.strip() and re.search(r"\b(it|that|them)\b", rt.turn_text or "", re.I))
+    if referring:
+        from room_agent.actions.context import env
+
+        last = env.last_successful_action
+        if last is not None and last.capability == "set_light" and last.subject and last.subject in h.devices \
+                and time.time() - last.at < 1800:
+            return h.devices[last.subject]
+        said = ""
+    dev = h.find(said, kind="light") or h.find(said, kind="switch")
     if dev is None:
         lights = [d["name"] for d in h.devices.values() if d["kind"] in ("light", "switch")]
         return ("FAILED: which light? " + ", ".join(lights)) if lights else "FAILED: there are no Zigbee lights."

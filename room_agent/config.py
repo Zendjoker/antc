@@ -157,6 +157,7 @@ ZIGBEE = os.getenv("ZIGBEE", "1") == "1"
 ZIGBEE_MQTT_HOST = os.getenv("ZIGBEE_MQTT_HOST", "127.0.0.1")
 ZIGBEE_MQTT_PORT = int(os.getenv("ZIGBEE_MQTT_PORT", "1883"))
 ZIGBEE_TOPIC = os.getenv("ZIGBEE_TOPIC", "zigbee2mqtt")
+ZIGBEE_ALIASES = os.getenv("ZIGBEE_ALIASES", "").strip()  # what you call your devices: "bed=Vibration sensor, desk light=LED strip"
 ZIGBEE2MQTT_DIR = os.getenv("ZIGBEE2MQTT_DIR", "").strip()  # folder with start.bat: Jarvis starts it if it isn't running
 ZIGBEE_EVENTS_FILE = Path(os.getenv("ZIGBEE_EVENTS_FILE", HERE / "zigbee_events.json"))  # door/bed events, kept 48 h
 MEMORY_SENSITIVE = os.getenv("MEMORY_SENSITIVE", "explicit").strip().lower()  # explicit: health, money, IDs... only
