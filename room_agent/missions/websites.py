@@ -87,11 +87,15 @@ def _visible_text(html):
 
 def _emails(html, site_host):
     found = set()
-    for m in re.finditer(r"mailto:([^\"'?>\s]+)", html, re.I):
-        # (a mailto may list several addresses, or carry encoded line breaks: each candidate is checked on its own)
-        for part in re.split(r"[,;]", urllib.parse.unquote(m.group(1))):
+    # A mailto value is taken whole (up to its closing quote) and judged as a unit: a list is split into its addresses,
+    # each checked on its own; anything malformed inside it (spaces, encoded line breaks) is rejected, not mined for
+    # fragments. The mailto values are then removed so the plain-text scan below can't re-read pieces of them.
+    for m in re.finditer(r"mailto:([^\"'>]*)", html, re.I):
+        value = urllib.parse.unquote(m.group(1).split("?", 1)[0])
+        for part in re.split(r"[,;]", value):
             found.add(part.strip().lower())
-    for m in EMAIL.finditer(html):
+    text = re.sub(r"mailto:[^\"'>]*", " ", html, flags=re.I)
+    for m in EMAIL.finditer(text):
         found.add(m.group(0).strip().lower())
     good = []
     for e in sorted(found):

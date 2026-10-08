@@ -219,6 +219,14 @@ class Store:
     def update_step(self, sid, **fields):
         self._update("steps", "id", sid, fields)
 
+    def claim_step(self, sid, mid, run_id, attempts):
+        """pending -> running for one run, in ONE statement that also requires the mission to be running: a step that
+        was cancelled, or a mission stopped / paused a moment ago, can't be revived by a runner that read it earlier.
+        -> True if this run owns the step now."""
+        return self._exec("UPDATE steps SET state='running', attempts=?, started=?, run_id=?, error='' WHERE id=? AND "
+                          "state='pending' AND EXISTS(SELECT 1 FROM missions WHERE id=? AND state='running')",
+                          (int(attempts), time.time(), run_id, sid, mid)).rowcount == 1
+
     def finish_step(self, sid, run_id, **fields):
         """Record a run's outcome ONLY if that run still owns the step (it wasn't stopped / taken over meanwhile).
         -> True if written."""

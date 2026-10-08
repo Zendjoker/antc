@@ -94,6 +94,19 @@ class Workflow:
 
 WORKFLOWS = {}
 _lock = threading.Lock()
+# Mission control operations (add work / pause / resume / stop) are serialized: each one reads the state and acts on it
+# as one unit, so e.g. work can't be added to a mission in the moment between "it's paused" and "it's stopped".
+_control = threading.RLock()
+
+
+def _controlled(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with _control:
+            return fn(*a, **k)
+    return wrapper
 _runner = {"thread": None}
 _active = {}       # mission id -> the Token of the step run in progress
 _abandoned = []    # (thread, token, mission id, step key): runs cancelled but not yet ended (for the dashboard)
@@ -172,6 +185,7 @@ class MissionClosed(ValueError):
     """New work for a mission that was stopped for good."""
 
 
+@_controlled
 def add_steps(mid, specs):
     """Extend a mission's plan (e.g. 'build demos for the best three'). Never resumes a paused / interrupted / budget-
     paused mission: the steps wait until it's resumed explicitly. A finished mission starts a new run for them.
@@ -203,6 +217,7 @@ def _cancel_active(mid, why):
         t.cancel(why)
 
 
+@_controlled
 def pause(mid, why="you asked"):
     m = store().mission(mid)
     if m is None or m["state"] not in LIVE_MISSION:
@@ -252,6 +267,7 @@ def resume_blocker(mid):
     return ""
 
 
+@_controlled
 def resume(mid):
     s = store()
     why = resume_blocker(mid)
@@ -269,6 +285,7 @@ def resume(mid):
     return True
 
 
+@_controlled
 def stop(mid, why="you asked"):
     """Stop for good: pending steps are cancelled; completed work (leads, sites, drafts) is kept."""
     s = store()
@@ -495,8 +512,10 @@ def _run_step(wf, m, st, started):
     timeout = wf.timeouts.get(st["kind"], STEP_TIMEOUT_S)
     token = runctx.Token(mid, st["key"], deadline=time.time() + timeout,
                          should_stop=lambda: _mission_should_stop(mid, started))
-    s.update_step(st["id"], state="running", attempts=attempt, started=time.time(), run_id=run_id)
-    _active[mid] = token
+    _active[mid] = token  # (registered before the claim: a stop / pause from now on cancels this run)
+    if not s.claim_step(st["id"], mid, run_id, attempt):
+        _active.pop(mid, None)  # (the step was cancelled / the mission stopped or paused since it was read)
+        return
     spent0 = s.mission(mid)["spent_usd"]
     ctx = Ctx(m, token)
     try:

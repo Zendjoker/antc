@@ -2,8 +2,14 @@
 
 Code: `room_agent/missions/`. Voice tools: `room_agent/abilities/missions.py`. Dashboard: the **Missions** page.
 
-**Status: nothing in the missions feature has been run.** It has been syntax-checked (`py_compile`, `node --check`) and
-reviewed statically. No test, live request, model call, Places call, coding-worker run or dashboard load has happened.
+**Status:** executed under `tests/test_missions.py` (144 checks, part of `python -m tests`) against an isolated database
+and folders. Those runs used:
+- the real engine, store, meter, network layer, site generator, outreach, voice tools and dashboard functions
+- the real OpenAI / Anthropic SDKs on a mock transport
+- faked HTTP, Gmail and coding-worker processes, with a guard blocking every non-local connection and DNS lookup
+
+**Not yet exercised against real services:** live OpenStreetMap / Google Places / model APIs, the Gmail API, the Claude
+Code CLI and the Windows Job Object, the dashboard in a browser, and the preview server.
 
 ## 1. Stopping (cancellation and timeouts)
 - Each run of a step gets a token (`runctx.py`). Timeout, pause, stop and the emergency stop (Ctrl+Alt+J) cancel it.
@@ -148,8 +154,8 @@ reviewed statically. No test, live request, model call, Places call, coding-work
 - Scraped emails are kept only if each one is exactly one valid address. Before a Gmail draft is claimed, the
   recipient is validated again and the message is built locally. A local failure leaves nothing claimed or sent.
 
-## Unverified, all of it
-Nothing has run, including:
+## Not verified against real services
+Covered by `tests/test_missions.py` only with fakes, or not at all:
 - the Windows Job Object and NtResumeProcess calls
 - the Claude Code flags
 - the Overpass / Nominatim / Places request formats

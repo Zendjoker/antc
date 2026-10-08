@@ -43,17 +43,27 @@ def _not_billed(e):
 def _never_sent(e):
     """A connection that couldn't be opened (DNS failure, refused, connect timeout): the request never reached the
     provider. A read timeout / dropped connection after sending is NOT this (the provider may have charged)."""
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover
-        return False
+    kinds = _connect_errors()
     seen, cur = set(), e
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
-        if isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol)):
+        if kinds and isinstance(cur, kinds):
             return True
         cur = cur.__cause__ or cur.__context__
     return False
+
+
+def _connect_errors():
+    """The 'connection never opened' exception classes of whichever HTTP library the SDKs use: the current openai /
+    anthropic SDKs are built on httpx2 (not httpx), older ones on httpx. Both are recognized."""
+    out = []
+    for name in ("httpx2", "httpx"):
+        try:
+            mod = __import__(name)
+        except ImportError:
+            continue
+        out += [getattr(mod, c) for c in ("ConnectError", "ConnectTimeout", "UnsupportedProtocol") if hasattr(mod, c)]
+    return tuple(out)
 
 
 def complete(prompt, system="", tier="light", max_tokens=800, what="model call"):
