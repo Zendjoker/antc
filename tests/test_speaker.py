@@ -25,6 +25,9 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
+if not (ROOT / "tests" / "stt_session.npz").exists():  # (a personal voice recording, never in the repo)
+    print("SKIPPED: no recorded speech in tests/stt_session.npz (record it with tests/stt_capture.py)")
+    raise SystemExit(0)
 d = np.load(ROOT / "tests" / "stt_session.npz")
 CLEAN, VOICE, STAMPS, MARKS = d["clean"], d["voice"], d["stamps"], d["marks"]
 B = 1280

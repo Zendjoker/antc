@@ -203,6 +203,9 @@ import datetime  # noqa: E402
 check("'no jokes in the morning' applies before noon, not after",
       long_term("haha", "joking", datetime.datetime(2026, 10, 7, 8))["humor"] == "off"
       and long_term("haha", "joking", datetime.datetime(2026, 10, 7, 15))["humor"] is None)
+from room_agent.learning.model import key_for  # noqa: E402
+
+m.forget(key_for("humor", "morning"))  # (done with it: otherwise this test depends on the hour it's run at)
 m.teach("humor", "occasional roasting is fine", subject="always", because="you said: you can roast me")
 s, snap, _ = fresh("haha you're so slow lol")
 check("likes occasional roasting -> light teasing when joking", s.roast_level == "light", s)

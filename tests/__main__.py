@@ -34,7 +34,7 @@ def main(argv):
         except subprocess.TimeoutExpired:
             ok, out = False, "timed out"
         fails = [line.strip() for line in out.splitlines() if line.strip().startswith(("FAIL", "[FAIL]", "Traceback"))]
-        ok = ok and not fails and "PASSED" in out  # (older suites print their result without an exit code)
+        ok = ok and not fails and ("PASSED" in out or "SKIPPED" in out)  # (older suites print their result without an exit code)
         results.append((name, ok, time.time() - t0, fails))
         print(f"  {'ok  ' if ok else 'FAIL'} {name:20} {time.time() - t0:5.1f}s" + ("" if ok else "   " + "; ".join(fails[:3])),
               flush=True)
