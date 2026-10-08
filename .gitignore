@@ -31,3 +31,4 @@ traces/
 bench/
 
 zigbee_events.json
+memory.db.bak-*

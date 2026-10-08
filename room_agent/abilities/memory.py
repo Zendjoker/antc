@@ -1,5 +1,7 @@
 """Persistent memory: remember, recall, forget (implementation: room_agent/memory + tools/memory_tools.py)."""
 
+import time
+
 from room_agent import runtime as rt
 from room_agent.abilities._kit import CONFIDENCE, params, tool
 from room_agent.actions.core import Group, Risk, register_claim, register_context, register_group, register_line
@@ -33,6 +35,9 @@ def _detected():
     return bool(location.enabled() and location.locate())
 
 
+_expired = {"at": 0.0}
+
+
 def _context(user_text):
     memory = rt.memory
     if not memory.available:
@@ -49,6 +54,9 @@ def _context(user_text):
         said = f" They said {rt.session_location} earlier in this conversation (get_weather uses it)." if rt.session_location else ""
         lines.append("- their_location: unknown. You can't detect where they are (no device, IP or GPS location), so never "
                      "imply you know it." + (said or " If a city is needed, ask once which city."))
+    if time.time() - _expired["at"] > 3600:  # (dated plans that have passed stop being active, checked hourly)
+        _expired["at"] = time.time()
+        memory.expire_plans()
     rel = memory.relevant(user_text)
     lines.append("- relevant_persistent_memories (for this request): "
                  + ("; ".join(f"{f['content']} (noted {f['updated_at'][:10]})" for f in rel) if rel else "none matched"))

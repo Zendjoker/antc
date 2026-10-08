@@ -152,19 +152,94 @@ class Memory:
     def facts(self):
         return [dict(r) for r in self._q("SELECT * FROM memories WHERE active=1 AND key IS NULL ORDER BY id")]
 
+    # how much a source is trusted when ranking (what they told it directly ranks above what was inferred)
+    SOURCE_WEIGHT = {"you said it": 0.5, "user_statement": 0.3, "confirmation": 0.3, "tool": 0.3, "imported": 0.1,
+                     "learned": 0.0, "inference": -0.2}
+
     def relevant(self, query, k=8):
-        """Stored facts that share meaningful words with `query`, best first. Core (keyed) facts are
-        handled separately and always known."""
+        """Stored facts relevant to `query`, best first: shared meaningful words first, then how trustworthy the source
+        is, then how recent. Core (keyed) facts are handled separately and always known."""
         q = _terms(query)
         if not q:
             return []
+        today = datetime.datetime.now()
         scored = []
         for f in self.facts():
             overlap = len(q & _terms(f["content"] + " " + (f["category"] or "")))
-            if overlap:
-                scored.append((overlap, f["updated_at"], f))
+            if not overlap:
+                continue
+            try:
+                age_days = (today - datetime.datetime.strptime(f["updated_at"][:10], "%Y-%m-%d")).days
+            except ValueError:
+                age_days = 999
+            score = overlap + self.SOURCE_WEIGHT.get(f["source"], 0.0) + (0.2 if age_days <= 7 else 0.0)
+            scored.append((score, f["updated_at"], f))
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [f for _, _, f in scored[:k]]
+
+    # ---------- what must never come back, near-duplicates, contradictions, expiry ----------
+    def reject(self, content, why="they said it isn't true"):
+        """Keep a record that this is NOT true about them (a misheard request, a corrected fact), so it can't be learned
+        again, e.g. through a later summary. Stored inactive: it never shows up as a memory."""
+        content = str(content).strip()[:MAX_CONTENT]
+        if content and not self.is_rejected(content):
+            now = _now()
+            with self._lock:
+                self.db.execute("INSERT INTO memories(category, content, source, confidence, created_at, updated_at, active) "
+                                "VALUES('fact', ?, 'rejected', 0, ?, ?, 0)", (content, now, now))
+
+    def is_rejected(self, content):
+        t = _terms(content)
+        for r in self._q("SELECT content FROM memories WHERE source='rejected'"):
+            r_t = _terms(r["content"])
+            if _norm(r["content"]) == _norm(content) or (t and r_t and len(t & r_t) / len(t | r_t) >= 0.6):
+                return True
+        return False
+
+    def near_duplicate(self, content):
+        """An active fact that says the same thing in other words (word overlap >= 0.8), or None."""
+        t = _terms(content)
+        if not t:
+            return None
+        for f in self.facts():
+            ft = _terms(f["content"])
+            if ft and len(t & ft) / len(t | ft) >= 0.8:
+                return f
+        return None
+
+    def supersede(self, old_ids, new_id):
+        """Older facts replaced by a newer one (a changed preference): kept for history, no longer active."""
+        ids = [int(i) for i in old_ids if int(i) != int(new_id)]
+        if ids:
+            with self._lock:
+                self.db.execute(f"UPDATE memories SET active=0, superseded_by=?, updated_at=? WHERE id IN "
+                                f"({','.join('?' * len(ids))})", [new_id, _now(), *ids])
+        return ids
+
+    _DATE = re.compile(r"\b(January|February|March|April|May|June|July|August|September|October|November|December|"
+                       r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+(\d{1,2})(?:\s*[-\u2013]\s*(\d{1,2}))?,?\s+(\d{4})\b")
+
+    def expire_plans(self, today=None):
+        """Plans with a date that has passed ('Dentist on Oct 3, 2026') stop being active. -> how many expired."""
+        today = (today or datetime.date.today())
+        gone = []
+        for f in self.facts():
+            if f["category"] != "plan":
+                continue
+            m = self._DATE.search(f["content"])
+            if not m:
+                continue
+            try:
+                when = datetime.datetime.strptime(f"{m.group(1)[:3]} {m.group(3) or m.group(2)} {m.group(4)}", "%b %d %Y").date()
+            except ValueError:
+                continue
+            if when < today:
+                gone.append(f["id"])
+        if gone:
+            with self._lock:
+                self.db.execute(f"UPDATE memories SET active=0, updated_at=? WHERE id IN ({','.join('?' * len(gone))})",
+                                [_now(), *gone])
+        return len(gone)
 
     def recall(self, query="", limit=30):
         """Everything stored that matches `query` (all of it when empty): profile, facts, past conversations."""

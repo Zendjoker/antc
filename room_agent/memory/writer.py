@@ -8,6 +8,8 @@ import re
 import threading
 import time
 
+from room_agent import config
+
 from .store import CATEGORIES, FORGET_ALL, NOTHING_TO_LEARN, PROFILE_KEYS
 from .text import mentions, norm as _norm, now as _now
 
@@ -102,6 +104,32 @@ Lines marked [misheard] were never said by {user}: the assistant misheard. Never
 facts; at most note that the assistant misheard and {user} corrected it. \
 Plain text, no preamble. If it was trivial \
 (a greeting, a time check), reply with just: SKIP"""
+
+
+# Things not learned automatically (only when they explicitly ask to remember: MEMORY_SENSITIVE=allow changes that)
+SENSITIVE = re.compile(r"\b(diagnos\w*|disease|illness|medication|medicine|prescription|therapy|therapist|depress\w*|anxiety|"
+                       r"pregnan\w*|hiv|cancer|password|passcode|pin code|social security|ssn|passport|bank|account number|"
+                       r"credit card|salary|debt|religio\w*|sexual\w*|immigration|criminal record|arrest\w*)\b", re.I)
+_CHANGE = re.compile(r"\b(actually|instead|anymore|any more|not .{0,20} anymore|prefer|rather|switched|changed|now i|these days|"
+                     r"no longer|used to)\b", re.I)
+_PREF_WORDS = {"like", "likes", "love", "loves", "prefer", "prefers", "want", "wants", "enjoy", "enjoys", "favorite",
+               "favourite", "is", "are", "the", "a", "an", "my", "their", "it", "to", "of", "and", "best", "most"}
+
+
+def conflicting(memory, new_id, content, category, said):
+    """Older preferences the new one replaces ("likes the lights blue" -> "prefers red lights"): same subject, and their
+    words say it changed. Kept for history, no longer active."""
+    if category != "preference" or not _CHANGE.search(said or ""):
+        return []
+    subject = {w for w in _norm(content).split() if w not in _PREF_WORDS and len(w) > 2}
+    out = []
+    for f in memory.facts():
+        if f["id"] == new_id or f["category"] != "preference":
+            continue
+        other = {w for w in _norm(f["content"]).split() if w not in _PREF_WORDS and len(w) > 2}
+        if subject & other and subject != other:
+            out.append(f)
+    return out
 
 
 def _quoted(quote, text):
@@ -204,6 +232,8 @@ class MemoryWriter:
             gone = {f["id"]: f["fact"] for f in self.memory.snapshot()["facts"]}
             if self.memory.remove_ids(ids):
                 removed += [gone.get(i, f"fact {i}") for i in ids]
+                for i in ids:  # (and it can't come back later, e.g. through a summary)
+                    self.memory.reject(gone.get(i, ""))
             for i in ids:
                 self.learned_from.pop(i, None)
         return removed
@@ -273,10 +303,21 @@ class MemoryWriter:
             if not source:
                 log.info("memory: not saving %r (no quote of their own words backs it)", content)
                 continue
+            if self.memory.is_rejected(content):
+                log.info("memory: not saving %r (they said earlier it isn't true)", content)
+                continue
+            if SENSITIVE.search(content) and config.MEMORY_SENSITIVE != "allow":
+                log.info("memory: not saving %r automatically (sensitive: only if they ask to remember it)", content)
+                continue
+            if self.memory.near_duplicate(content):
+                continue
             new_id = self.memory.add(content, category, source, 0.8)
             if new_id:
                 changes.append(f"+{content} ({source})")
                 self.learned_from[new_id] = _origin(quote, said)
+                old = conflicting(self.memory, new_id, content, category, _origin(quote, said))
+                if old and self.memory.supersede([f["id"] for f in old], new_id):
+                    changes.append("replaced: " + "; ".join(f["content"] for f in old))
         if changes:
             log.info("learned: %s", "; ".join(changes))
 

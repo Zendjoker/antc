@@ -159,6 +159,8 @@ ZIGBEE_MQTT_PORT = int(os.getenv("ZIGBEE_MQTT_PORT", "1883"))
 ZIGBEE_TOPIC = os.getenv("ZIGBEE_TOPIC", "zigbee2mqtt")
 ZIGBEE2MQTT_DIR = os.getenv("ZIGBEE2MQTT_DIR", "").strip()  # folder with start.bat: Jarvis starts it if it isn't running
 ZIGBEE_EVENTS_FILE = Path(os.getenv("ZIGBEE_EVENTS_FILE", HERE / "zigbee_events.json"))  # door/bed events, kept 48 h
+MEMORY_SENSITIVE = os.getenv("MEMORY_SENSITIVE", "explicit").strip().lower()  # explicit: health, money, IDs... only
+                                                                             # when you ask; allow: learned like the rest
 # Greeting you when you come home (conversation/greet.py): the door opens after the room was quiet this long
 GREET_ON_ARRIVAL = os.getenv("GREET_ON_ARRIVAL", "1") == "1"
 GREET_AWAY_MIN = float(os.getenv("GREET_AWAY_MIN", "10"))       # minutes with nobody heard in the room = you were out
