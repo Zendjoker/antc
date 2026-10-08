@@ -11,7 +11,7 @@ from room_agent.actions import pending
 from room_agent.audio.speaker import finish_speaking, say
 from room_agent.cognition import reflex
 from room_agent.speech import timing
-from room_agent.conversation import corrections
+from room_agent.conversation import corrections, policy
 from room_agent.conversation.history import remember_turn, reply_text, trim
 from room_agent.llm.router import ask
 from room_agent.memory import mentions
@@ -100,6 +100,7 @@ def _take_turn(history, text, raw=None, final=False, output=None):
     corrections.on_user_turn(raw or text)  # ("I didn't say that": the misheard request is discarded everywhere)
     social.on_user_turn(raw or text)  # (how the conversation is going -> how to answer: social/, a few ms, no model call)
     info = cognition.begin_turn(raw or text)  # (REFLEX / FAST / DELIBERATE / DEEP, goal, constraints: cognition/, no model)
+    policy.on_user_turn(raw or text, info)  # (command / question / casual / ... -> what kind of reply fits: policy.py)
     decision = pending.on_utterance(raw or text)  # (a request being filled in: answers, corrections, "never mind")
     if decision and decision.reply:
         return _answered_in_code(history, mark, text, raw, decision.reply, private)

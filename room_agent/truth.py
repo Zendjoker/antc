@@ -142,6 +142,19 @@ DEVICE_OFFERS = {
 DEVICE_AVAILABLE = {}  # kind -> callable: is a device of this kind connected? (filled in by the areas that control one)
 
 
+# After a clear command, asking permission for it ("Want me to turn it off?") instead of doing it
+PERMISSION_Q = re.compile(r"\b(want me to|do you want me to|should i|shall i|would you like me to|you want me to|"
+                          r"want me to go ahead|should i go ahead)\b[^?]*\?", re.I)
+
+
+def _asked_permission_instead(sentence, tools_called):
+    from room_agent import runtime as rt
+
+    policy = getattr(rt.turn, "policy", None)
+    return (getattr(policy, "kind", "") == "direct command" and not (tools_called & ACTION_TOOLS)
+            and bool(PERMISSION_Q.search(sentence)))
+
+
 def _device_available(kind):
     try:
         return any(bool(fn()) for fn in DEVICE_AVAILABLE.get(kind, []))
@@ -178,6 +191,8 @@ class ClaimGuard:
         m = PHONE_OFFER.search(sentence)
         if m and not _negated(sentence, m) and not DRIVING_CALL.search(sentence):
             return ["phone_offer"]  # (checked on the whole sentence: an offer phrased as a question is still false)
+        if _asked_permission_instead(sentence, self.tools_called):
+            return ["permission_question"]  # (they already asked: the answer is to do it, not to ask again)
         for kind, rx in DEVICE_OFFERS.items():
             m = rx.search(sentence)
             if m and not _negated(sentence, m) and not _device_available(kind):

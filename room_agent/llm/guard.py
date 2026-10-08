@@ -70,6 +70,12 @@ def release_checked(guard, spoken):
 
 
 def correction_note(bad):
+    from room_agent.truth import PERMISSION_Q
+
+    if any(PERMISSION_Q.search(s) for s in bad):
+        return (f"(Automatic check from the system, not from {USER_NAME}: they already told you to do it, so asking "
+                f"{' '.join(bad)!r} was NOT spoken. Call the right tool now and confirm in a few words; if it isn't possible, "
+                "say so plainly. Don't mention this check.)")
     return (f"(Automatic check from the system, not from {USER_NAME}: your reply said {' '.join(bad)!r}, but no tool "
             "result in this turn backs that up, so it was NOT spoken. Don't claim it. If you can actually do it, call "
             "the right tool now; if it isn't possible, say so plainly. Answer again in one or two sentences, as if for the "

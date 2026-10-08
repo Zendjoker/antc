@@ -171,6 +171,9 @@ def _register_core_context():
     from room_agent.conversation import corrections
 
     corrections.register()
+    from room_agent.conversation import policy
+
+    policy.register()
     core.register_context(_environment, order=60)
 
 
