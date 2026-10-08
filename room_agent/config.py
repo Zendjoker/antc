@@ -126,6 +126,9 @@ MISSION_STRONG_MODEL = (os.getenv("MISSION_STRONG_MODEL", "").strip() or "claude
 MISSION_LLM_COPY = os.getenv("MISSION_LLM_COPY", "0") == "1"  # 1 = a model polishes outreach wording (costs a little); 0 = templates
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()  # optional: better business discovery (paid per request)
 PLACES_COST_PER_REQUEST = float(os.getenv("PLACES_COST_PER_REQUEST", "") or "0.035")  # USD estimate per Places Text Search call
+PLACES_DETAILS_COST_PER_REQUEST = float(os.getenv("PLACES_DETAILS_COST_PER_REQUEST", "") or "0.025")  # Place Details re-fetch
+PLACES_MEMORY_TTL_S = int(os.getenv("PLACES_MEMORY_TTL_S", "") or "21600")  # Google content is kept in memory only, this long
+CODER_MAX_USD = float(os.getenv("CODER_MAX_USD", "") or "1.00")  # budget reserved for one Claude Code edit (its real cost is unknown up front)
 MISSION_PREVIEW_PORT = int(os.getenv("MISSION_PREVIEW_PORT", "") or "8790")  # demo-site previews, on 127.0.0.1 only
 CODER_BACKEND = (os.getenv("CODER_BACKEND", "").strip() or "auto").lower()  # auto | claude_cli | anthropic | none: who edits demo sites
 CODER_CLI = (os.getenv("CODER_CLI", "").strip() or "claude")  # the Claude Code command, if CODER_BACKEND uses it

@@ -35,4 +35,5 @@ if not LIVE_API:
     os.environ.update(ANTHROPIC_API_KEY="sk-ant-test-not-real", OPENAI_API_KEY="sk-test-not-real",
                       DEEPGRAM_API_KEY="test-not-real", ELEVENLABS_API_KEY="test-not-real",
                       TWILIO_ACCOUNT_SID="", TWILIO_AUTH_TOKEN="", GOOGLE_CLIENT_SECRET="",
-                      GOOGLE_PLACES_API_KEY="", CODER_BACKEND="none")
+                      GOOGLE_PLACES_API_KEY="", CODER_BACKEND="none",
+                      CODER_SANDBOX_DIR=os.path.join(_TMP, "coder-sandbox"))

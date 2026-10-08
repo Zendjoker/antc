@@ -4,6 +4,9 @@ times out, is size-capped, and only goes to public addresses (computer/pages.py'
 APIs (OpenStreetMap Nominatim / Overpass, Google Places) are governed by their usage policies rather than robots.txt:
 Nominatim at most 1 request per second with an identifying User-Agent, Overpass a few seconds apart, Places by quota.
 Business websites: robots.txt is checked for our User-Agent before each page.
+
+Cancellation (runctx): every function here checks the calling step's token before sending, while waiting its turn and
+between response chunks, so a stopped / timed-out step makes no further request.
 """
 
 import json
@@ -16,19 +19,20 @@ from dataclasses import dataclass, field
 
 import requests
 
+from room_agent.missions import runctx
+
 log = logging.getLogger("room-agent")
 UA = "JarvisResearch/1.0 (personal business-research assistant on a Windows PC; respects robots.txt)"
 MAX_BYTES = 3_000_000
 MIN_INTERVAL = {"nominatim.openstreetmap.org": 1.2, "overpass-api.de": 3.0, "overpass.kumi.systems": 3.0,
-                "places.googleapis.com": 0.2}
+                "places.googleapis.com": 0.2, "duckduckgo.com": 2.5}
 DEFAULT_INTERVAL = 1.0
 _lock = threading.Lock()
 _last = {}
 _robots = {}
 
 
-class Stopped(Exception):
-    """The mission was paused / stopped while waiting."""
+Stopped = runctx.Cancelled  # (the old name: the mission was paused / stopped while waiting)
 
 
 @dataclass
@@ -43,6 +47,7 @@ class Response:
     bytes: int = 0
     error: str = ""
     redirects: list = field(default_factory=list)
+    sent: object = False  # post(): True = it reached the server, None = unknown (connection dropped), False = never sent
 
     def json(self):
         return json.loads(self.text)
@@ -56,14 +61,15 @@ def _wait_turn(url, cancel=None):
     host = _host(url)
     gap = MIN_INTERVAL.get(host, DEFAULT_INTERVAL)
     while True:
+        runctx.check()
         with _lock:
             wait = _last.get(host, 0.0) + gap - time.time()
             if wait <= 0:
                 _last[host] = time.time()
                 return
         if cancel is not None and cancel():
-            raise Stopped()
-        time.sleep(min(wait, 0.25))
+            raise Stopped("stopped")
+        runctx.sleep(min(wait, 0.25))
 
 
 def allowed_by_robots(url, cancel=None):
@@ -76,6 +82,7 @@ def allowed_by_robots(url, cancel=None):
         verdict = None
         try:
             _wait_turn(origin, cancel)
+            runctx.check()
             r = requests.get(origin + "/robots.txt", headers={"User-Agent": UA}, timeout=10)
             if r.status_code >= 500:
                 verdict = False
@@ -97,6 +104,7 @@ def get(url, params=None, headers=None, timeout=20, respect_robots=True, cancel=
     """GET a public URL. -> Response (ok=False with `error` instead of raising, except Stopped)."""
     from room_agent.computer import pages
 
+    runctx.check()
     resp = Response(url=url)
     ok, why = pages._public(url)
     if not ok:
@@ -120,8 +128,8 @@ def get(url, params=None, headers=None, timeout=20, respect_robots=True, cancel=
                 body += chunk
                 if len(body) > max_bytes:
                     break
-                if cancel is not None and cancel():
-                    raise Stopped()
+                if (cancel is not None and cancel()) or runctx.cancelled():
+                    raise Stopped("stopped while reading a page")
             resp.bytes = len(body)
             resp.text = body.decode(r.encoding or "utf-8", errors="replace")
             resp.ok = 200 <= r.status_code < 400
@@ -131,26 +139,45 @@ def get(url, params=None, headers=None, timeout=20, respect_robots=True, cancel=
         raise
     except requests.Timeout:
         resp.error = "no answer in time"
+        resp.sent = True
+    except requests.ConnectionError as e:
+        resp.error = f"couldn't connect ({e.__class__.__name__})"
+        resp.sent = None  # (unknown: it may have failed before or after the request went out)
     except requests.RequestException as e:
         resp.error = f"couldn't connect ({e.__class__.__name__})"
+        resp.sent = None
     resp.elapsed_s = round(time.time() - t0, 2)
     return resp
+
+
+def search(query, max_results=8):
+    """A web search (DuckDuckGo through tools/web.py, no key), paced and cancellable. -> [result dicts]"""
+    from room_agent.tools import web
+
+    _wait_turn("https://duckduckgo.com/")
+    runctx.check()
+    results = web.search(query, news=False) or []
+    runctx.check()
+    return results[:max_results]
 
 
 def post(url, data=None, json_body=None, headers=None, timeout=40, cancel=None):
     """POST to a public API (no robots.txt: APIs have usage policies). -> Response"""
     from room_agent.computer import pages
 
+    runctx.check()
     resp = Response(url=url)
     ok, why = pages._public(url)
     if not ok:
         resp.error = f"not sent: {why}"
         return resp
     _wait_turn(url, cancel)
+    runctx.check()
     t0 = time.time()
     try:
         r = requests.post(url, data=data, json=json_body, headers={"User-Agent": UA, **(headers or {})}, timeout=timeout)
         resp.status, resp.final_url, resp.text, resp.headers = r.status_code, r.url, r.text[:MAX_BYTES], dict(r.headers)
+        resp.sent = True
         resp.ok = 200 <= r.status_code < 300
         if not resp.ok:
             resp.error = f"the API answered {r.status_code}"

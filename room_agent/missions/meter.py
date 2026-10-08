@@ -1,15 +1,28 @@
-"""Per-mission cost accounting and the hard budget.
+"""Per-mission cost accounting and the hard budget: reserve before, settle after, for every paid call.
 
-Every paid thing a mission does goes through charge():
-    model calls      tokens in / out, priced with llm/budget.py's table (the same prices as everything else)
-    paid API calls   e.g. Google Places requests, at the configured per-request estimate
-Before spending, check(estimate) refuses (BudgetExceeded) if the mission's spend plus the estimate would pass its budget;
-the engine then pauses the mission ("paused: budget") instead of continuing. Free work (OpenStreetMap, fetching public
-pages, generating sites from templates) costs nothing and is never blocked.
+    with meter.paid(estimate_usd, "what", provider=..., model=...) as charge:
+        response = <the paid call>                 # (no hidden SDK retries: see llm.py)
+        charge.actual(usd, tokens_in, tokens_out)   # what the provider's usage numbers say it cost
+
+    - reserve: ATOMIC in SQLite (one UPDATE ... WHERE spent + reserved + estimate <= budget): two steps, or an
+      abandoned step and a new one, can't both squeeze under the budget. Refused -> BudgetExceeded (the engine pauses
+      the mission, "paused: budget"). The PC's daily model budget (DAILY_BUDGET_USD) is checked too.
+    - settle: the reservation is replaced by the actual cost. If the call failed in a way where the provider may
+      still have charged (timeout, dropped connection, server error, no usage numbers), the FULL estimate is recorded
+      as an "uncertain" charge: the budget never assumes a free call that might not have been free.
+      Released (nothing charged) only when the request provably wasn't billed: it was never sent, or the provider
+      rejected it outright (4xx: bad request, auth, rate limit).
+    - after a crash, reservations still open are settled as uncertain at their full estimate (engine.load).
+Estimates are upper bounds: input ~3 characters a token (pessimistic), the output at its full cap, the model's price
+(unknown models at llm/budget.py's expensive UNKNOWN price). Free work (OpenStreetMap, fetching public pages, templates)
+costs nothing and never touches the ledger.
 """
 
 import logging
 import threading
+from contextlib import contextmanager
+
+from room_agent.missions import runctx
 
 log = logging.getLogger("room-agent")
 _local = threading.local()
@@ -17,44 +30,120 @@ _local = threading.local()
 
 class BudgetExceeded(Exception):
     def __init__(self, spent, budget, estimate, what):
-        super().__init__(f"{what} would cost ~${estimate:.4f}; spent ${spent:.4f} of ${budget:.2f}")
+        super().__init__(f"{what} would cost up to ${estimate:.4f}; spent / reserved ${spent:.4f} of ${budget:.2f}")
         self.spent, self.budget, self.estimate, self.what = spent, budget, estimate, what
 
 
-def bind(mission_id):
-    """The mission the current thread is working for (the engine sets it around each step)."""
+class NotSent(Exception):
+    """Raise (or wrap) inside paid() when the request provably never reached the provider: the reservation is released."""
+
+
+def bind(mission_id, step_key=""):
+    """The mission (and step) the current thread is working for (the engine sets it for each step run)."""
     _local.mission = mission_id
+    _local.step = step_key
 
 
 def current():
     return getattr(_local, "mission", None)
 
 
-def check(estimate_usd, what, mission_id=None):
+class _Charge:
+    def __init__(self, cid, estimate):
+        self.id, self.estimate = cid, estimate
+        self._actual = None
+
+    def actual(self, usd, tokens_in=0, tokens_out=0):
+        self._actual = (max(0.0, float(usd or 0.0)), int(tokens_in or 0), int(tokens_out or 0))
+
+    def not_billed(self):
+        """The provider answered and it's known not to be billed (e.g. a 4xx rejection)."""
+        self._actual = ("released", 0, 0)
+
+
+def _daily_check(estimate, what):
+    from room_agent.llm.budget import budget
+
+    if budget.limit > 0 and budget.total() + estimate > budget.limit:
+        raise BudgetExceeded(budget.total(), budget.limit, estimate, f"{what} (today's model budget, DAILY_BUDGET_USD)")
+
+
+@contextmanager
+def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True):
+    """Reserve -> run the block -> settle. Outside a mission (no mission bound) the call runs unmetered here (Jarvis's
+    own daily budget still applies through llm/budget.py)."""
     from room_agent.missions.store import store
 
+    runctx.check()
     mid = mission_id or current()
+    est = max(0.0, float(estimate_usd))
+    if daily:
+        _daily_check(est, what)
     if not mid:
+        c = _Charge(None, est)
+        yield c
         return
-    m = store().mission(mid)
-    if m and m["spent_usd"] + float(estimate_usd) > m["budget_usd"]:
-        raise BudgetExceeded(m["spent_usd"], m["budget_usd"], float(estimate_usd), what)
-
-
-def charge(usd=0.0, tokens_in=0, tokens_out=0, requests=0, what="", mission_id=None):
-    from room_agent.missions.store import store
-
-    mid = mission_id or current()
-    if not mid:
-        return
-    store().add_spend(mid, usd, tokens_in, tokens_out, requests)
-    if usd:
-        log.info("mission %s: %s cost $%.5f", mid, what or "a call", usd)
+    s = store()
+    cid = s.reserve(mid, est, what, provider, model, getattr(_local, "step", "") or "")
+    if cid is None:
+        m = s.mission(mid) or {"spent_usd": 0, "reserved_usd": 0, "budget_usd": 0}
+        raise BudgetExceeded(m["spent_usd"] + m.get("reserved_usd", 0), m["budget_usd"], est, what)
+    c = _Charge(cid, est)
+    try:
+        yield c
+    except NotSent as e:
+        s.settle(cid, 0, state="released", note=f"not sent: {e}"[:300])
+        raise
+    except BaseException as e:
+        if c._actual is not None and c._actual[0] == "released":
+            s.settle(cid, 0, state="released", note=f"not billed: {e.__class__.__name__}")
+        elif c._actual is not None:  # (the provider answered with usage; something after it failed)
+            usd, tin, tout = c._actual
+            s.settle(cid, usd, tin, tout, note=f"error after the call: {e.__class__.__name__}")
+        else:
+            s.settle(cid, est, state="uncertain", note=f"{e.__class__.__name__}: the provider may have charged; "
+                                                     "counted at the full estimate")
+            log.warning("mission %s: %s ended uncertain (%s): counted $%.4f", mid, what, e.__class__.__name__, est)
+        raise
+    if c._actual is None:
+        s.settle(cid, est, state="uncertain", note="no usage reported: counted at the full estimate")
+    elif c._actual[0] == "released":
+        s.settle(cid, 0, state="released", note="not billed")
+    else:
+        usd, tin, tout = c._actual
+        row = s.settle(cid, usd, tin, tout)
+        if row and usd > est * 1.05 + 1e-6:
+            log.warning("mission %s: %s cost $%.5f, above its estimate $%.5f (estimate too low?)", mid, what, usd, est)
+            s.event(mid, f"{what} cost ${usd:.4f}, more than its ${est:.4f} estimate", "warn")
 
 
 def model_estimate(model, prompt_chars, max_out_tokens):
-    """An upper-bound estimate for one model call (prompt ~4 chars a token)."""
+    """An upper bound for one model call: ~3 characters a token (pessimistic), +200 tokens of message overhead, the
+    output at its full cap, at the model's list price (expensive default for an unknown model)."""
     from room_agent.llm.budget import price
 
     p_in, _, _, p_out = price(model)
-    return (prompt_chars / 4 * p_in + max_out_tokens * p_out) / 1e6
+    tokens_in = prompt_chars / 3 + 200
+    return (tokens_in * p_in + max_out_tokens * p_out) / 1e6
+
+
+def settle_orphans():
+    """At startup: reservations left open by a crash -> uncertain, at their full estimate. -> how many."""
+    from room_agent.missions.store import store
+
+    s = store()
+    rows = s.open_charges()
+    for r in rows:
+        s.settle(r["id"], r["estimate_usd"], state="uncertain", note="Jarvis stopped during the call: counted at the full "
+                                                                     "estimate")
+    return len(rows)
+
+
+def count_request(what=""):
+    """A free request (OpenStreetMap, a web page): counted for the dashboard, never charged."""
+    from room_agent.missions.store import store
+
+    mid = current()
+    if mid:
+        runctx.check()
+        store().add_spend(mid, requests=1)

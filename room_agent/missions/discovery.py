@@ -2,12 +2,12 @@
 
     OpenStreetMap (default, free)   Nominatim turns the place name into coordinates; Overpass lists the businesses with
                                     the category's OSM tag around it (name, address, phone, website, email, hours).
-                                    Data (c) OpenStreetMap contributors, ODbL: reports credit it.
-    Google Places (optional)        Text Search (New) when GOOGLE_PLACES_API_KEY is set and the mission allows it. Paid per
-                                    request: each call is estimated and checked against the mission budget first.
-                                    Google's terms limit caching Places content (the place id may be kept; other fields
-                                    only briefly). Fields from Places are stored on the lead tagged with their source
-                                    and fetch date; refreshing / purging them on a schedule is NOT automated yet.
+                                    Data (c) OpenStreetMap contributors, ODbL: reports and demo sites credit it.
+    Google Places (optional)        Text Search (New) when GOOGLE_PLACES_API_KEY is set and the mission allows it; paid
+                                    per request, inside the mission budget. Its content stays in memory only
+                                    (missions/places.py): a Google-found business is persisted as its place id plus
+                                    whatever a non-Google source confirms. OpenStreetMap is always queried as well, to
+                                    confirm Google-found businesses (same phone, or same name within ~150 m).
 
 Nothing is invented: a business has exactly the fields a source returned; everything else is listed as missing.
 """
@@ -17,18 +17,12 @@ import math
 import re
 import time
 
-from room_agent import config
-from room_agent.missions import meter, net
-from room_agent.missions.store import norm_text
+from room_agent.missions import meter, net, places
+from room_agent.missions.store import norm_phone, norm_text
 
 log = logging.getLogger("room-agent")
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 OVERPASS = ("https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter")
-PLACES = "https://places.googleapis.com/v1/places:searchText"
-PLACES_FIELDS = ("places.id,places.displayName,places.formattedAddress,places.location,places.nationalPhoneNumber,"
-                 "places.internationalPhoneNumber,places.websiteUri,places.primaryType,places.primaryTypeDisplayName,"
-                 "places.businessStatus,places.googleMapsUri,nextPageToken")
-
 # category words -> OpenStreetMap tags (key, value regex)
 CATEGORIES = {
     "restaurant": [("amenity", "restaurant")],
@@ -101,7 +95,7 @@ def geocode(place, cancel=None):
         return hit
     r = net.get(NOMINATIM, params={"q": place, "format": "jsonv2", "limit": 1, "addressdetails": 1}, respect_robots=False,
                 cancel=cancel, timeout=20)
-    meter.charge(requests=1, what="Nominatim geocode")
+    meter.count_request("Nominatim geocode")
     if not r.ok:
         raise DiscoveryError(f"couldn't look up '{place}' on OpenStreetMap: {r.error}")
     rows = r.json()
@@ -154,7 +148,7 @@ def from_osm(category, place, radius_km=3.0, limit=150, cancel=None):
     last = ""
     for url in OVERPASS:
         r = net.post(url, data={"data": q}, timeout=90, cancel=cancel)
-        meter.charge(requests=1, what="Overpass query")
+        meter.count_request("Overpass query")
         if r.ok:
             break
         last = r.error
@@ -197,65 +191,76 @@ def from_osm(category, place, radius_km=3.0, limit=150, cancel=None):
     return center, out
 
 
-def from_places(category, place, limit=60, cancel=None):
-    """-> [profile] from Google Places Text Search (New). Each page is a paid request: budget-checked first."""
-    if not config.GOOGLE_PLACES_API_KEY:
-        raise DiscoveryError("no GOOGLE_PLACES_API_KEY set")
-    out, token, pages = [], None, 0
-    fetched = time.strftime("%Y-%m-%d")
-    while len(out) < limit and pages < 3:
-        meter.check(config.PLACES_COST_PER_REQUEST, "a Google Places search")
-        body = {"textQuery": f"{category} in {place}", "pageSize": 20, "languageCode": "en"}
-        if token:
-            body["pageToken"] = token
-        r = net.post(PLACES, json_body=body, timeout=30, cancel=cancel,
-                     headers={"X-Goog-Api-Key": config.GOOGLE_PLACES_API_KEY, "X-Goog-FieldMask": PLACES_FIELDS})
-        meter.charge(usd=config.PLACES_COST_PER_REQUEST, requests=1, what="Google Places search")
-        pages += 1
-        if not r.ok:
-            raise DiscoveryError(f"Google Places refused the search ({r.error})")
-        data = r.json()
-        for p in data.get("places", []):
-            name = ((p.get("displayName") or {}).get("text") or "").strip()
-            if not name:
-                continue
-            loc = p.get("location") or {}
-            out.append({
-                "key": f"gplaces:{p['id']}", "name": name,
-                "category": (p.get("primaryTypeDisplayName") or {}).get("text") or category,
-                "address": p.get("formattedAddress", ""), "city": place,
-                "lat": loc.get("latitude"), "lon": loc.get("longitude"),
-                "phone": p.get("nationalPhoneNumber") or p.get("internationalPhoneNumber") or "",
-                "website": p.get("websiteUri", ""),
-                "sources": [p.get("googleMapsUri") or f"https://www.google.com/maps/place/?q=place_id:{p['id']}"],
-                "extra": {"places": {"id": p["id"], "fetched": fetched, "status": p.get("businessStatus", "")},
-                          "disused": p.get("businessStatus") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY")},
-            })
-        token = data.get("nextPageToken")
-        if not token:
-            break
-    return out[:limit]
+def _similar(a, b):
+    ta, tb = set(norm_text(a).split()) - {"the", "and", "restaurant", "cafe", "bar"}, set(norm_text(b).split()) - {
+        "the", "and", "restaurant", "cafe", "bar"}
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= 0.6 or norm_text(a) in norm_text(b) or norm_text(b) in norm_text(a)
+
+
+def _match_osm(c, osm):
+    """The OpenStreetMap business that is this Google place: same phone, or a similar name within ~150 m."""
+    phone = norm_phone(c.get("phone"))
+    for p in osm:
+        if phone and phone == norm_phone(p.get("phone")):
+            return p
+    if c.get("lat") is None:
+        return None
+    for p in osm:
+        if p.get("lat") and _similar(c["name"], p["name"]) and _distance_km(c["lat"], c["lon"], p["lat"], p["lon"]) < 0.15:
+            return p
+    return None
+
+
+def from_places(category, place, osm, limit=60):
+    """-> [persistable profile] for Google-found businesses. Matched to OpenStreetMap: the OSM profile (OSM fields,
+    OSM source) plus the place id. Not matched: only the place id and our own search terms; the Google content stays
+    in memory (places.recall) until a non-Google source confirms it during research."""
+    found = places.text_search(f"{category} in {place}", limit=limit)
+    out, used = [], set()
+    for pid, c in found:
+        if c.get("status") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"):
+            continue  # (used, not stored)
+        m = _match_osm(c, osm)
+        if m is not None and m["key"] not in used:
+            used.add(m["key"])
+            prof = dict(m)
+            prof["place_id"] = pid
+            prof["extra"] = {**m["extra"], "places": {"id": pid}, "google_match": "matched on OpenStreetMap"}
+            out.append(prof)
+            continue
+        out.append({"key": f"gplaces:{pid}", "place_id": pid, "name": f"Google place {pid[:10]}",
+                    "category": category, "city": place, "sources": [],
+                    "extra": {"places": {"id": pid}, "google_only": True, "verified_by": {}}})
+    return out, used
 
 
 def discover(category, place, radius_km=3.0, pool=60, use_places="auto", cancel=None):
-    """-> (center or None, [profile], notes). Uses Places when allowed and configured, OSM otherwise / as well."""
-    notes, found, center = [], [], None
-    want_places = use_places is True or (use_places == "auto" and bool(config.GOOGLE_PLACES_API_KEY))
+    """-> (center or None, [persistable profile], notes). OpenStreetMap always; Google Places too when allowed."""
+    notes = []
+    want_places = use_places is True or (use_places == "auto" and places.enabled())
+    center, osm, osm_error = None, [], None
+    try:
+        center, osm = from_osm(category, place, radius_km, limit=max(pool * 2, 60), cancel=cancel)
+        notes.append(f"OpenStreetMap: {len(osm)} businesses within {radius_km:g} km of {center['name'][:80]}")
+    except DiscoveryError as e:
+        osm_error = e
+        notes.append(f"OpenStreetMap not used: {e}")
+    found = []
     if want_places:
         try:
-            found += from_places(category, place, limit=pool, cancel=cancel)
-            notes.append(f"Google Places: {len(found)} businesses")
+            g, used = from_places(category, place, osm, limit=pool)
+            matched = sum(1 for p in g if not p["key"].startswith("gplaces:"))
+            notes.append(f"Google Places: {len(g)} businesses ({matched} confirmed on OpenStreetMap; the rest are kept as "
+                         "place ids until their own website confirms them)")
+            found += g
+            osm = [p for p in osm if p["key"] not in used]
         except meter.BudgetExceeded:
             raise
-        except DiscoveryError as e:
+        except places.PlacesError as e:
             notes.append(f"Google Places not used: {e}")
-    if len(found) < pool:
-        try:
-            center, osm = from_osm(category, place, radius_km, limit=max(pool * 2, 60), cancel=cancel)
-            notes.append(f"OpenStreetMap: {len(osm)} businesses within {radius_km:g} km of {center['name'][:80]}")
-            found += osm
-        except DiscoveryError as e:
-            if not found:
-                raise
-            notes.append(f"OpenStreetMap not used: {e}")
+    found += osm
+    if not found and osm_error is not None:
+        raise osm_error
     return center, [p for p in found if not p["extra"].get("disused")][: max(pool * 2, pool)], notes

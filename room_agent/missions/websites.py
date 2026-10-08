@@ -142,6 +142,7 @@ def analyze(url, lead, cancel=None):
         check("no_flash", False, "uses Flash (doesn't run in modern browsers)", 15)
     if re.search(r"\b(menu|hours|open)\b", text, re.I) is None and "restaurant" in (lead.get("category") or ""):
         check("menu_or_hours", False, "no menu or opening hours on the home page", 8)
+    a["confirms"] = confirms(text, lead)
     a["builder"] = next((v for k, v in BUILDERS.items() if k in low[:200000]), "")
     a["emails"] = _emails(html, host(final))
     contact = _contact_page(doc, final)
@@ -169,6 +170,19 @@ def _contact_page(doc, base):
     return ""
 
 
+def confirms(page_text, lead):
+    """Which of the lead's facts this page shows: {"phone": bool, "address": bool, "name": bool}. Used to confirm facts
+    from a non-Google source before they may be stored (places.py)."""
+    digits = re.sub(r"\D", "", page_text or "")
+    norm = norm_text(page_text or "")
+    phone = norm_phone(lead.get("phone", ""))
+    m = re.match(r"(\d+)\s+(\w+)", norm_text(lead.get("address", "")))
+    name = [w for w in norm_text(lead.get("name", "")).split() if len(w) > 2]
+    return {"phone": bool(phone and phone[-7:] in digits),
+            "address": bool(m and re.search(rf"\b{m.group(1)}\s+{re.escape(m.group(2))}", norm)),
+            "name": bool(name and all(w in norm for w in name))}
+
+
 # ---------------------------------------------------------------- finding a site the data didn't list
 def _matches(page_text, lead):
     """Does a page belong to this business? -> (strength, why). Phone or street address = strong; name only = weak."""
@@ -188,13 +202,14 @@ def _matches(page_text, lead):
 
 def find_official_site(lead, cancel=None, search=None):
     """Search the web for the business's own site. -> dict(status, website, evidence, social, directories, possible)"""
-    from room_agent.tools import web
+    from room_agent.missions import runctx
 
-    search = search or (lambda q: web.search(q, news=False))
+    search = search or net.search
     q = f"{lead['name']} {lead.get('city') or ''}".strip()
-    net._wait_turn("https://duckduckgo.com/", cancel)
     try:
         results = search(q) or []
+    except runctx.Cancelled:
+        raise
     except Exception as e:  # noqa: BLE001
         return {"status": "unknown", "evidence": [f"the web search for '{q}' failed ({e.__class__.__name__})"], "query": q}
     when = time.strftime("%Y-%m-%d")

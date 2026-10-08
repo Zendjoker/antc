@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from room_agent import config
-from room_agent.missions import llm, meter
+from room_agent.missions import llm, meter, runctx
 
 log = logging.getLogger("room-agent")
 
@@ -161,12 +161,21 @@ def polish(lead, subject, body):
     return subject, text, "wording polished by a model, facts checked"
 
 
-def prepare(lead, mission_id, workspace, has_demo):
-    """Write the drafts to the mission folder and the database. -> (dict of paths / ids, [problems])"""
-    from room_agent.missions.store import store
-    from room_agent.missions.sitegen import slug
+def _write(path, text):
+    """Atomic: a crash leaves the old file or the new one, never half of one."""
+    runctx.check()
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
-    s = store()
+
+def prepare(lead, mission_id, workspace, has_demo, s=None):
+    """Write the drafts to the mission folder and the database. Safe to repeat (a resumed step): it updates the same
+    draft and never queues a second approval for it. -> (dict of paths / ids, [problems])"""
+    from room_agent.missions.sitegen import slug
+    from room_agent.missions.store import store
+
+    s = s or store()
     folder = Path(workspace) / "outreach" / slug(lead["name"], lead["id"])
     folder.mkdir(parents=True, exist_ok=True)
     problems = sender_problems()
@@ -175,14 +184,13 @@ def prepare(lead, mission_id, workspace, has_demo):
     recipient = lead.get("email") or ""
     if not recipient:
         problems.append("no public email address was found for this business (call notes only)")
-    (folder / "email.txt").write_text(f"To: {recipient or '[no public email found]'}\nSubject: {subject}\n\n{body}\n",
-                                      encoding="utf-8")
-    (folder / "call-notes.md").write_text(talking_points(lead, has_demo), encoding="utf-8")
-    (folder / "proposal.md").write_text(proposal(lead, has_demo), encoding="utf-8")
+    _write(folder / "email.txt", f"To: {recipient or '[no public email found]'}\nSubject: {subject}\n\n{body}\n")
+    _write(folder / "call-notes.md", talking_points(lead, has_demo))
+    _write(folder / "proposal.md", proposal(lead, has_demo))
     existing = [o for o in s.outreach(lead_id=lead["id"]) if o["mission_id"] == mission_id and o["kind"] == "email"]
     if existing:
         oid = existing[-1]["id"]
-        if existing[-1]["status"] == "draft":
+        if existing[-1]["status"] == "draft":  # (never rewrite one that's already in Gmail or being sent there)
             s.update_outreach(oid, subject=subject, body=body, recipient=recipient, problems=problems)
     else:
         oid = s.add_outreach(lead["id"], mission_id, "email", body, subject, recipient, problems)
@@ -194,35 +202,97 @@ def prepare(lead, mission_id, workspace, has_demo):
     return {"folder": str(folder), "outreach_id": oid, "approval_id": approval, "note": note}, problems
 
 
-def execute_approval(approval):
-    """Carry out an approved action. Only 'gmail_draft' exists: it creates a draft in your Gmail, never sends."""
+# Gmail errors that prove no draft was created (it never got that far): the approval can simply be tried again
+_NOT_CREATED = ("NotConfigured", "NotConnected", "AuthCanceled", "AuthExpired", "MissingScope", "RateLimited", "NotFound")
+
+
+def approve(aid, via):
+    """Carry out one approval. Only 'gmail_draft' exists: it creates a draft in your Gmail, never sends.
+    Two-phase, so a crash or a double click can't create two drafts:
+        pending -> (checks) -> executing (atomic claim) -> Gmail -> done
+        a failure that proves nothing was created -> back to pending (try again)
+        any other failure (network error, a draft that didn't read back as written) -> UNKNOWN: it may exist in Gmail;
+        it is never retried automatically ("retry" after you've looked in your Drafts)
+    -> (ok, message)"""
     from room_agent.missions.store import store
 
     s = store()
-    if approval["action"] != "gmail_draft":
-        return False, f"unknown action '{approval['action']}'"
-    o = next((x for x in s.outreach(approval["mission_id"]) if x["id"] == approval["payload"].get("outreach_id")), None)
+    a = s.approval(aid)
+    if a is None:
+        return False, "there's no approval with that number"
+    if a["status"] != "pending":
+        return False, {"executing": "it's being done right now", "done": "it's already done",
+                       "unknown": "its last attempt may or may not have created the draft: look in Gmail's Drafts, then "
+                                  "say 'retry' if it isn't there", "rejected": "it was rejected"}.get(a["status"], a["status"])
+    if a["action"] != "gmail_draft":
+        return False, f"unknown action '{a['action']}'"
+    o = next((x for x in s.outreach(a["mission_id"]) if x["id"] == (a["payload"] or {}).get("outreach_id")), None)
     if o is None:
         return False, "the draft it refers to is gone"
     if o["status"] != "draft":
-        return False, f"already done ({o['status']})"
-    blocking = [p for p in (o.get("problems") or []) if "isn't set" in p]
+        return False, f"that draft is already {o['status']}"
+    blocking = sender_problems()  # (checked now, not when the draft was written: you may have fixed them since)
     if blocking:
-        return False, "fix these first: " + "; ".join(blocking)
+        return False, "fix these first (in .env, then restart Jarvis): " + "; ".join(blocking)
     if not o["recipient"]:
         return False, "no recipient"
     try:
         from room_agent.integrations import provider
-        from room_agent.integrations.google.gmail import GmailService
 
         g = provider("google")
         if not g.can("gmail", "compose"):
             return False, "Gmail isn't connected with permission to write drafts"
+    except Exception as e:  # noqa: BLE001
+        return False, f"Gmail isn't available ({e.__class__.__name__})"
+    if not s.claim_approval(aid, via):
+        return False, "it's already being handled"
+    s.update_outreach(o["id"], status="sending_to_gmail")
+    try:
+        from room_agent.integrations.google.gmail import GmailService
+
         draft = GmailService(g).create_draft(o["recipient"], o["subject"], o["body"])
     except Exception as e:  # noqa: BLE001
-        return False, f"Gmail draft not created ({e.__class__.__name__}: {str(e)[:150]})"
+        name = e.__class__.__name__
+        if name in _NOT_CREATED:
+            s.update_outreach(o["id"], status="draft")
+            s.finish_approval(aid, "failed", f"{name}: nothing was created")
+            s._exec("UPDATE approvals SET status='pending' WHERE id=? AND status='failed'", (aid,))
+            return False, f"Gmail draft not created ({name}); nothing was created, so it can be approved again later"
+        s.update_outreach(o["id"], status="unknown")
+        s.finish_approval(aid, "unknown", f"{name}: {str(e)[:150]}")
+        return False, (f"not confirmed ({name}): the draft may or may not be in Gmail. Look in your Drafts; if it isn't "
+                       "there, say 'retry approval " + str(aid) + "'.")
     s.update_outreach(o["id"], status="gmail_draft", external_id=str(draft.get("id", "")))
+    s.finish_approval(aid, "done", f"Gmail draft {draft.get('id', '?')} created and read back")
     lead = s.lead(o["lead_id"])
     if lead and lead["contact_status"] == "not contacted":
         s.update_lead(lead["id"], contact_status="draft in Gmail (not sent)")
-    return True, f"Gmail draft created (id {draft.get('id', '?')}); it is NOT sent: open Gmail to review and send it yourself"
+    return True, "Gmail draft created and read back; it is NOT sent: open Gmail to review and send it yourself"
+
+
+def retry(aid, via):
+    """After an UNKNOWN outcome, once you've checked Gmail's Drafts: make it approvable again, then approve."""
+    from room_agent.missions.store import store
+
+    s = store()
+    a = s.approval(aid)
+    if a is None or a["status"] != "unknown":
+        return False, "only an approval whose outcome is unknown can be retried"
+    oid = (a["payload"] or {}).get("outreach_id")
+    s._exec("UPDATE approvals SET status='pending', result=? WHERE id=? AND status='unknown'",
+            (f"retried by {via} after checking Gmail", aid))
+    s._exec("UPDATE outreach SET status='draft' WHERE id=? AND status='unknown'", (oid,))
+    return approve(aid, via)
+
+
+def recover_approvals():
+    """At startup: an approval left 'executing' by a crash may or may not have created its draft -> unknown."""
+    from room_agent.missions.store import store
+
+    s = store()
+    rows = s._rows("SELECT * FROM approvals WHERE status='executing'")
+    for a in rows:
+        s.finish_approval(a["id"], "unknown", "Jarvis stopped while creating the draft: check Gmail's Drafts")
+        s._exec("UPDATE outreach SET status='unknown' WHERE id=? AND status='sending_to_gmail'",
+                ((a["payload"] or {}).get("outreach_id"),))
+    return len(rows)

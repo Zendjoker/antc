@@ -2,21 +2,31 @@
 prepare outreach for the best ones. Category- and city-agnostic (restaurants in San Francisco, dentists in Austin...).
 
 Plan (steps run by missions/engine.py, checkpointed in missions.db):
-    discover               find candidates (OpenStreetMap; Google Places if configured) -> one research step each
+    discover               find candidates (OpenStreetMap; Google Places if configured) -> one research step each.
+                           Re-running it (a resumed mission) reuses the businesses already found: no second paid search.
     research:<lead>        verify the website status (their listed site, else a web search), check its quality, collect
-                           a public email from their own site, score it with reasons; stops early once enough qualify
+                           a public email from their own site, score it with reasons; stops early once enough qualify.
+                           Google-only businesses: facts are stored only once their own website confirms them.
     rank                   pick the best `count` that match the website filter; write leads.csv / leads.json / report.md
-    demo:<lead>            build a demo site for the top `demos` (checked against the content rules)
-    outreach:<lead>        email draft + call notes + proposal; an approval request to put the email in Gmail as a draft
-Code decides everything here; models are only used (optionally) for wording and for site edits you ask for.
+    demo:<lead>            build a demo site for the top `demos` (staged, checked, swapped in atomically)
+    outreach:<lead>        email draft + call notes + proposal; one approval request (ever) to put the email in Gmail as
+                           a draft
+    redesign:<project>:<n> colour / layout change, rebuilt from the facts (free, no model)
+    edit:<project>:<n>     a free-form change by the sandboxed coding worker (paid; never repeated automatically)
+Every step is safe to resume: leads are deduplicated (key, place id, phone, name + address) under one lock, research
+rows are keyed per mission + lead, drafts are updated in place, approvals are created at most once per draft, and
+sites change only by an atomic swap. Code decides everything here; models are only used (optionally) for wording and
+for site edits you ask for.
 """
 
+import hashlib
 import logging
+import re
 import time
 from pathlib import Path
 
 from room_agent import config
-from room_agent.missions import discovery, engine, outreach, sitegen, websites
+from room_agent.missions import discovery, engine, outreach, places, runctx, sitegen, websites
 from room_agent.missions.engine import StepResult, StepSpec, Workflow
 from room_agent.missions.store import norm_phone, norm_text, store
 
@@ -29,12 +39,13 @@ FILTERS = {
 }
 FRESH_S = 14 * 86400  # research younger than this is reused instead of fetched again
 MIN_SCORE = 35
+GOOGLE_PLACEHOLDER = "[Google Maps data]"
 
 
 def normalize(params):
     p = dict(params or {})
-    p["category"] = str(p.get("category") or "").strip()
-    p["location"] = str(p.get("location") or "").strip()
+    p["category"] = str(p.get("category") or "").strip()[:60]
+    p["location"] = str(p.get("location") or "").strip()[:120]
     p["count"] = max(1, min(int(p.get("count") or 20), 50))
     p["radius_km"] = max(0.5, min(float(p.get("radius_km") or 3.0), 25.0))
     p["website_filter"] = p.get("website_filter") if p.get("website_filter") in FILTERS else "none_or_poor"
@@ -56,6 +67,23 @@ def describe(p):
 def plan(p):
     return [StepSpec("discover", "discover", f"Find {p['category']} in {p['location']}", max_attempts=3),
             StepSpec("rank", "rank", "Rank the opportunities and write the report", depends=["discover", "~research:*"])]
+
+
+def _write(path, text):
+    runctx.check()
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def display_name(lead):
+    """The name to show / speak: the stored one, or (Google-only, unconfirmed) the in-memory Google one, attributed."""
+    if str(lead.get("name", "")).startswith("Google place ") and lead.get("place_id"):
+        c = places.recall(lead["place_id"])
+        if c and c.get("name"):
+            return f"{c['name']} (Google Maps)"
+    return lead.get("name", "")
 
 
 # ---------------------------------------------------------------- steps
@@ -83,57 +111,57 @@ def _dedupe(profiles):
     return out
 
 
+def _research_steps(leads):
+    return [StepSpec(f"research:{x['id']}", "research", f"Check {x['name']}", {"lead_id": x["id"]}, ["discover"],
+                     max_attempts=2) for x in leads]
+
+
 def step_discover(ctx, step):
     p = ctx.params
+    known = ctx.store.leads(mission_id=ctx.id, limit=1000)
+    if known:  # (a resumed / retried discovery: the businesses are already stored; don't search (or pay) again)
+        return StepResult(True, {"found": len(known), "reused": True},
+                          evidence=f"{len(known)} businesses already found by this mission (not searched again)",
+                          add=_research_steps(known))
     pool = min(max(p["count"] * 3, 30), 150)
     center, profiles, notes = discovery.discover(p["category"], p["location"], p["radius_km"], pool, p["use_places"],
                                                  cancel=ctx.stop_requested)
     profiles = _dedupe(profiles)[:pool]
     if not profiles:
         return StepResult(False, error="no businesses of that kind were found there (" + "; ".join(notes) + ")")
-    ids, new = [], 0
+    new = 0
     for prof in profiles:
-        lid, created = ctx.store.upsert_lead(prof, ctx.id)
-        ids.append(lid)
+        _, created = ctx.store.upsert_lead(prof, ctx.id)
         new += created
     for n in notes:
         ctx.log(n)
-    add = [StepSpec(f"research:{lid}", "research", f"Check {prof['name']}", {"lead_id": lid}, ["discover"], max_attempts=2)
-           for lid, prof in zip(ids, profiles)]
-    return StepResult(True, {"found": len(ids), "new": new, "center": center, "notes": notes},
-                      evidence=f"{len(ids)} businesses from: " + "; ".join(notes), add=add)
+    leads = ctx.store.leads(mission_id=ctx.id, limit=1000)
+    return StepResult(True, {"found": len(leads), "new": new, "center": center, "notes": notes},
+                      evidence=f"{len(leads)} businesses from: " + "; ".join(notes), add=_research_steps(leads))
 
 
 def _matches_filter(lead, flt):
     return lead.get("website_status") in FILTERS[flt] and (lead.get("score") or 0) >= MIN_SCORE and lead.get("level") != "excluded"
 
 
-def step_research(ctx, step):
-    s = ctx.store
-    lead = s.lead(step["args"]["lead_id"])
-    if lead is None:
-        return StepResult(False, error="the lead is gone from the database")
-    flt = ctx.params["website_filter"]
-    if lead.get("researched") and time.time() - lead["researched"] < FRESH_S and lead["website_status"] != "unchecked":
-        return _maybe_enough(ctx, lead, flt, StepResult(True, {"reused": True}, evidence=f"researched on "
-                             f"{time.strftime('%Y-%m-%d', time.localtime(lead['researched']))}: {lead['website_status']}"))
-    cancel = ctx.stop_requested
+def _check_website(view, cancel):
+    """-> (status, analysis, search, sources) for the business described by `view` (stored or in-memory facts)."""
     analysis, search, sources = {}, None, []
-    site = lead.get("website") or ""
+    site = view.get("website") or ""
     if site and websites.kind_of(site) == "site":
-        analysis = websites.analyze(site, lead, cancel)
+        analysis = websites.analyze(site, view, cancel)
         status = analysis["status"]
         sources.append(site)
         if status == "broken":  # (the listed address may just be out of date: look for a current one)
-            search = websites.find_official_site(lead, cancel)
+            search = websites.find_official_site(view, cancel)
             if search["status"] == "found" and websites.host(search["website"]) != websites.host(site):
-                analysis = websites.analyze(search["website"], lead, cancel)
+                analysis = websites.analyze(search["website"], view, cancel)
                 status = analysis["status"]
                 sources.append(search["website"])
     else:
-        search = websites.find_official_site(lead, cancel)
+        search = websites.find_official_site(view, cancel)
         if search["status"] == "found":
-            analysis = websites.analyze(search["website"], lead, cancel)
+            analysis = websites.analyze(search["website"], view, cancel)
             status = analysis["status"]
             sources.append(search["website"])
         else:
@@ -142,32 +170,91 @@ def step_research(ctx, step):
                 search.setdefault("social" if websites.kind_of(site) == "social" else "directories", []).insert(0, site)
                 if status in ("none_found", "possible", "unknown"):
                     status = "social_only" if websites.kind_of(site) == "social" else "directory_only"
-    if ctx.stop_requested():
-        return StepResult(False, error="stopped")
+    return status, analysis, search, sources
+
+
+def _scrub(obj, values):
+    """Replace Google-only values (not confirmed elsewhere) inside what's about to be stored."""
+    if isinstance(obj, str):
+        for v in values:
+            obj = obj.replace(v, GOOGLE_PLACEHOLDER)
+        return obj
+    if isinstance(obj, list):
+        return [_scrub(x, values) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _scrub(v, values) for k, v in obj.items()}
+    return obj
+
+
+def step_research(ctx, step):
+    s = ctx.store
+    lead = s.lead(step["args"]["lead_id"])
+    if lead is None:
+        return StepResult(False, error="the lead is gone from the database", final=True)
+    flt = ctx.params["website_filter"]
+    if lead.get("researched") and time.time() - lead["researched"] < FRESH_S and lead["website_status"] != "unchecked":
+        return _maybe_enough(ctx, lead, flt, StepResult(True, {"reused": True}, evidence=f"researched on "
+                             f"{time.strftime('%Y-%m-%d', time.localtime(lead['researched']))}: {lead['website_status']}"))
+    google_only = bool((lead.get("extra") or {}).get("google_only"))
+    view, google = dict(lead), {}
+    if google_only:
+        google = places.content(lead["place_id"]) or {}  # (memory, or a paid Place Details request)
+        if not google:
+            return StepResult(False, error="this business was found on Google Maps, and its details can't be fetched "
+                                           "again (no Places key?)", final=True)
+        if google.get("status") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"):
+            s.update_lead(lead["id"], level="excluded", score=0, status="not a fit", researched=time.time(),
+                          reasons=[{"points": 0, "why": "listed as closed (Google Maps)"}])
+            return StepResult(True, {"status": "closed"}, evidence="listed as closed (Google Maps): excluded")
+        view.update({k: google.get(k) or "" for k in ("name", "phone", "address", "website")})
+    status, analysis, search, sources = _check_website(view, ctx.stop_requested)
+    ctx.check()
     fields = {"website_status": status, "researched": time.time()}
-    if search and search["status"] == "found" and not lead.get("website"):
-        fields["website"] = search["website"]
-    elif search and search["status"] == "found" and websites.kind_of(lead.get("website", "")) != "site":
-        fields["website"] = search["website"]
+    extra = dict(lead.get("extra") or {})
+    if google_only:
+        # store only what a non-Google source (the business's own site, loaded by us) confirms
+        site_url = analysis.get("final_url") if analysis.get("status") in ("ok", "poor") else ""
+        conf = analysis.get("confirms") or {}
+        verified = dict(extra.get("verified_by") or {})
+        if site_url and (conf.get("phone") or conf.get("address")):
+            verified["website"] = site_url
+            fields["website"] = site_url
+            for f in ("phone", "address", "name"):
+                if conf.get(f) and view.get(f):
+                    verified[f] = site_url
+                    fields[f] = view[f]
+        extra["verified_by"] = verified
+        unconfirmed = [view[f] for f in ("name", "phone", "address", "website") if view.get(f) and f not in verified]
+    else:
+        unconfirmed = []
+        if search and search["status"] == "found" and (not lead.get("website") or
+                                                       websites.kind_of(lead.get("website", "")) != "site"):
+            fields["website"] = search["website"]
     emails = analysis.get("emails") or []
     if emails and not lead.get("email"):
-        fields["email"] = emails[0]
-    extra = dict(lead.get("extra") or {})
+        fields["email"] = emails[0]  # (from the business's own site: not Google content)
     if search:
         extra["web_search"] = {k: search.get(k) for k in ("query", "social", "directories", "possible") if search.get(k)}
     fields["extra"] = extra
-    merged = {**lead, **fields, "analysis": analysis}
+    merged = {**view, **fields, "analysis": analysis}
     score, level, reasons, confidence = websites.score(merged, analysis, search)
     evidence = (analysis.get("evidence") or []) + ((search or {}).get("evidence") or [])
-    fields.update(analysis={**analysis, "evidence": evidence}, score=score, level=level, reasons=reasons,
-                  confidence=confidence, missing=websites.missing(merged),
-                  sources=sorted(set(lead.get("sources") or []) | set(sources)))
+    stored_analysis = {k: v for k, v in {**analysis, "evidence": evidence}.items() if k != "confirms"}
+    fields.update(analysis=stored_analysis, score=score, level=level, reasons=reasons, confidence=confidence,
+                  missing=websites.missing({**lead, **fields}), sources=sorted(set(lead.get("sources") or []) | set(sources)))
+    if unconfirmed:
+        fields = _scrub(fields, sorted(set(unconfirmed), key=len, reverse=True))
+        search = _scrub(search, unconfirmed)
+        analysis = _scrub(stored_analysis, unconfirmed)
+        sources = _scrub(sources, unconfirmed)
     s.update_lead(lead["id"], **fields)
-    s.add_research(lead["id"], ctx.id, "website", {"status": status, "analysis": analysis, "search": search,
-                                                   "score": score, "reasons": reasons}, sources)
+    s.add_research(lead["id"], ctx.id, "website", {"status": status, "analysis": fields["analysis"], "search": search,
+                                                   "score": score, "reasons": fields["reasons"]}, sources,
+                   ikey=f"{ctx.id}:{lead['id']}:website")
     lead = s.lead(lead["id"])
+    ev = fields["analysis"].get("evidence") or []
     res = StepResult(True, {"status": status, "score": score, "level": level},
-                     evidence=f"{lead['name']}: {status}, score {score} ({level}); " + (evidence[0] if evidence else ""))
+                     evidence=f"{lead['name']}: {status}, score {score} ({level}); " + (ev[0] if ev else ""))
     return _maybe_enough(ctx, lead, flt, res)
 
 
@@ -181,6 +268,16 @@ def _maybe_enough(ctx, lead, flt, res):
             res.skip = pending
             ctx.log(f"{good} businesses qualify (aim: {want}); skipping the other {len(pending)} checks")
     return res
+
+
+def _demo_specs(leads, outreach_too):
+    specs = []
+    for x in leads:
+        specs.append(StepSpec(f"demo:{x['id']}", "demo", f"Build a demo site for {x['name']}", {"lead_id": x["id"]}, []))
+        if outreach_too:
+            specs.append(StepSpec(f"outreach:{x['id']}", "outreach", f"Prepare outreach for {x['name']}",
+                                  {"lead_id": x["id"]}, [f"demo:{x['id']}"]))
+    return specs
 
 
 def step_rank(ctx, step):
@@ -198,16 +295,14 @@ def step_rank(ctx, step):
     for x in researched:
         if x["id"] not in chosen_ids and x["status"] == "candidate":
             s.update_lead(x["id"], status="not a fit")
-    csv_path, n = s.export(ctx.workspace / "leads.csv", ctx.id, "csv")
+    _, n = s.export(ctx.workspace / "leads.csv", ctx.id, "csv")
     s.export(ctx.workspace / "leads.json", ctx.id, "json")
-    report = _report(ctx, chosen, researched)
-    (ctx.workspace / "report.md").write_text(report, encoding="utf-8")
-    add = []
-    for x in chosen[:p["demos"]]:
-        add.append(StepSpec(f"demo:{x['id']}", "demo", f"Build a demo site for {x['name']}", {"lead_id": x["id"]}, ["rank"]))
-        if p["outreach"]:
-            add.append(StepSpec(f"outreach:{x['id']}", "outreach", f"Prepare outreach for {x['name']}",
-                                {"lead_id": x["id"]}, [f"demo:{x['id']}"]))
+    _write(ctx.workspace / "report.md", _report(ctx, chosen, researched))
+    buildable = [x for x in chosen if not sitegen.demo_blockers(x)]
+    if len(buildable) < len(chosen[:p["demos"]]):
+        ctx.log("some top businesses are only known from Google Maps (no other source confirms them), so no demo is "
+                "built for them", "warn")
+    add = _demo_specs(buildable[:p["demos"]], p["outreach"])
     if not chosen:
         ctx.log("no business matched the filter with enough evidence", "warn")
     return StepResult(True, {"qualified": len(chosen), "researched": len(researched), "report": str(ctx.workspace / "report.md")},
@@ -223,6 +318,8 @@ def _report(ctx, chosen, researched):
              "Website status meanings: none_found = none in the listing data and none found by a web search on the date "
              "checked (it may still exist); social_only / directory_only = only social or listing pages found; broken = "
              "the listed site didn't load; poor = loaded but failed several checks.", "",
+             "Businesses named \"Google place ...\" were found on Google Maps and nothing else confirmed their details; "
+             "Google's terms don't allow storing them, so they're shown live on the dashboard instead.", "",
              "| # | Business | Phone | Website status | Score | Confidence | Missing |", "|---|---|---|---|---|---|---|"]
     for i, x in enumerate(chosen, 1):
         lines.append(f"| {i} | {x['name']} | {x.get('phone') or '-'} | {x['website_status']} | {x.get('score')} "
@@ -236,7 +333,7 @@ def _report(ctx, chosen, researched):
         ev = (x.get("analysis") or {}).get("evidence") or []
         if ev:
             lines += ["- Evidence:"] + [f"  - {e}" for e in ev[:5]]
-        lines.append("- Sources: " + ", ".join(x.get("sources") or []))
+        lines.append("- Sources: " + (", ".join(x.get("sources") or []) or "-"))
     lines += ["", "---", "Business data from public sources; OpenStreetMap data © OpenStreetMap contributors (ODbL). "
               "Verify details with the business before relying on them."]
     return "\n".join(lines) + "\n"
@@ -246,10 +343,14 @@ def step_demo(ctx, step):
     s = ctx.store
     lead = s.lead(step["args"]["lead_id"])
     if lead is None:
-        return StepResult(False, error="the lead is gone from the database")
-    folder, problems = sitegen.build(lead, ctx.workspace)
+        return StepResult(False, error="the lead is gone from the database", final=True)
+    try:
+        folder, problems = sitegen.build(lead, ctx.workspace)
+    except ValueError as e:
+        return StepResult(False, error=f"no demo for this business: {e}", final=True)
     if problems:
-        return StepResult(False, error="the demo failed its own checks: " + "; ".join(problems))
+        return StepResult(False, error="the demo failed its own checks (nothing was changed): " + "; ".join(problems),
+                          final=True)
     proj = s.add_project(lead["id"], ctx.id, folder.name, folder, sitegen.STACK)
     s.project_history(proj["id"], {"what": "generated from the lead's facts", "by": "template"})
     if lead["status"] in ("candidate", "qualified"):
@@ -257,17 +358,38 @@ def step_demo(ctx, step):
     from room_agent.missions import preview
 
     return StepResult(True, {"project_id": proj["id"], "folder": str(folder), "preview": preview.url_for(folder)},
-                      evidence=f"{folder / 'index.html'} written and checked (name present, 'not official' banner, "
-                               "no reviews / prices / external scripts)")
+                      evidence=f"{folder / 'index.html'} built in staging, checked (name, 'not official' banner, noindex, "
+                               "no reviews / prices / external resources, contrast) and swapped in")
+
+
+def step_redesign(ctx, step):
+    s = ctx.store
+    proj = next((p for p in s.projects(ctx.id) if p["id"] == step["args"]["project_id"]), None)
+    if proj is None:
+        return StepResult(False, error="that demo site isn't part of this mission", final=True)
+    lead = s.lead(proj["lead_id"])
+    overrides = {k: step["args"].get(k) for k in ("layout", "color") if step["args"].get(k)}
+    try:
+        folder, problems = sitegen.build(lead, ctx.workspace, overrides)
+    except ValueError as e:
+        return StepResult(False, error=str(e), final=True)
+    if problems:
+        return StepResult(False, error="the new design failed its checks (nothing was changed): " + "; ".join(problems),
+                          final=True)
+    s.project_history(proj["id"], {"what": f"redesign {overrides}", "by": "template"})
+    engine._announce(f"{lead['name']}'s demo has the new look.", ctx.id)
+    return StepResult(True, {"folder": str(folder), **overrides}, evidence=f"rebuilt with {overrides}, checked, swapped in")
 
 
 def step_outreach(ctx, step):
     s = ctx.store
     lead = s.lead(step["args"]["lead_id"])
     if lead is None:
-        return StepResult(False, error="the lead is gone from the database")
+        return StepResult(False, error="the lead is gone from the database", final=True)
+    if sitegen.demo_blockers(lead):
+        return StepResult(False, error="no outreach: this business's details are only known from Google Maps", final=True)
     has_demo = bool(s.projects(lead_id=lead["id"]))
-    out, problems = outreach.prepare(lead, ctx.id, ctx.workspace, has_demo)
+    out, problems = outreach.prepare(lead, ctx.id, ctx.workspace, has_demo, s=s)
     for pr in problems:
         ctx.log(f"{lead['name']}: {pr}", "warn")
     if lead["status"] in ("candidate", "qualified", "demo built"):
@@ -286,20 +408,20 @@ def step_edit(ctx, step):
     s = ctx.store
     proj = next((p for p in s.projects(ctx.id) if p["id"] == step["args"]["project_id"]), None)
     if proj is None:
-        return StepResult(False, error="that demo site isn't part of this mission")
+        return StepResult(False, error="that demo site isn't part of this mission", final=True)
     lead = s.lead(proj["lead_id"])
-    r = coder.edit(proj["path"], lead, step["args"]["instruction"], cancel=ctx.stop_requested)
+    r = coder.edit(proj["path"], lead, step["args"]["instruction"])
     s.project_history(proj["id"], {"what": step["args"]["instruction"][:200], "by": r.get("backend"), "ok": r["ok"],
                                    "changed": r.get("changed"), "problems": r.get("problems")})
     if not r["ok"]:
-        why = "; ".join(r.get("problems") or ["the edit didn't work"]) + (" (rolled back)" if r.get("rolled_back") else "")
-        engine._announce(f"The change to {lead['name']}'s demo didn't work: {why[:200]}", ctx.id)
-        return StepResult(False, error=why)
+        why = "; ".join(r.get("problems") or ["the edit didn't work"])
+        engine._announce(f"The change to {lead['name']}'s demo wasn't applied: {why[:200]}", ctx.id)
+        return StepResult(False, error=why + " (the site is unchanged)", final=True)
     engine._announce(f"The change to {lead['name']}'s demo is done. {r.get('summary') or ''}"[:300], ctx.id)
-    return StepResult(True, r, evidence=f"changed {', '.join(r['changed'])}; site re-checked against the content rules")
+    return StepResult(True, r, evidence=f"changed {', '.join(r['changed'])} in a sandbox copy; checked; swapped in")
 
 
-# ---------------------------------------------------------------- reporting
+# ---------------------------------------------------------------- reporting / recovery
 def progress(ctx):
     leads = ctx.store.leads(mission_id=ctx.id, limit=1000)
     flt = ctx.params["website_filter"]
@@ -308,7 +430,7 @@ def progress(ctx):
     return {"leads_found": len(leads), "leads_researched": sum(1 for x in leads if x.get("researched")),
             "leads_qualifying": sum(_matches_filter(x, flt) for x in leads if x.get("researched")),
             "target": ctx.params["count"], "demos": len(projects), "drafts": len(drafts),
-            "top": [{"id": x["id"], "name": x["name"], "score": x.get("score"), "status": x["website_status"]}
+            "top": [{"id": x["id"], "name": display_name(x), "score": x.get("score"), "status": x["website_status"]}
                     for x in leads if x.get("researched") and _matches_filter(x, flt)][:5]}
 
 
@@ -329,7 +451,12 @@ def status_line(ctx, p):
         parts.append(f"Right now: {p['current'].lower()}.")
     if p.get("approvals_pending"):
         parts.append(f"{p['approvals_pending']} item{'s wait' if p['approvals_pending'] != 1 else ' waits'} for your approval.")
-    parts.append(f"Spent ${p['spent_usd']:.2f} of ${p['budget_usd']:.2f}.")
+    if p.get("approvals_unknown"):
+        parts.append(f"{p['approvals_unknown']} Gmail draft{'s' if p['approvals_unknown'] != 1 else ''} may or may not "
+                     "have been created: check Gmail's Drafts.")
+    parts.append(f"Spent ${p['spent_usd']:.2f} of ${p['budget_usd']:.2f}" +
+                 (f" (${p['uncertain_usd']:.2f} of it counted at full estimate because the provider's charge was unclear)."
+                  if p.get("uncertain_usd") else "."))
     return " ".join(parts)
 
 
@@ -347,51 +474,76 @@ def summarize(ctx):
              f"Files: {ctx.workspace}"]
     lines += [f"- {x['name']}: {x['website_status']}, score {x.get('score')}" for x in qualified[:5]]
     text = "\n".join(lines)
-    (ctx.workspace / "summary.md").write_text(f"# {ctx.mission['title']}\n\n{text}\n", encoding="utf-8")
+    _write(ctx.workspace / "summary.md", f"# {ctx.mission['title']}\n\n{text}\n")
     return text
+
+
+def recover(m):
+    """At startup: finish / undo half-done demo-site swaps in this mission's folder."""
+    ws = Path(m["workspace"])
+    return [f"demo sites: {x}" for x in sitegen.recover(ws)] if (ws / "sites").exists() else []
 
 
 WORKFLOW = engine.register(Workflow(
     kind="business", title="Business research & website demos", plan=plan,
     handlers={"discover": step_discover, "research": step_research, "rank": step_rank, "demo": step_demo,
-              "outreach": step_outreach, "edit": step_edit},
-    describe=describe, summarize=summarize, progress=progress, status_line=status_line,
-    timeouts={"discover": 240, "research": 180, "rank": 60, "demo": 60, "outreach": 120,
-              "edit": config.CODER_TIMEOUT_S + 30}))
+              "outreach": step_outreach, "edit": step_edit, "redesign": step_redesign},
+    describe=describe, summarize=summarize, progress=progress, status_line=status_line, recover=recover,
+    timeouts={"discover": 300, "research": 180, "rank": 60, "demo": 60, "redesign": 60, "outreach": 120,
+              "edit": config.CODER_TIMEOUT_S + 60}))
 
 
-# ---------------------------------------------------------------- what the voice tools call
+# ---------------------------------------------------------------- what the voice tools / dashboard call
 def start(params, budget_usd=None):
     return engine.create("business", normalize(params), budget_usd)
 
 
 def build_demos(mid, n=3, lead_ids=None):
-    """'Build demos for the best three' -> adds demo (+ outreach) steps for the top leads without a demo yet."""
+    """'Build demos for the best three' -> adds demo (+ outreach) steps for the top leads without a demo yet.
+    Re-asking adds nothing twice (step keys are per lead)."""
     s = store()
     m = s.mission(mid)
     if m is None:
         raise ValueError("no such mission")
     p = m["params"]
     have = {pr["lead_id"] for pr in s.projects(mid)}
+    queued = {st["args"].get("lead_id") for st in s.steps(mid) if st["kind"] == "demo" and st["state"] in ("pending",
+                                                                                                         "running")}
     if lead_ids:
         pick = [s.lead(i) for i in lead_ids if s.lead(i)]
     else:
         flt = p.get("website_filter", "none_or_poor")
-        pick = [x for x in s.leads(mission_id=mid, limit=1000) if x.get("researched") and _matches_filter(x, flt)]
-    pick = [x for x in pick if x["id"] not in have][: max(1, min(int(n), 10))]
-    specs = []
-    for x in pick:
-        specs.append(StepSpec(f"demo:{x['id']}", "demo", f"Build a demo site for {x['name']}", {"lead_id": x["id"]}, []))
-        if p.get("outreach", True):
-            specs.append(StepSpec(f"outreach:{x['id']}", "outreach", f"Prepare outreach for {x['name']}",
-                                  {"lead_id": x["id"]}, [f"demo:{x['id']}"]))
-    engine.add_steps(mid, specs)
+        pick = sorted((x for x in s.leads(mission_id=mid, limit=1000) if x.get("researched") and _matches_filter(x, flt)),
+                      key=lambda x: (-(x.get("score") or 0), -(x.get("confidence") or 0)))
+    pick = [x for x in pick if x["id"] not in have and x["id"] not in queued and not sitegen.demo_blockers(x)]
+    pick = pick[: max(1, min(int(n), 10))]
+    engine.add_steps(mid, _demo_specs(pick, p.get("outreach", True)))
     return pick
 
 
+def _same_pending(mid, kind, project_id, sig):
+    return any(st["kind"] == kind and st["state"] in ("pending", "running") and st["args"].get("project_id") == project_id
+               and st["args"].get("sig") == sig for st in store().steps(mid))
+
+
 def request_edit(mid, project_id, instruction):
-    key = f"edit:{project_id}:{int(time.time())}"
+    """Queue a coding-worker edit. The same request already waiting / running isn't queued again. -> key or None"""
+    sig = hashlib.sha1(re.sub(r"\s+", " ", instruction.lower()).strip().encode()).hexdigest()[:10]
+    if _same_pending(mid, "edit", project_id, sig):
+        return None
+    key = f"edit:{project_id}:{sig}:{int(time.time())}"
     engine.add_steps(mid, [StepSpec(key, "edit", f"Edit demo: {instruction[:60]}",
-                                    {"project_id": project_id, "instruction": instruction}, [], idempotent=False,
-                                    max_attempts=1)])
+                                    {"project_id": project_id, "instruction": instruction, "sig": sig}, [],
+                                    idempotent=False, max_attempts=1)])
+    return key
+
+
+def request_redesign(mid, project_id, layout=None, color=None):
+    sig = f"{layout or ''}:{color or ''}"
+    if _same_pending(mid, "redesign", project_id, sig):
+        return None
+    key = f"redesign:{project_id}:{int(time.time())}"
+    engine.add_steps(mid, [StepSpec(key, "redesign", f"New look for demo ({layout or ''} {color or ''})".strip(),
+                                    {"project_id": project_id, "layout": layout, "color": color, "sig": sig}, [],
+                                    max_attempts=2)])
     return key

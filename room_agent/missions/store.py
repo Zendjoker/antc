@@ -12,6 +12,12 @@ Tables
     approvals       external actions waiting for the user's decision, and the decision
     lead_missions   which missions touched which leads
     cache           small cached lookups (geocoding) with their time
+    charges         the budget ledger: every paid call is RESERVED (estimate) before it's made and SETTLED after
+                    (actual cost, or the full estimate when the provider's charge is uncertain)
+
+Google Places content (names, phones, addresses, coordinates, websites, status...) is never written here: only place
+ids (allowed indefinitely) and facts confirmed by a non-Google source. purge_places_content() removes any that an older
+version stored.
 
 Writes never silently overwrite a verified field with a different value: the new value is kept as research history and the
 conflict is noted instead.
@@ -70,9 +76,28 @@ CREATE TABLE IF NOT EXISTS approvals(
     decided_via TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS lead_missions(lead_id INTEGER NOT NULL, mission_id TEXT NOT NULL, PRIMARY KEY(lead_id, mission_id));
 CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, value TEXT NOT NULL, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS charges(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, step_key TEXT NOT NULL DEFAULT '', what TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', estimate_usd REAL NOT NULL,
+    actual_usd REAL, state TEXT NOT NULL, tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '', created REAL NOT NULL, settled REAL);
+CREATE INDEX IF NOT EXISTS charges_open ON charges(state);
+"""
+# columns added after the first version (added to an existing database by _migrate)
+MIGRATIONS = [
+    ("missions", "reserved_usd", "REAL NOT NULL DEFAULT 0"),
+    ("missions", "uncertain_usd", "REAL NOT NULL DEFAULT 0"),
+    ("steps", "run_id", "TEXT NOT NULL DEFAULT ''"),
+    ("research", "ikey", "TEXT"),
+    ("leads", "place_id", "TEXT NOT NULL DEFAULT ''"),
+    ("approvals", "started", "REAL"),
+]
+POST_MIGRATION = """
+CREATE UNIQUE INDEX IF NOT EXISTS research_ikey ON research(ikey);
+CREATE INDEX IF NOT EXISTS leads_place ON leads(place_id);
 """
 
-LEAD_FIELDS = ("name", "category", "address", "city", "lat", "lon", "phone", "website", "email", "website_status",
+LEAD_FIELDS = ("name", "category", "address", "city", "lat", "lon", "phone", "website", "email", "website_status", "place_id",
                "analysis", "score", "level", "reasons", "confidence", "missing", "status", "contact_status", "notes",
                "sources", "extra", "researched")
 JSON_FIELDS = {"analysis", "reasons", "missing", "sources", "extra", "params", "args", "depends", "result", "payload",
@@ -101,7 +126,15 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+        self.db.executescript(POST_MIGRATION)
         self.db.commit()
+
+    def _migrate(self):
+        for table, col, decl in MIGRATIONS:
+            have = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in have:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
     # ---------------------------------------------------------------- helpers
     def _rows(self, sql, args=()):
@@ -186,6 +219,15 @@ class Store:
     def update_step(self, sid, **fields):
         self._update("steps", "id", sid, fields)
 
+    def finish_step(self, sid, run_id, **fields):
+        """Record a run's outcome ONLY if that run still owns the step (it wasn't stopped / taken over meanwhile).
+        -> True if written."""
+        if not fields:
+            return False
+        sets = ", ".join(f"{k}=?" for k in fields)
+        args = [self._encode(k, v) for k, v in fields.items()] + [sid, run_id]
+        return self._exec(f"UPDATE steps SET {sets} WHERE id=? AND run_id=? AND state='running'", args).rowcount == 1
+
     # ---------------------------------------------------------------- events
     def event(self, mid, text, level="info"):
         self._exec("INSERT INTO events(mission_id, at, level, text) VALUES(?,?,?,?)", (mid, time.time(), level, str(text)[:500]))
@@ -194,10 +236,14 @@ class Store:
         return list(reversed(self._rows("SELECT * FROM events WHERE mission_id=? ORDER BY id DESC LIMIT ?", (mid, limit))))
 
     # ---------------------------------------------------------------- leads
-    def find_lead(self, key="", phone="", name="", address=""):
-        """The existing lead for a business: by stable key, then the same phone, then the same name + address."""
+    def find_lead(self, key="", phone="", name="", address="", place_id=""):
+        """The existing lead for a business: by stable key, its Google place id, the same phone, then name + address."""
         if key:
             hit = self._one("SELECT * FROM leads WHERE key=?", (key,))
+            if hit:
+                return hit
+        if place_id:
+            hit = self._one("SELECT * FROM leads WHERE place_id=?", (place_id,))
             if hit:
                 return hit
         p = norm_phone(phone)
@@ -214,9 +260,13 @@ class Store:
 
     def upsert_lead(self, profile, mission_id=""):
         """Add a business or merge into the same one already stored. -> (lead id, created?)"""
+        with self._lock:  # (find + insert as one unit: two threads can't both create the same business)
+            return self._upsert_lead(profile, mission_id)
+
+    def _upsert_lead(self, profile, mission_id):
         now = time.time()
         existing = self.find_lead(profile.get("key", ""), profile.get("phone", ""), profile.get("name", ""),
-                                  profile.get("address", ""))
+                                  profile.get("address", ""), profile.get("place_id", ""))
         if existing is None:
             fields = {k: profile.get(k) for k in LEAD_FIELDS if profile.get(k) not in (None, "")}
             fields.update(key=profile["key"], name=profile["name"], phone_norm=norm_phone(profile.get("phone", "")),
@@ -238,6 +288,8 @@ class Store:
                 old = existing.get(k)
                 if k == "sources":
                     merged[k] = sorted(set(old or []) | set(new))
+                elif k == "extra":
+                    merged[k] = {**(new or {}), **(old or {})}  # (what's stored wins; new keys are added)
                 elif old in (None, "", [], {}):
                     merged[k] = new
                 elif k in PROTECTED and str(old).strip().lower() != str(new).strip().lower():
@@ -287,9 +339,11 @@ class Store:
         args.append(int(limit))
         return self._rows(sql, args)
 
-    def add_research(self, lead_id, mission_id, kind, data, sources=()):
-        self._exec("INSERT INTO research(lead_id, mission_id, kind, at, data, sources) VALUES(?,?,?,?,?,?)",
-                   (lead_id, mission_id or "", kind, time.time(), json.dumps(data, default=str), json.dumps(list(sources))))
+    def add_research(self, lead_id, mission_id, kind, data, sources=(), ikey=None):
+        """ikey: the same key again (a retried / resumed step) replaces that row instead of adding a duplicate."""
+        self._exec("INSERT OR REPLACE INTO research(lead_id, mission_id, kind, at, data, sources, ikey) VALUES(?,?,?,?,?,?,?)",
+                   (lead_id, mission_id or "", kind, time.time(), json.dumps(data, default=str), json.dumps(list(sources)),
+                    ikey))
 
     def research(self, lead_id):
         return self._rows("SELECT * FROM research WHERE lead_id=? ORDER BY at", (lead_id,))
@@ -350,7 +404,7 @@ class Store:
 
     def add_approval(self, mission_id, lead_id, action, summary, payload):
         """An external action waiting for the user. The same pending action isn't queued twice."""
-        same = self._one("SELECT * FROM approvals WHERE mission_id=? AND action=? AND payload=? AND status='pending'",
+        same = self._one("SELECT * FROM approvals WHERE mission_id=? AND action=? AND payload=?",
                          (mission_id, action, json.dumps(payload, sort_keys=True)))
         if same:
             return same["id"]
@@ -376,8 +430,96 @@ class Store:
         return self._rows(sql + " ORDER BY created", args)
 
     def decide_approval(self, aid, status, via, result=""):
-        self._exec("UPDATE approvals SET status=?, decided=?, decided_via=?, result=? WHERE id=? AND status='pending'",
-                   (status, time.time(), via, str(result)[:500], aid))
+        """pending -> rejected (or any final status). -> True if this call made the change."""
+        return self._exec("UPDATE approvals SET status=?, decided=?, decided_via=?, result=? WHERE id=? AND status='pending'",
+                          (status, time.time(), via, str(result)[:500], aid)).rowcount == 1
+
+    def claim_approval(self, aid, via):
+        """pending -> executing, atomically: of two simultaneous approvals (voice + dashboard) only one gets True."""
+        return self._exec("UPDATE approvals SET status='executing', started=?, decided_via=? WHERE id=? AND status='pending'",
+                          (time.time(), via, aid)).rowcount == 1
+
+    def finish_approval(self, aid, status, result=""):
+        self._exec("UPDATE approvals SET status=?, decided=?, result=? WHERE id=? AND status='executing'",
+                   (status, time.time(), str(result)[:500], aid))
+
+    # ---------------------------------------------------------------- budget ledger
+    def reserve(self, mid, estimate_usd, what, provider="", model="", step_key=""):
+        """Reserve budget for a paid call, atomically. -> charge id, or None if it would pass the budget."""
+        est = max(0.0, float(estimate_usd))
+        with self._lock:
+            cur = self.db.execute("UPDATE missions SET reserved_usd=reserved_usd+?, updated=? WHERE id=? AND "
+                                  "spent_usd+reserved_usd+? <= budget_usd + 1e-9", (est, time.time(), mid, est))
+            if cur.rowcount != 1:
+                self.db.rollback()
+                return None
+            cid = self.db.execute("INSERT INTO charges(mission_id, step_key, what, provider, model, estimate_usd, state, "
+                                  "created) VALUES(?,?,?,?,?,?,?,?)", (mid, step_key, what[:200], provider, model, est,
+                                                                       "reserved", time.time())).lastrowid
+            self.db.commit()
+            return cid
+
+    def settle(self, cid, actual_usd, tokens_in=0, tokens_out=0, state="settled", note=""):
+        """Close a reservation: release the estimate, add what it really cost. state: settled / uncertain / released.
+        -> the charge row (None if it was already closed: settling twice can't double-count)."""
+        with self._lock:
+            row = self.db.execute("SELECT * FROM charges WHERE id=? AND state='reserved'", (cid,)).fetchone()
+            if row is None:
+                return None
+            actual = 0.0 if state == "released" else max(0.0, float(actual_usd))
+            self.db.execute("UPDATE charges SET state=?, actual_usd=?, tokens_in=?, tokens_out=?, note=?, settled=? "
+                            "WHERE id=?", (state, actual, int(tokens_in), int(tokens_out), note[:300], time.time(), cid))
+            self.db.execute("UPDATE missions SET reserved_usd=MAX(0, reserved_usd-?), spent_usd=spent_usd+?, "
+                            "uncertain_usd=uncertain_usd+?, tokens_in=tokens_in+?, tokens_out=tokens_out+?, "
+                            "requests=requests+?, updated=? WHERE id=?",
+                            (row["estimate_usd"], actual, actual if state == "uncertain" else 0.0, int(tokens_in),
+                             int(tokens_out), 0 if state == "released" else 1, time.time(), row["mission_id"]))
+            self.db.commit()
+            return dict(row)
+
+    def open_charges(self, mid=None):
+        if mid:
+            return self._rows("SELECT * FROM charges WHERE state='reserved' AND mission_id=?", (mid,))
+        return self._rows("SELECT * FROM charges WHERE state='reserved'")
+
+    def charges(self, mid, limit=200):
+        return self._rows("SELECT * FROM charges WHERE mission_id=? ORDER BY id DESC LIMIT ?", (mid, limit))
+
+    # ---------------------------------------------------------------- Google Places content: never kept
+    def purge_places_content(self):
+        """Remove Google Places content an older version stored (Google allows keeping place ids only). A field stays
+        only if extra.verified_by names a non-Google source for it. -> number of leads cleaned."""
+        n = 0
+        with self._lock:
+            for row in self._rows("SELECT * FROM leads WHERE key LIKE 'gplaces:%' OR place_id != ''"):
+                extra = dict(row.get("extra") or {})
+                verified = extra.get("verified_by") or {}
+                google_only = row["key"].startswith("gplaces:")
+                places = extra.get("places") or {}
+                fields = {}
+                if google_only:
+                    for f in ("address", "phone", "website", "email", "category"):
+                        if row.get(f) and f not in verified:
+                            fields[f] = ""
+                    if "name" not in verified and not str(row["name"]).startswith("Google place "):
+                        fields["name"] = f"Google place {row['key'].split(':', 1)[1][:10]}"
+                    if row.get("lat") is not None and "lat" not in verified:
+                        fields["lat"] = None
+                        fields["lon"] = None
+                    fields["sources"] = [u for u in (row.get("sources") or []) if "google." not in u]
+                if set(places) - {"id"}:
+                    extra["places"] = {"id": places.get("id", "")}
+                    fields["extra"] = extra
+                if not row.get("place_id") and places.get("id"):
+                    fields["place_id"] = places["id"]
+                if fields:
+                    self._update("leads", "id", row["id"], fields)
+                    n += 1
+                if google_only:
+                    self._exec("DELETE FROM research WHERE lead_id=? AND (kind='conflict' OR sources LIKE '%google.%')",
+                               (row["id"],))
+            self._exec("DELETE FROM cache WHERE key LIKE 'places:%'")
+        return n
 
     # ---------------------------------------------------------------- cache
     def cache_get(self, key, max_age_s):
@@ -404,3 +546,27 @@ def store():
         if _store["s"] is None or _store["s"].path != Path(config.MISSIONS_DB):
             _store["s"] = Store(config.MISSIONS_DB)
         return _store["s"]
+
+
+# Writes a step may make. Through a GuardedStore each one first checks the step's cancellation token (runctx), so a
+# step that was stopped or timed out can't change the database afterwards. (The engine itself uses the plain store.)
+WRITES = {"upsert_lead", "update_lead", "add_research", "add_project", "project_history", "add_outreach", "update_outreach",
+          "add_approval", "cache_put", "event", "create_mission", "update_mission", "add_step", "update_step", "add_spend",
+          "decide_approval", "claim_approval", "finish_approval", "reserve", "purge_places_content", "export"}
+# (settle is deliberately not guarded: a paid call that was cut off must still be recorded)
+
+
+class GuardedStore:
+    def __init__(self, inner, token):
+        self._inner, self._token = inner, token
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name not in WRITES or not callable(attr):
+            return attr
+
+        def guarded(*args, **kwargs):
+            self._token.check()
+            return attr(*args, **kwargs)
+
+        return guarded
