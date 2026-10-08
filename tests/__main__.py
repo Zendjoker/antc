@@ -27,9 +27,9 @@ CATEGORIES = {
     "integration": ["test_actions", "test_apps", "test_media", "test_windows", "test_integrations", "test_phone",
                     "test_pending", "test_social", "test_fixes", "test_live_fixes", "test_reliability_fixes", "test_tasks",
                     "test_greet", "test_zigbee", "test_smart_home", "test_voice_delivery", "test_turn_taking",
-                    "test_timer_correction", "test_diagnostics"],
+                    "test_timer_correction", "test_diagnostics", "test_browser", "test_screen", "test_research"],
     "audio": ["test_listening", "test_speaker", "test_latency"],
-    "hardware": ["apps_live", "media_live", "windows_live", "actions_live"],
+    "hardware": ["apps_live", "media_live", "windows_live", "actions_live", ("computer_live", "--act")],
     "live_api": [("test_turn_taking", "--live-api"), "test_ring_ack", "cognition_live", "pending_live"],
 }
 SAFE = ("unit", "integration", "audio")

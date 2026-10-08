@@ -27,6 +27,7 @@ MAX_HISTORY = int(os.getenv("MAX_HISTORY", "16"))  # messages of conversation se
 # Most turns go to a cheap OpenAI model; Claude handles what matters (you ask for it, or it's long/complex),
 # and takes over if OpenAI fails. Both get the same truth rules, tools and claim checks.
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")  # gpt-5-nano is ~5x cheaper still, but follows the rules less reliably
 OPENAI_MEMORY_MODEL = os.getenv("OPENAI_MEMORY_MODEL", "") or OPENAI_MODEL  # background memory work
 OPENAI_REASONING = os.getenv("OPENAI_REASONING", "minimal")  # GPT-5 thinking effort: minimal is fastest/cheapest (blank = model default)
@@ -97,6 +98,12 @@ TIMER_MIN_S = 1  # shortest countdown timer (the tool schema, the capability lis
 TIMER_MAX_S = 30 * 86400  # longest countdown timer
 LISTEN_WAIT_S = float(os.getenv("LISTEN_WAIT_S", "6"))  # after an unfinished sentence, how long to wait for the rest
 MISSING_WAIT_S = float(os.getenv("MISSING_WAIT_S", "4"))  # after a request that lacks a required detail, how long before asking for it
+# Computer interaction (room_agent/computer/): browsers, page reading, clicking / typing, screen vision, web research
+BROWSER_CONTROL = os.getenv("BROWSER_CONTROL", "1") == "1"  # open sites / search / click / type / read pages in your browsers
+SCREEN_VISION = os.getenv("SCREEN_VISION", "ask").lower()  # off | ask (asks once before the first screenshot) | allow
+VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").lower()  # auto | claude | openai | off: who reads screenshots
+VISION_MODEL = os.getenv("VISION_MODEL", "").strip()  # blank = CLAUDE_MODEL / OPENAI_MODEL
+RESEARCH_FILE = Path(os.getenv("RESEARCH_FILE", HERE / "research.json"))  # the last research reports, for the dashboard
 DIAGNOSTICS = os.getenv("DIAGNOSTICS", "0") == "1"  # live diagnostic mode: logs/diagnostics-*.jsonl (livelog.py)
 DIAGNOSTICS_DIR = Path(os.getenv("DIAGNOSTICS_DIR", HERE / "logs"))
 TRACE = os.getenv("TRACE", "0") == "1"  # log one decision trace per turn (INPUT, AUDIO, INTENT, PARAMS, ACTION, RESULT...)

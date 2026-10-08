@@ -18,7 +18,6 @@ register_group(Group("briefing", re.compile(r"morning|brief|catch me up|rundown|
     "- For \"good morning\", \"brief me\" or \"catch me up\", call daily_briefing and give a short friendly rundown in a few "
     "sentences, not a list: greet them, weather first, one or two headlines, then anything coming up or running. Skip any "
     "part that wasn't available."]))
-register_line("opening or browsing web pages", "not built; search snippets only", available=lambda: False)
 register_claim("web", r"\b(i\s+)?(searched|googled|looked (it|that) up online|checked online|found online|browsed|looked on the web)\b"
                       r"|\bi'?ll (search|google|look (it|that) up online|check online|browse)\b")
 

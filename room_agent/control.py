@@ -132,6 +132,33 @@ def _undo_hint():
     return r.undo_hint.replace("_", " ") if r else None
 
 
+def _research():
+    """The last research report for the dashboard: the question, numbered sources with links, what couldn't be read."""
+    try:
+        from room_agent.computer import research
+
+        r = research.latest()
+    except Exception:
+        return None
+    if not r:
+        return None
+    return {"question": r["question"], "status": r["status"], "at": r["at"], "seconds": r["seconds"],
+            "sources": [{"n": s["n"], "title": s["title"], "host": s["host"], "url": s["url"], "primary": s["primary"],
+                         "quote": (s["passages"] or [""])[0][:280]} for s in r["sources"]],
+            "failed": [f"{u.split('/')[2] if '//' in u else u}: {w}" for u, w in r["failed"][:6]]}
+
+
+def _browser():
+    try:
+        from room_agent.computer.browsers import KNOWN, host
+        from room_agent.computer.context import desk
+
+        p = desk.current_page()
+    except Exception:
+        return None
+    return {"name": KNOWN[p["browser"]].name, "title": p["title"][:80], "site": host(p["url"])} if p else None
+
+
 def snapshot():
     from room_agent.llm.budget import budget
     from room_agent.tools import location
@@ -169,6 +196,8 @@ def snapshot():
         "user": config.USER_NAME,
         "connections": {"google": google, "phone": "on" if config.PHONE_MODE else "off"},
         "home": _home(),
+        "research": _research(),
+        "browser": _browser(),
     }
 
 

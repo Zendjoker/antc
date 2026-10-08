@@ -207,7 +207,7 @@
     $("#greeting").textContent = greeting();
     const d = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
     $("#home-sub").textContent = [d, live.online && live.location].filter(Boolean).join("  ·  ");
-    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices();
+    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch();
   }
 
   function renderMedia() {
@@ -326,8 +326,37 @@
     const g = c.google || "—", gOk = String(g).startsWith("connected");
     kv.append(row("Location", live.online ? live.location || "Unknown" : "—", "pin"),
               row("App in focus", live.online ? live.app || "—" : "—", "window"),
+              row("Browser", live.online && live.browser ? `${live.browser.name} · ${live.browser.site || live.browser.title}` : "—", "window"),
               row("Google", gOk ? "Connected" : cap(g), "mail", gOk ? "green" : null),
               row("Brain", live.online ? live.brain : "—", "sparkle"));
+  }
+
+  // ---- research (the last report: sources come from the pages Jarvis really read)
+  function renderResearch() {
+    const r = live.online && live.research, box = $("#research"), tag = $("#research-tag");
+    const sig = JSON.stringify(r || null);
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = "";
+    if (!r) {
+      tag.className = "tag push"; tag.textContent = "None yet";
+      box.append(emptyState("sparkle", "No research yet", live.online ? "Ask Jarvis to research or compare something" : "Waiting for Jarvis"));
+      return;
+    }
+    tag.className = `tag push ${r.status === "done" ? "green" : "amber"}`;
+    tag.textContent = r.status === "done" ? `${r.sources.length} source${r.sources.length === 1 ? "" : "s"}` :
+                      r.status === "cancelled" ? "Stopped" : "Nothing found";
+    box.append(el("div", "research-q", r.question));
+    const list = el("ol", "research-sources");
+    for (const s of r.sources) {
+      const li = el("li"), a = el("a", "link", s.title || s.host);
+      if (/^https?:\/\//i.test(s.url)) { a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+      li.append(a, el("span", "research-host", ` ${s.host}${s.primary ? " · official" : ""}`));
+      if (s.quote) li.append(el("div", "research-quote", `"${s.quote}"`));
+      list.append(li);
+    }
+    box.append(list);
+    if (r.failed && r.failed.length) box.append(el("div", "research-failed", `Couldn't read: ${r.failed.join("; ")}`));
   }
 
   // ---- home devices (Zigbee)

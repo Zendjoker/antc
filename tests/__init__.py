@@ -21,6 +21,7 @@ for _name, _file in {
     "ACTIONS_JOURNAL_FILE": "actions_journal.json", "ZIGBEE_EVENTS_FILE": "zigbee_events.json",
     "PROACTIVE_STATE_FILE": "proactive_state.json", "CONNECTIONS_FILE": "connections.json",
     "LEARNING_DB": "learning.db", "EXPERIENCE_DB": "experience.db", "APPS_CACHE": "apps_cache.json",
+    "RESEARCH_FILE": "research.json",
 }.items():
     os.environ[_name] = os.path.join(_TMP, _file)
 os.environ.update(JARVIS_VAULT="memory", ZIGBEE="0", HA_URL="", HA_TOKEN="", PHONE_TUNNEL="", PHONE_MODE="0",

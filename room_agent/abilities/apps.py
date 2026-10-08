@@ -24,8 +24,6 @@ def app_live():
 register_group(Group("apps", APP_HINTS, app_live, "opening, closing and switching apps",
                      "any installed Windows app by name; says it's done only after the window really opened, closed or came "
                      "to the front", lambda: IS_WINDOWS))
-register_line("other PC control (files, settings, shutdown, mouse, typing, seeing the screen)", "not built",
-              available=lambda: False)
 register_claim("app", r"\b(opened|launched|started|closed|quit|opening|launching|closing)\b.{0,40}\b(app|application|browser|"
                       r"chrome|spotify|program|window|file|folder|youtube|netflix|steam|discord|game|code|editor|for you)\b"
                       r"|\b(i'?ve|i have|i)\s+(just\s+)?(opened|launched|closed|quit)\b"
