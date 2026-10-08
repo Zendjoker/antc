@@ -515,7 +515,7 @@ def _open_source(args):
 
 tool("open_research_source", "Open one of the last research's sources in the browser ('open source 2').",
      params({"number": {"type": "integer", "minimum": 1}, "browser": BROWSER_ARG}, ["number"]), _open_source,
-     group="research", claim=["browser", "app"],
+     group="research", claim=["browser", "app"], intent=OPEN_INTENT,  # (their own "open ...": never outside text's)
      reflex=[(r"open\s+(?:the\s+)?(?:source|link|reference)\s+(?:number\s+)?(?P<number>\d{1,2})", {})],
      reflex_check=lambda a: _recent(), reflex_say=_spoken)
 

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 
 import requests
 
+from room_agent import netguard
 from room_agent.missions import runctx
 
 log = logging.getLogger("room-agent")
@@ -69,9 +70,9 @@ def _host(url):
 
 
 def _public(url):
-    from room_agent.computer import pages
-
-    return pages._public(url)
+    """-> (ok, why): the URL's host resolves only to public addresses (room_agent/netguard.py)."""
+    ip, why = netguard.check_url(url)
+    return ip is not None, why
 
 
 def _wait_turn(url, cancel=None):
@@ -115,8 +116,8 @@ def _request(method, url, *, params=None, data=None, json_body=None, headers=Non
              cancel=None, follow=True):
     """One request with manual, checked redirects. -> Response (never raises except Cancelled)."""
     resp = Response(url=url)
-    ok, why = _public(url)
-    if not ok:
+    ip, why = netguard.check_url(url)
+    if ip is None:
         resp.error = f"not sent: {why}"
         return resp
     _wait_turn(url, cancel)
@@ -126,15 +127,16 @@ def _request(method, url, *, params=None, data=None, json_body=None, headers=Non
     try:
         while True:
             runctx.check_before_send() if hops == 0 else runctx.check()
-            r = requests.request(method, current, params=params if hops == 0 else None,
-                                 data=data if hops == 0 else None, json=json_body if hops == 0 else None,
-                                 headers=hdrs, timeout=timeout, stream=True, allow_redirects=False)
+            # (connected to the address validated for this hop: a second, different DNS answer is never used)
+            r = netguard.http(method, current, ip, params=params if hops == 0 else None,
+                              data=data if hops == 0 else None, json=json_body if hops == 0 else None,
+                              headers=hdrs, timeout=timeout)
             resp.sent = True
             with r:
                 if follow and r.is_redirect and hops < MAX_REDIRECTS and method == "GET":
                     nxt = urllib.parse.urljoin(current, r.headers.get("Location", ""))
-                    ok, why = _public(nxt)
-                    if not ok:
+                    ip, why = netguard.check_url(nxt)
+                    if ip is None:
                         resp.status, resp.final_url = r.status_code, nxt
                         resp.error = f"not fetched: it redirected to an address that isn't allowed ({why})"
                         return resp

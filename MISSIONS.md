@@ -148,9 +148,11 @@ Code CLI and the Windows Job Object, the dashboard in a browser, and the preview
 - Every mission request (pages, robots.txt, APIs) goes through one function. It requires a public address, follows
   redirects by hand checking each hop first, drops API keys on a redirect to another host, and caps the size
   (robots.txt: 512 KB). POSTs don't follow redirects.
-- Residual: the name is resolved for the check and again when connecting (DNS rebinding isn't prevented).
-- Not covered here: `computer/pages.py` (Jarvis's general web-research fetcher, not used by missions) still lets
-  `requests` follow redirects before checking the final address.
+- DNS rebinding is prevented (`room_agent/netguard.py`):
+  - each name is resolved once, and every answer must be public (IPv4 embedded in IPv6 is checked as IPv4)
+  - the socket is opened to exactly that address, while TLS still verifies the hostname
+  - no environment proxies are used
+- `computer/pages.py` (general web research) uses the same guard. Tests: `tests/test_security.py`.
 - Scraped emails are kept only if each one is exactly one valid address. Before a Gmail draft is claimed, the
   recipient is validated again and the message is built locally. A local failure leaves nothing claimed or sent.
 

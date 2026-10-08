@@ -4,10 +4,8 @@ Only http(s) to public addresses: localhost and private networks are refused, so
 fetch something on this PC or the home network (the control server, the router...). Size and time are capped.
 """
 
-import ipaddress
 import logging
 import re
-import socket
 import urllib.parse
 from dataclasses import dataclass, field
 
@@ -33,60 +31,42 @@ class Page:
 
 
 def _public(url):
-    p = urllib.parse.urlparse(url)
-    if p.scheme not in ("http", "https") or not p.hostname:
-        return False, "not a web address"
-    if ALLOW_PRIVATE:
-        return True, ""
-    try:
-        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
-    except OSError:
-        return False, "the site's name doesn't resolve"
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False, "it points to this PC or the local network"
-    return True, ""
+    """-> (ok, why): an http(s) URL whose host resolves only to public addresses (room_agent/netguard.py)."""
+    from room_agent import netguard
+
+    ip, why = netguard.check_url(url, allow_private=ALLOW_PRIVATE)
+    return ip is not None, why
 
 
 def fetch(url, timeout=TIMEOUT_S, cancel=None):
-    """-> Page (ok=False with `error` when it couldn't be read: say so, never guess its content)."""
-    import requests
+    """-> Page (ok=False with `error` when it couldn't be read: say so, never guess its content).
+    Every hop (the address and each redirect) is resolved once, must be public, and the connection goes to exactly
+    that address (netguard): a redirect or a changed DNS answer can't make Jarvis request something on this PC or the
+    home network."""
+    from room_agent import netguard
 
     page = Page(url=url)
-    allowed, why = _public(url)
-    if not allowed:
-        page.error = f"not fetched: {why}"
+    r = netguard.request("GET", url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"}, timeout=timeout,
+                         max_bytes=MAX_BYTES, cancel=cancel, allow_private=ALLOW_PRIVATE)
+    page.final_url = r.final_url or url
+    if r.error and not r.status:
+        page.error = (r.error if r.error.startswith("not fetched") else
+                      "the site didn't answer in time" if "Timeout" in r.error else r.error)
         return page
-    try:
-        with requests.get(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"}, timeout=timeout,
-                          stream=True, allow_redirects=True) as r:
-            page.final_url = r.url
-            if not _public(r.url)[0]:
-                page.error = "not fetched: it redirected to a local address"
-                return page
-            if r.status_code >= 400:
-                page.error = f"the site answered {r.status_code}" + (" (blocked or needs a login)" if r.status_code in (401, 403, 429) else "")
-                return page
-            ctype = r.headers.get("content-type", "")
-            if "html" not in ctype and "text" not in ctype:
-                page.error = f"not a web page ({ctype.split(';')[0] or 'unknown type'})"
-                return page
-            body = b""
-            for chunk in r.iter_content(65536):
-                body += chunk
-                if len(body) > MAX_BYTES or (cancel is not None and cancel()):
-                    break
-            if cancel is not None and cancel():
-                page.error = "stopped"
-                return page
-            html = body.decode(r.encoding or "utf-8", errors="replace")
-    except requests.Timeout:
-        page.error = "the site didn't answer in time"
+    if r.error == "too many redirects":
+        page.error = "not fetched: too many redirects"
         return page
-    except requests.RequestException as e:
-        page.error = f"couldn't connect ({e.__class__.__name__})"
+    if r.status >= 400:
+        page.error = f"the site answered {r.status}" + (" (blocked or needs a login)" if r.status in (401, 403, 429) else "")
         return page
+    ctype = {k.lower(): v for k, v in r.headers.items()}.get("content-type", "")
+    if "html" not in ctype and "text" not in ctype:
+        page.error = f"not a web page ({ctype.split(';')[0] or 'unknown type'})"
+        return page
+    if cancel is not None and cancel():
+        page.error = "stopped"
+        return page
+    html = r.body.decode(r.encoding or "utf-8", errors="replace")
     extract(page, html)
     page.ok = bool(page.text)
     if not page.ok:

@@ -139,14 +139,15 @@ def _run_cli(sb, instruction):
         raise CoderUnavailable(f"Claude Code can't start in the sandbox (exit {code}: {(err or out).strip()[:200]})")
     mcp = Path(sb) / "mcp.json"
     mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
-    cmd = [exe, "-p", f"{instruction}\n\n{RULES}\nWork only on the files in the current folder.",
-           "--output-format", "json", "--allowedTools", CLI_TOOLS, "--disallowedTools", CLI_DENY,
+    # The request goes in on stdin, never on the command line: the command line is fixed text (see sandbox.check_argv).
+    prompt = f"{instruction}\n\n{RULES}\nWork only on the files in the current folder."
+    cmd = [exe, "-p", "--output-format", "json", "--allowedTools", CLI_TOOLS, "--disallowedTools", CLI_DENY,
            "--permission-mode", "acceptEdits", "--max-turns", "12", "--strict-mcp-config", "--mcp-config", str(mcp)]
     if config.CODER_MODEL:
         cmd += ["--model", config.CODER_MODEL]
     est = config.CODER_MAX_USD
     with meter.paid(est, "Claude Code edit", provider="claude_code", model=config.CODER_MODEL or "default") as charge:
-        code, out, err = sandbox.run(cmd, sb, env, config.CODER_TIMEOUT_S)
+        code, out, err = sandbox.run(cmd, sb, env, config.CODER_TIMEOUT_S, stdin_text=prompt)
         try:
             data = json.loads(out)
         except ValueError:

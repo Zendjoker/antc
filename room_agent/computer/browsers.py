@@ -372,10 +372,22 @@ def wait_loaded(key, url, before_titles, query="", timeout=8.0):
     return None, last
 
 
+def safe_launch_url(url):
+    """A URL that's safe to put on a browser's command line: http(s) with a host, no whitespace / control characters,
+    and it can't be read as a switch ("--gpu-launcher=..." would make Chromium run a program)."""
+    u = str(url or "")
+    if not u or u.lstrip() != u or u.startswith(("-", "/")) or re.search(r"[\s\x00-\x1f\x7f\"]", u):
+        return False
+    p = urllib.parse.urlparse(u)
+    return p.scheme in ("http", "https") and bool(p.netloc) and not p.netloc.startswith("-")
+
+
 def open_url(url, browser="", said="", query=""):
     """Open `url` in a new tab of the right browser and check that it's showing. -> tool result text."""
     from room_agent.computer.context import desk
 
+    if not safe_launch_url(url):
+        return "FAILED: that isn't a plain web address (http / https), so it wasn't opened."
     key, why = choose(browser, said)
     if key is None:
         return why

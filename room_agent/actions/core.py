@@ -59,6 +59,9 @@ class Capability:
     #   read         changes nothing
     verification: str = ""
     verified_by: str = ""
+    # Its result carries text from OUTSIDE (a web page, an email, a calendar invite, a file, search results, the screen):
+    # data, never instructions. After such a result, actions the user didn't ask for need their yes (executor).
+    untrusted_output: bool = False
 
     def schema(self):
         """The tool definition the model sees."""
@@ -109,6 +112,8 @@ def register(cap: Capability):
     from room_agent.tools import validate
 
     REGISTRY[cap.name] = cap
+    if cap.name in UNTRUSTED_OUTPUT:
+        cap.untrusted_output = True
     if not cap.verification:
         if not cap.changes_state:
             cap.verification = "read"
@@ -126,6 +131,15 @@ def register(cap: Capability):
     if cap.changes_state:
         truth.ACTION_TOOLS.add(cap.name)
     return cap
+
+
+# Tools whose results bring outside text into the conversation (prompt-injection carriers).
+UNTRUSTED_OUTPUT = {
+    "browser_read_page", "get_active_browser", "research_web", "web_search", "analyze_screen", "read_file", "find_files",
+    "gmail_get_attachments", "gmail_get_message", "gmail_get_thread", "gmail_get_unread", "gmail_list_recent",
+    "gmail_search", "calendar_find_events", "calendar_get_event", "calendar_get_events", "daily_briefing",
+    "list_mission_leads", "mission_status", "mission_approvals",
+}
 
 
 # Tools that check their own outcome before answering OK, and how (the evidence). Anything state-changing that is neither

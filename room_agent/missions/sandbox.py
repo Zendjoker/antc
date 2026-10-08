@@ -223,13 +223,34 @@ def _resume(process_handle):
         raise SandboxError(f"the worker couldn't be started (NtResumeProcess {status:#x})")
 
 
-def run(cmd, sandbox, env_vars, timeout_s):
-    """Run `cmd` inside the job, in sandbox/site, cancellable (runctx) and timed. -> (returncode, stdout, stderr)"""
+# cmd.exe metacharacters: a .cmd / .bat launcher is run through cmd.exe, which re-parses its command line, so an
+# argument containing these could run other commands (quoting doesn't protect against %VAR% expansion or "&").
+_CMD_META = set('%^&|<>"!()\r\n`')
+
+
+def check_argv(cmd):
+    """Refuse a command line that a shell could re-interpret. -> None, or raises SandboxError."""
+    exe = str(cmd[0])
+    if Path(exe).suffix.lower() in (".cmd", ".bat"):
+        for a in cmd[1:]:
+            if any(ch in _CMD_META for ch in str(a)):
+                raise SandboxError(f"refused: {Path(exe).name} is a batch launcher and an argument contains characters "
+                                   "cmd.exe would interpret")
+    for a in cmd:
+        if "\x00" in str(a):
+            raise SandboxError("refused: an argument contains a NUL byte")
+
+
+def run(cmd, sandbox, env_vars, timeout_s, stdin_text=None):
+    """Run `cmd` inside the job, in sandbox/site, cancellable (runctx) and timed. -> (returncode, stdout, stderr)
+    stdin_text: sent on stdin (how free text - e.g. the user's request - reaches the worker: never on the command line)."""
     config.real_desktop("running the coding worker")
     runctx.check()
+    check_argv(cmd)
     job = Job()
     try:
-        p = subprocess.Popen(cmd, cwd=str(Path(sandbox) / "site"), env=env_vars, stdin=subprocess.DEVNULL,
+        p = subprocess.Popen(cmd, cwd=str(Path(sandbox) / "site"), env=env_vars,
+                             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                              errors="replace", creationflags=CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
     except OSError as e:
@@ -245,11 +266,13 @@ def run(cmd, sandbox, env_vars, timeout_s):
         _resume(handle)
         deadline = time.time() + timeout_s
         out, err = "", ""
+        pending_input = stdin_text
         while True:
             try:
-                out, err = p.communicate(timeout=0.5)
+                out, err = p.communicate(input=pending_input, timeout=0.5)
                 break
             except subprocess.TimeoutExpired:
+                pending_input = None  # (written once: communicate keeps feeding it in the background)
                 if time.time() > deadline:
                     job.kill()
                     p.communicate(timeout=10)

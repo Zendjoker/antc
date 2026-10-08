@@ -26,8 +26,16 @@ DOC_EXT = {".pdf", ".docx", ".xlsx", ".pptx"}
 OPENABLE = TEXT_EXT - {".bat", ".ps1", ".sh", ".py", ".js"} | DOC_EXT | {
     ".doc", ".xls", ".ppt", ".odt", ".rtf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic", ".svg", ".mp3", ".wav",
     ".flac", ".m4a", ".mp4", ".mkv", ".mov", ".avi", ".webm", ".zip"}
-SECRET_NAMES = re.compile(r"(^|[\\/])(\.env(\..*)?|id_rsa|id_ed25519|.*\.pem|.*\.key|.*\.pfx|.*\.p12|.*\.kdbx?|.*\.keychain|"
-                          r"wallet\.dat|.*passwords?.*|.*credentials?.*|.*secrets?\..*|.*\.ovpn|.*recovery.?codes?.*)$", re.I)
+SECRET_NAMES = re.compile(r"(^|[\\/])(\.env(\..*)?|id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.pem|.*\.key|.*\.pfx|.*\.p12|"
+                          r".*\.kdbx?|.*\.keychain|.*\.ppk|.*\.jks|.*\.keystore|wallet\.dat|.*passwords?.*|"
+                          r".*credentials?.*|.*secrets?\..*|.*\.ovpn|.*recovery.?codes?.*|\.npmrc|\.pypirc|_?\.?netrc|"
+                          r"\.git-credentials|client_secrets?.*\.json|.*service.?account.*\.json|.*tokens?\.json|"
+                          r"google_client\.json|.*\.tfstate|\.htpasswd)$", re.I)
+# Folders that only hold keys / tokens / cloud credentials: nothing inside them is read, whatever its name.
+SECRET_DIRS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".claude", ".config", ".gcloud", ".vault-token",
+               ".password-store", ".terraform.d"}
+# Jarvis's own records (memory, conversations, connected accounts, tasks, logs): never handed to a tool as a "file".
+JARVIS_PRIVATE_EXT = {".json", ".jsonl", ".db", ".db-wal", ".db-shm", ".npz", ".lock", ".bak", ".log"}
 SKIP_DIRS = {"appdata", "node_modules", ".git", ".venv", "venv", "__pycache__", "$recycle.bin", ".cache", "site-packages"}
 MAX_CHARS = 12000
 WALK_BUDGET_S = 3.0
@@ -54,13 +62,30 @@ def allowed(path):
     except OSError:
         return False, "that path isn't valid"
     home = HOME.resolve()
-    if not str(p).lower().startswith(str(home).lower()):
+    if p != home and home not in p.parents:  # (a real containment check: "C:\\Users\\adam2" isn't inside "C:\\Users\\adam")
         return False, "it's outside your own folders"
-    if any(part.lower() == "appdata" for part in p.parts[len(home.parts):]):
+    inside = [part.lower() for part in p.parts[len(home.parts):]]
+    if "appdata" in inside:
         return False, "it's in app data, not your files"
-    if SECRET_NAMES.search(str(p)):
+    if SECRET_NAMES.search(str(p)) or any(part in SECRET_DIRS for part in inside[:-1] or inside):
         return False, "it looks like it holds passwords, keys or secrets"
+    if _jarvis_private(p):
+        return False, "it's one of Jarvis's own private records (memory, conversations, accounts, logs)"
     return True, ""
+
+
+def _jarvis_private(p):
+    try:
+        from room_agent import config
+
+        root = Path(config.HERE).resolve()
+    except Exception:  # noqa: BLE001
+        return False
+    if p == root or root not in p.parents:
+        return False
+    rel = [x.lower() for x in p.parts[len(root.parts):]]
+    return (p.suffix.lower() in JARVIS_PRIVATE_EXT or rel[0] in ("logs", "models", ".venv", ".git")
+            or p.name.lower().startswith(".env"))
 
 
 # ---------------------------------------------------------------- finding

@@ -129,7 +129,11 @@ def fake_public(url):
     return True, ""
 
 
-pages._public = fake_public
+# (the network guard's two seams: name resolution + the pinned connection. Everything else in netguard / net runs.)
+from room_agent import netguard  # noqa: E402
+
+netguard.resolve_public = lambda host, port=443, allow_private=False: (
+    (None, "it points to this PC or a private network") if host in PRIVATE_HOSTS else ("93.184.216.34", ""))
 
 
 class FakeResp:
@@ -171,7 +175,7 @@ def fake_request(method, url, **kw):
     return FakeResp(404, b"not found", url=url)
 
 
-requests.request = fake_request
+netguard.http = lambda method, url, ip, **kw: fake_request(method, url, **kw)
 
 
 def route(pred, handler):
@@ -642,8 +646,8 @@ orig_which, orig_bash, orig_run = coder.shutil.which, sbx.git_bash, sbx.run
 coder.shutil.which = lambda name, *a, **k: "C:/fake/claude.exe" if name == config.CODER_CLI else orig_which(name, *a, **k)
 
 
-def fake_run(cmd, sandbox_dir, env_vars, timeout_s):
-    CLI["runs"].append((cmd, env_vars))
+def fake_run(cmd, sandbox_dir, env_vars, timeout_s, stdin_text=None):
+    CLI["runs"].append((cmd, env_vars, stdin_text))
     return CLI["script"].pop(0)
 
 
