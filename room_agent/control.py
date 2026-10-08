@@ -184,8 +184,10 @@ def _missions():
 
 
 def mission_detail(mid):
-    """Everything about one mission: steps, leads (with evidence), demo sites, drafts, approvals, events."""
-    from room_agent.missions import business, engine, preview  # noqa: F401
+    """Everything about one mission: steps, leads (with evidence), demo sites, drafts, approvals, budget ledger, events.
+    Google Places details are never stored: for a Google-only business they're added here live from memory (if still
+    there), labelled "Google Maps"."""
+    from room_agent.missions import business, engine, places, preview  # noqa: F401
     from room_agent.missions.store import store
 
     s = store()
@@ -198,6 +200,11 @@ def mission_detail(mid):
     for x in s.leads(mission_id=mid, limit=300):
         row = {k: x.get(k) for k in keep}
         row["evidence"] = ((x.get("analysis") or {}).get("evidence") or [])[:4]
+        if (x.get("extra") or {}).get("google_only") and x.get("place_id"):
+            g = places.recall(x["place_id"])
+            if g:
+                row["google"] = {k: g.get(k) for k in ("name", "address", "phone", "website")}
+                row["google"]["attribution"] = places.ATTRIBUTION
         leads.append(row)
     projects = []
     for p in s.projects(mid):
@@ -216,10 +223,13 @@ def mission_detail(mid):
                          for o in s.outreach(mid)],
             "approvals": [{k: a[k] for k in ("id", "lead_id", "action", "summary", "status", "result")}
                           for a in s.approvals(mid)],
+            "charges": [{k: c[k] for k in ("what", "provider", "estimate_usd", "actual_usd", "state", "note", "created")}
+                        for c in s.charges(mid, 50)],
             "events": [{k: e[k] for k in ("at", "level", "text")} for e in s.events(mid, 60)]}
 
 
 def _mission_action(what, body):
+    """A dashboard click is the user's explicit decision (the request passed the local-only + X-Jarvis checks)."""
     from room_agent.missions import business, engine, outreach, preview
     from room_agent.missions.store import store
 
@@ -228,8 +238,17 @@ def _mission_action(what, body):
     if what == "mission_pause":
         return {"ok": engine.pause(mid, "paused from the dashboard"), "message": "Paused."}
     if what == "mission_resume":
-        ok = engine.resume(mid, float(body.get("extra_budget_usd") or 0))
+        ok = engine.resume(mid)
         return {"ok": ok, "message": "Resumed." if ok else "Not resumed (budget used up? raise it first)."}
+    if what == "mission_budget":
+        extra = max(0.0, min(float(body.get("extra_usd") or 0), 10.0))
+        new = engine.raise_budget(mid, extra, "dashboard")
+        if new is None:
+            return {"ok": False, "message": "The budget wasn't changed."}
+        m = s.mission(mid)
+        if m and m["state"] == "paused_budget":
+            engine.resume(mid)
+        return {"ok": True, "message": f"Budget is now ${new:.2f}."}
     if what == "mission_stop":
         return {"ok": engine.stop(mid, "stopped from the dashboard"), "message": "Stopped; the work so far is kept."}
     if what == "mission_demos":
@@ -241,15 +260,12 @@ def _mission_action(what, body):
         if p is None or not preview.start():
             return {"ok": False, "message": "That preview isn't available."}
         return {"ok": True, "message": "Preview ready.", "url": preview.url_for(p["path"])}
-    if what in ("approval_approve", "approval_reject"):
-        a = s.approval(int(body.get("approval_id") or 0))
-        if a is None or a["status"] != "pending":
-            return {"ok": False, "message": "That item isn't waiting any more."}
+    if what in ("approval_approve", "approval_reject", "approval_retry"):
+        aid = int(body.get("approval_id") or 0)
         if what == "approval_reject":
-            s.decide_approval(a["id"], "rejected", "dashboard")
-            return {"ok": True, "message": "Rejected; nothing was done."}
-        ok, result = outreach.execute_approval(a)
-        s.decide_approval(a["id"], "done" if ok else "failed", "dashboard", result)
+            ok = s.decide_approval(aid, "rejected", "dashboard")
+            return {"ok": ok, "message": "Rejected; nothing was done." if ok else "That item isn't waiting any more."}
+        ok, result = outreach.retry(aid, "dashboard") if what == "approval_retry" else outreach.approve(aid, "dashboard")
         return {"ok": ok, "message": result}
     return {"ok": False, "message": "Unknown action."}
 

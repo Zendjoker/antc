@@ -435,17 +435,25 @@
     stat(`qualify (aim ${m.target ?? "?"})`, m.leads_qualifying ?? 0); stat("demo sites", m.demos ?? 0); stat("drafts", m.drafts ?? 0);
     stat("spent", `$${(m.spent_usd || 0).toFixed(2)} of $${(m.budget_usd || 0).toFixed(2)}`);
     stat("tokens", `${m.tokens_in || 0} in, ${m.tokens_out || 0} out`); stat("requests", m.requests || 0);
+    if (m.reserved_usd) stat("in progress", `$${m.reserved_usd.toFixed(4)}`);
+    if (m.uncertain_usd) stat("counted at full estimate", `$${m.uncertain_usd.toFixed(4)}`);
     const acts = el("div", "m-actions");
     if (["running", "planned"].includes(m.state)) acts.append(mBtn("Pause", "pause", { do: "mission_pause" }));
     if (["paused", "paused_budget", "interrupted"].includes(m.state)) {
       acts.append(mBtn("Resume", "play", { do: "mission_resume" }));
-      if (m.state === "paused_budget") acts.append(mBtn("Add $1 and resume", "dollar", { do: "mission_resume", extra_budget_usd: 1 }));
+      if (m.state === "paused_budget") acts.append(mBtn("Add $1 and resume", "dollar", { do: "mission_budget", extra_usd: 1 }));
     }
     if (!["completed", "cancelled", "finished_with_problems"].includes(m.state)) acts.append(mBtn("Stop", "x", { do: "mission_stop" }, "danger"));
     if ((m.leads_qualifying || 0) > (m.demos || 0)) acts.append(mBtn("Build 3 more demos", "plus", { do: "mission_demos", count: 3 }));
     sum.append(head, el("div", "m-now", m.current ? `Now: ${m.current}` : (m.summary || "").split("\n")[0]), bar, stats, acts);
     if (m.workspace) sum.append(el("div", "m-path", `Files: ${m.workspace}`));
     if (m.errors && m.errors.length) { const er = el("div", "m-errors"); m.errors.slice(-3).forEach(e => er.append(el("div", null, e))); sum.append(er); }
+    if (m.abandoned_runs) sum.append(el("div", "m-errors", `${m.abandoned_runs} stopped step still finishing a request (it can't make further changes)`));
+    if (d.charges && d.charges.length) {
+      const det = el("details", "m-ledger"), sm = el("summary", null, `Budget ledger (${d.charges.length} paid calls)`);
+      det.append(sm, list(d.charges.map(c => `${c.what}: ${c.state}${c.actual_usd != null ? `, $${c.actual_usd.toFixed(4)}` : ""} (estimate $${c.estimate_usd.toFixed(4)})${c.note ? ` · ${c.note}` : ""}`)));
+      sum.append(det);
+    }
 
     // leads (researched ones, best first, each with its reasons, evidence and sources)
     const lb = $("#mission-leads");
@@ -455,12 +463,14 @@
     if (!researched.length) lb.append(emptyState("search", "Nothing checked yet", "Leads appear as each business is researched"));
     for (const x of researched.slice(0, 60)) {
       const r = el("details", "m-lead"), s = el("summary");
-      s.append(el("span", "m-score", String(x.score)), el("span", "m-name", x.name),
+      s.append(el("span", "m-score", String(x.score)), el("span", "m-name", x.google && x.google.name ? `${x.google.name} (${x.google.attribution})` : x.name),
                tag(x.website_status.replace(/_/g, " "), W_TONE[x.website_status]), el("span", "m-status", x.status));
       const body = el("div", "m-lead-body");
       body.append(row("Address", x.address), row("Phone", x.phone), row("Email", x.email || "none found"),
                   row("Website", x.website || "none found"), row("Confidence", x.confidence),
                   row("Missing", (x.missing || []).join(", ") || "—"));
+      if (x.google) body.append(el("div", "m-sub", `From ${x.google.attribution} (shown live, not stored)`),
+                                list([x.google.address, x.google.phone, x.google.website].filter(Boolean)));
       if (x.reasons && x.reasons.length) body.append(el("div", "m-sub", "Why this score"), list(x.reasons.map(rr => `+${rr.points}: ${rr.why}`)));
       if (x.evidence && x.evidence.length) body.append(el("div", "m-sub", "Evidence"), list(x.evidence));
       if (x.sources && x.sources.length) {
@@ -481,7 +491,14 @@
     const ab = $("#mission-approvals");
     ab.innerHTML = "";
     const pend = d.approvals.filter(a => a.status === "pending");
-    if (!pend.length) ab.append(el("div", "m-none", "Nothing waiting."));
+    const unknown = d.approvals.filter(a => a.status === "unknown");
+    if (!pend.length && !unknown.length) ab.append(el("div", "m-none", "Nothing waiting."));
+    for (const a of unknown) {
+      const r = el("div", "m-item"), bt = el("div", "m-actions");
+      bt.append(mBtn("Not in Gmail: retry", "refresh", { do: "approval_retry", approval_id: a.id }));
+      r.append(el("div", null, `${a.summary}: outcome unknown (${a.result || "check Gmail's Drafts first"})`), bt);
+      ab.append(r);
+    }
     for (const a of pend) {
       const r = el("div", "m-item"), bt = el("div", "m-actions");
       bt.append(mBtn("Approve (Gmail draft, not sent)", "check", { do: "approval_approve", approval_id: a.id }),
