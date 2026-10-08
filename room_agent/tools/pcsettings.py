@@ -251,6 +251,9 @@ def sleep():
     return "OK: the PC goes to sleep in 3 seconds (I won't hear you until it wakes)."
 
 
+scheduled_power = [False]  # (a shutdown / restart Jarvis scheduled: the emergency stop cancels it)
+
+
 def power(action):
     flag = {"shutdown": "/s", "restart": "/r"}.get(action)
     if not flag:
@@ -259,11 +262,13 @@ def power(action):
                        capture_output=True, text=True, creationflags=0x08000000)
     if r.returncode != 0:
         return f"FAILED: Windows refused ({(r.stderr or r.stdout).strip()[:120]})."
+    scheduled_power[0] = True
     return f"OK: the PC will {'shut down' if action == 'shutdown' else 'restart'} in 60 seconds. Say 'cancel the shutdown' to stop it."
 
 
 def cancel_power():
     r = subprocess.run(["shutdown", "/a"], capture_output=True, text=True, creationflags=0x08000000)
+    scheduled_power[0] = False
     if r.returncode != 0:
         return "OK: nothing to cancel: no shutdown or restart was waiting."
     return "OK: cancelled: the PC stays on."

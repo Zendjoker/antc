@@ -331,6 +331,12 @@
               row("Brain", live.online ? live.brain : "—", "sparkle"));
   }
 
+  // ---- emergency stop
+  $("#stop-btn").addEventListener("click", async () => {
+    const r = await act({ do: "emergency_stop" }, true);
+    if (r && r.message) toast(r.message);
+  });
+
   // ---- lists and reminders waiting for a moment
   function renderLists() {
     const d = live.online && live.lists, box = $("#lists"), tag = $("#lists-tag");

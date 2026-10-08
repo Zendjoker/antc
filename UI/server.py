@@ -261,6 +261,17 @@ SETUP_HINT = {"google": "Create a Google Cloud OAuth client of type Desktop app,
                         "GOOGLE_CLIENT_SECRET in .env (or save the downloaded JSON as google_client.json) and restart this page."}
 
 
+@app.before_request
+def _only_local():
+    """Every request must name this PC as its Host: a website that re-points its own name to 127.0.0.1 (DNS
+    rebinding) would otherwise be able to read the live view and settings."""
+    from room_agent.control import local_host
+
+    if not local_host(request.headers.get("Host", "")):
+        return jsonify(error="refused: not a local request"), 403
+    return None
+
+
 def _guard():
     origin = request.headers.get("Origin", "")
     if request.headers.get("X-Jarvis") != "1" or (origin and not origin.startswith(("http://127.0.0.1:", "http://localhost:"))):

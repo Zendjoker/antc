@@ -4,13 +4,16 @@ import os
 import re
 import time
 
-from room_agent.abilities._kit import params, tool
-from room_agent.actions.core import Group, register_claim, register_group
+from room_agent.abilities._kit import CONFIDENCE, params, tool
+from room_agent.actions.core import Group, Risk, register_claim, register_group
 
 IS_WINDOWS = os.name == "nt"
 FILE_HINTS = re.compile(r"\bfiles?\b|document|\bdoc\b|\bpdf\b|spreadsheet|excel|word doc|powerpoint|slides|\bcv\b|resume|"
+                        r"\bsave\b|\breport\b|\bfolder\b|rename|move (it|this|the)|recycle|delete (the|this|that) file|"
                         r"invoice|contract|folder|downloads|desktop|\.(pdf|docx?|xlsx?|pptx?|txt|md|csv)\b", re.I)
-register_group(Group("files", FILE_HINTS, lambda: False, "files on this PC", "find, read / summarize, open", lambda: IS_WINDOWS,
+register_group(Group("files", FILE_HINTS, lambda: False, "files on this PC",
+                     "find, read / summarize, open, save notes and reports, folders, move / rename, delete to the Recycle "
+                     "Bin", lambda: IS_WINDOWS,
                      rules=["- Files: 'this file' / 'this document' means the one selected in File Explorer or open in "
                             "front; call read_file without a name. Summarize from what read_file returns only. Never say "
                             "a file's full path aloud: say its name and folder."]))
@@ -106,3 +109,89 @@ tool("read_file", "Read a file to summarize it or answer about it: text, PDF, Wo
      examples=["summarize this PDF", "read my CV", "what does this document say"])
 tool("open_file", "Open a document, image or media file with its usual app (never programs or scripts).",
      params({"file": FILE, "number": NUM}), _open, group="files", claim=["files", "app"], private=True, intent=FILE_INTENT)
+
+
+# ---------------------------------------------------------------- writing: save, folders, move / rename, delete
+def _w():
+    from room_agent.computer import filewrite
+
+    return filewrite
+
+
+SAVE_INTENT = re.compile(r"save|write|create|make|put|store|export|jot", re.I)
+
+
+def _save(args):
+    return _w().write(args.get("name", ""), args.get("content", ""), args.get("folder", "desktop"), bool(args.get("overwrite")))
+
+
+def _exists(args, before=None):
+    p = _w().folder(args.get("folder", "desktop")) / _w()._safe_name(args.get("name", ""))
+    return {"exists": p.exists(), "size": p.stat().st_size if p.exists() else 0, "path": str(p)}
+
+
+def _undo_save(args, before, after):
+    if before.get("exists"):
+        return "FAILED: that save replaced an existing file, which can't be put back."
+    return _w().recycle(after["path"])
+
+
+tool("save_file", "Save text they asked for as a file (a note, a list, a draft, a report) in their Desktop, Documents or "
+     "Downloads: .md by default, or .txt / .csv / .json. Never overwrites an existing file unless they confirmed it.",
+     params({"name": {"type": "string", "description": "File name (without folders)"},
+             "content": {"type": "string"},
+             "folder": {"type": "string", "description": "desktop (default), documents, downloads"},
+             "overwrite": {"type": "boolean", "description": "Only after they confirmed replacing an existing file"}},
+            ["name", "content"]),
+     _save, group="files", claim="files", intent=SAVE_INTENT, observe=_exists, undo=_undo_save,
+     undo_if=lambda b, a: a["exists"] and not b["exists"])
+
+
+def _report(args):
+    from room_agent.computer.context import desk
+
+    return _w().research_report(desk.research, args.get("summary", ""), args.get("folder", "desktop"), args.get("name", ""))
+
+
+tool("save_research_report", "Save the last research as a Markdown report (their question, your summary, what each source "
+     "says with its link, what couldn't be read). Pass your summary; the sources are added from the research itself.",
+     params({"summary": {"type": "string", "description": "Your summary / comparison, citing [n]"},
+             "folder": {"type": "string", "description": "desktop (default), documents, downloads"},
+             "name": {"type": "string", "description": "Only if they named the file"}}, ["summary"]),
+     _report, group="research", claim="files", intent=SAVE_INTENT,
+     examples=["save a report on my desktop", "write that up as a document"])
+tool("make_folder", "Make a new folder in their Documents (or Desktop / Downloads).",
+     params({"name": {"type": "string"}, "folder": {"type": "string", "description": "Where: documents (default), desktop, "
+                                                                                     "downloads"}}, ["name"]),
+     lambda a: _w().make_folder(a["name"], a.get("folder", "documents")), group="files", claim="files", intent=SAVE_INTENT)
+
+
+def _target(args):
+    path, how = _pick(args)
+    return path, how
+
+
+def _move(args):
+    path, how = _target(args)
+    if path is None:
+        return f"FAILED: {how}."
+    return _w().move(path, args.get("to_folder", ""), args.get("new_name", ""))
+
+
+def _delete(args):
+    path, how = _target(args)
+    if path is None:
+        return f"FAILED: {how}."
+    return _w().recycle(path)
+
+
+tool("move_file", "Move a file to another of their folders, and / or rename it.",
+     params({"file": FILE, "number": NUM, "to_folder": {"type": "string"}, "new_name": {"type": "string"},
+             "confidence": CONFIDENCE}),
+     _move, group="files", claim="files", risk=Risk.CONFIRM, min_confidence=0.8,
+     intent=re.compile(r"move|rename|put|call it", re.I),
+     describe=lambda a: f"move/rename {a.get('file') or 'that file'}")
+tool("delete_file", "Delete one file: it goes to the Recycle Bin (recoverable). Always asks first. Never folders.",
+     params({"file": FILE, "number": NUM}), _delete, group="files", claim="files", risk=Risk.SENSITIVE,
+     intent=re.compile(r"delete|remove|trash|get rid of|bin", re.I),
+     describe=lambda a: f"move {a.get('file') or 'that file'} to the Recycle Bin")

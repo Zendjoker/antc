@@ -51,6 +51,7 @@ def run(cap, args):
 
     plan = Plan()
     rt.current_plan = plan
+    rt.turn.via = "reflex"  # (the audit log says it ran without a model call)
     result = plan.run(cap.name, args)
     if not result.success:
         return None, result

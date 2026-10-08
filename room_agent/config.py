@@ -114,6 +114,7 @@ SCREEN_VISION = os.getenv("SCREEN_VISION", "ask").lower()  # off | ask (asks onc
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").lower()  # auto | claude | openai | off: who reads screenshots
 VISION_MODEL = os.getenv("VISION_MODEL", "").strip()  # blank = CLAUDE_MODEL / OPENAI_MODEL
 RESEARCH_FILE = Path(os.getenv("RESEARCH_FILE", HERE / "research.json"))  # the last research reports, for the dashboard
+EMERGENCY_HOTKEY = os.getenv("EMERGENCY_HOTKEY", "ctrl+alt+j").strip()  # stops everything Jarvis is doing (emergency.py)
 DIAGNOSTICS = os.getenv("DIAGNOSTICS", "0") == "1"  # live diagnostic mode: logs/diagnostics-*.jsonl (livelog.py)
 DIAGNOSTICS_DIR = Path(os.getenv("DIAGNOSTICS_DIR", HERE / "logs"))
 TRACE = os.getenv("TRACE", "0") == "1"  # log one decision trace per turn (INPUT, AUDIO, INTENT, PARAMS, ACTION, RESULT...)

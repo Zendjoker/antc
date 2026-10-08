@@ -336,6 +336,11 @@ def do(body):
             return {"ok": True, "message": "Forgotten, along with what it was learned from."}
         m.set_auto(key, bool(body.get("on")))
         return {"ok": True, "message": "Saved."}
+    if what == "emergency_stop":
+        from room_agent import emergency
+
+        done = emergency.stop_everything("dashboard")
+        return {"ok": True, "message": "Stopped: " + (", ".join(done) if done else "nothing was running") + "."}
     if what == "call_me":
         p = _phone()
         if not p["ready"]:
@@ -350,6 +355,24 @@ def do(body):
 
 
 # ---------------------------------------------------------------- the link
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
+
+
+def local_host(host):
+    """The Host header names this PC (a page on another site that re-points its name to 127.0.0.1, "DNS rebinding",
+    sends its own name here, so it's refused)."""
+    name = str(host or "").strip().lower()
+    name = name[1:].split("]")[0] if name.startswith("[") else name.rsplit(":", 1)[0] if name.count(":") == 1 else name
+    return name in LOCAL_HOSTS or name == "::1"
+
+
+@web.middleware
+async def _only_local(request, handler):
+    if not local_host(request.headers.get("Host", "")):
+        return web.json_response({"error": "refused: not a local request"}, status=403)
+    return await handler(request)
+
+
 def _allowed(request):
     origin = request.headers.get("Origin", "")
     return request.headers.get("X-Jarvis") == "1" and (not origin or origin.startswith(("http://127.0.0.1:", "http://localhost:")))
@@ -405,7 +428,7 @@ def start():
     def run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        app = web.Application()
+        app = web.Application(middlewares=[_only_local])
         app.add_routes([web.get("/live", live), web.get("/knowledge", knowledge_view),
                         web.post("/command", command), web.post("/action", action)])
         runner = web.AppRunner(app, access_log=None)

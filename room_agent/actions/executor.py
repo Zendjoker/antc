@@ -162,6 +162,11 @@ def execute(name, args):
     t0 = time.time()
     result = _execute(name, args)
     livelog.tool(result, time.time() - t0)  # (DIAGNOSTICS=1 only)
+    cap = core.get(name)
+    if cap is not None:
+        from room_agent import audit
+
+        audit.record(cap, result, via=getattr(rt.turn, "via", "model"))
     return result
 
 

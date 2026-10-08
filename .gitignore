@@ -42,3 +42,4 @@ jarvis.stop
 jarvis.supervisor
 lists.json
 event_reminders.json
+eval/

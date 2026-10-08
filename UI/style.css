@@ -521,3 +521,6 @@ body.offline .needs-live { opacity: .45; pointer-events: none; }
 .lists-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
 .list-name { font-weight: 600; margin-bottom: 4px; }
 .list-items { margin: 0; padding-left: 18px; display: grid; gap: 3px; overflow-wrap: anywhere; }
+
+.btn.danger { color: #b42318; border-color: #f3c3bd; }
+.btn.danger:hover { background: #fdecea; }

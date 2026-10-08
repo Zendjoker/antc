@@ -37,6 +37,9 @@ def main():
     p.add_argument("--setup-phone", action="store_true", help="set up phone mode (calls while you drive), see phone.md")
     p.add_argument("--test-call", action="store_true", help="phone mode: Jarvis calls your phone once, to test")
     p.add_argument("--disconnect", metavar="ACCOUNT", help="disconnect a Google account (revokes access, deletes its key)")
+    p.add_argument("--memory-cleanup", action="store_true", help="show duplicate / momentary memories and junk summaries")
+    p.add_argument("--apply", action="store_true", help="with --memory-cleanup: do it (memory.db is backed up first)")
+    p.add_argument("--revert", action="store_true", help="with --memory-cleanup: undo what the clean-up hid")
     a = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -45,6 +48,8 @@ def main():
     if a.memory:
         show_memory()
         return
+    if a.memory_cleanup:
+        sys.exit(_memory_cleanup(a))
     if a.setup_phone or a.test_call:
         from room_agent.phone import setup
 
@@ -135,6 +140,9 @@ def main():
     from room_agent import triggers
 
     triggers.start()  # (reminders for "when I get home / go to bed / am back at the PC", break / rain / meeting heads-ups)
+    from room_agent import emergency
+
+    emergency.start_hotkey()  # (EMERGENCY_HOTKEY, default Ctrl+Alt+J: stops everything, even mid-action)
     from room_agent.actions import journal
 
     journal.load()  # (actions cut off by the last shutdown: reported once, never claimed)
@@ -254,3 +262,24 @@ def _connections(a):
     except IntegrationError as e:
         print(e.say())
         return 1
+
+
+def _memory_cleanup(a):
+    import sqlite3
+
+    from room_agent.memory import cleanup
+
+    path = str(config.MEMORY_DB)
+    if a.revert:
+        print(f"Re-activated {cleanup.revert(path)} memories the clean-up had hidden.")
+        return 0
+    p = cleanup.plan(sqlite3.connect(path))
+    print(cleanup.describe(p))
+    if not a.apply:
+        print("\n(dry run: nothing changed. Add --apply to do it.)")
+        return 0
+    if not (p["duplicates"] or p["moments"] or p["skip_summaries"]):
+        return 0
+    backup = cleanup.apply(path, p)
+    print(f"\nDone. Backup: {backup}  (undo: python main.py --memory-cleanup --revert)")
+    return 0

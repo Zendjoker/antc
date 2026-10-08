@@ -107,6 +107,26 @@ Plain text, no preamble. If it was trivial \
 
 
 # Things not learned automatically (only when they explicitly ask to remember: MEMORY_SENSITIVE=allow changes that)
+# "(Summary for memory): SKIP" and similar: the model saying there's nothing worth keeping, in any wording
+SKIP_SUMMARY = re.compile(r"^\W*(\(?[\w\s]{0,40}\)?\s*[:\-]\s*)?SKIP\W*$", re.I)
+
+
+def is_skip(summary):
+    s = str(summary or "").strip()
+    return not s or bool(SKIP_SUMMARY.match(s)) or (len(s) < 60 and re.search(r"\bSKIP\b", s) is not None)
+
+
+# A moment, not a fact about them: "on the bed right now", "currently cooking", "at work today". Kept out of
+# long-term memory (the conversation and the sensors know the present).
+TRANSIENT = re.compile(r"\b(right now|at the moment|currently|just now|for now|this (morning|afternoon|evening)|tonight|"
+                       r"today|at this point|as we speak)\b", re.I)
+
+
+def is_transient(content, category="fact"):
+    unquoted = re.sub(r'"[^"]*"|“[^”]*”', '', str(content or ''))  # (a quoted phrase isn't a state)
+    return category not in ("plan", "routine") and bool(TRANSIENT.search(unquoted))
+
+
 SENSITIVE = re.compile(r"\b(diagnos\w*|disease|illness|medication|medicine|prescription|therapy|therapist|depress\w*|anxiety|"
                        r"pregnan\w*|hiv|cancer|password|passcode|pin code|social security|ssn|passport|bank|account number|"
                        r"credit card|salary|debt|religio\w*|sexual\w*|immigration|criminal record|arrest\w*)\b", re.I)
@@ -306,6 +326,9 @@ class MemoryWriter:
             if self.memory.is_rejected(content):
                 log.info("memory: not saving %r (they said earlier it isn't true)", content)
                 continue
+            if is_transient(content, category):
+                log.info("memory: not saving %r (a moment, not a lasting fact)", content)
+                continue
             if SENSITIVE.search(content) and config.MEMORY_SENSITIVE != "allow":
                 log.info("memory: not saving %r automatically (sensitive: only if they ask to remember it)", content)
                 continue
@@ -327,6 +350,6 @@ class MemoryWriter:
         summary = (self.call_text(SUMMARY_SYSTEM.format(user=self.user), text) or "").strip()
         if generation != self.memory.generation:
             return  # something was forgotten meanwhile: this summary might contain it
-        if summary and not summary.upper().startswith("SKIP"):
+        if summary and not is_skip(summary):
             self.memory.add_summary(summary)
             log.info("conversation summary saved: %s", summary)
