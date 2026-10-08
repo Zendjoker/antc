@@ -103,8 +103,12 @@ def _index_search(query, kind=None, limit=8):
 def _walk_search(query, kind=None, limit=8):
     """A bounded walk of the user's folders by file name (when the index isn't available)."""
     words = [w.lower() for w in re.findall(r"[\w.-]{2,}", str(query)) if w.lower() not in ("my", "the", "file", "a", "an")]
+    from room_agent import cancel
+
     deadline, hits = time.time() + WALK_BUDGET_S, []
     for root in roots():
+        if cancel.requested():
+            break
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
             for fn in filenames:
@@ -117,7 +121,7 @@ def _walk_search(query, kind=None, limit=8):
                         continue
                     if allowed(p)[0]:
                         hits.append(Found(p, fn, st.st_mtime, st.st_size))
-            if time.time() > deadline:
+            if time.time() > deadline or cancel.requested():
                 break
         if time.time() > deadline:
             break

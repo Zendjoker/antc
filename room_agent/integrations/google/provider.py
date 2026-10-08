@@ -249,8 +249,26 @@ class GoogleProvider(IntegrationProvider):
     def _expired(self, account, why):
         with self._lock:
             self._tokens.pop(account, None)
+        was = (state.provider(self.id)["accounts"].get(account) or {}).get("status")
         state.set_account(self.id, account, status="expired", last_error=why, last_error_at=time.time())
+        if was != "expired":  # (said once, when it changes: not on every failed request afterwards)
+            self._tell_expired(account, why)
         raise AuthExpired("Google", why)
+
+    def _tell_expired(self, account, why):
+        connected = (state.provider(self.id)["accounts"].get(account) or {}).get("connected_at") or 0
+        days = (time.time() - connected) / 86400 if connected else 0
+        log.warning("Google: %s's connection stopped working (%s)%s", account, why,
+                    " after ~7 days: a Google Cloud app in 'Testing' mode gets 7-day sign-ins (publish it, or reconnect "
+                    "weekly)" if 6.5 <= days <= 8 else "")
+        try:
+            from room_agent import triggers
+
+            triggers.say("Heads up: your Google connection stopped working, so I can't check your email or calendar until "
+                         "you reconnect it. It's on the dashboard under Connections.", "reminder",
+                         f"google-expired:{account}:{time.time():.3f}")  # (once per expiry: the status change)
+        except Exception as e:
+            log.debug("Google: couldn't announce the expiry (%s)", e)
 
     def _identity(self, tokens):
         """The signed-in account's email, from the ID token Google just returned to us directly (over TLS)."""

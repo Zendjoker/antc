@@ -349,9 +349,11 @@ def _expected_title_words(url, query=""):
 
 def wait_loaded(key, url, before_titles, query="", timeout=8.0):
     """Wait until a window of browser `key` shows the page. -> (hwnd, state) or (None, last state seen)."""
+    from room_agent import cancel
+
     deadline, last = time.time() + timeout, {}
     want_words = _expected_title_words(url, query)
-    while time.time() < deadline:
+    while time.time() < deadline and not cancel.requested():
         for _, hwnd, title in browser_windows(key):
             st = read_state(hwnd)
             last = st
@@ -380,6 +382,10 @@ def open_url(url, browser="", said="", query=""):
         return f"FAILED: {b.name} couldn't be started ({e.__class__.__name__}). Nothing was opened."
     hwnd, st = wait_loaded(key, url, before, query)
     desk.used_browser(key)
+    from room_agent import cancel
+
+    if not hwnd and cancel.requested():
+        return f"FAILED: stopped: they interrupted while {b.name} was opening {host(url)}; whether it opened isn't confirmed."
     if not hwnd:
         return (f"FAILED: not confirmed: {b.name} was asked to open {host(url)}, but its window never showed the page "
                 f"within a few seconds. Tell them you couldn't confirm it opened; don't say it did.")

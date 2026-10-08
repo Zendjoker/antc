@@ -65,10 +65,16 @@ def _score(name, query):
     return 0.7 * len(wa & wb) / max(len(wb), 1) if wb else 0.0
 
 
+def _stop():
+    from room_agent import cancel
+
+    return cancel.requested()
+
+
 def _wait_playing(before, query):
     """Something new is playing (it changed from `before`, and it's playing). -> (title, artist) or None."""
     deadline = time.time() + WAIT_S
-    while time.time() < deadline:
+    while time.time() < deadline and not _stop():
         now = _now()
         if now and now[2] and (before is None or (now[0], now[1]) != (before[0], before[1]) or not before[2]):
             return now[0], now[1]
@@ -79,7 +85,7 @@ def _wait_playing(before, query):
 def _launch_spotify():
     _open_uri("spotify:")
     deadline = time.time() + 12
-    while time.time() < deadline:
+    while time.time() < deadline and not _stop():
         hwnd = _spotify_window()
         if hwnd:
             return hwnd
@@ -88,6 +94,13 @@ def _launch_spotify():
 
 
 def spotify(query, kind="any"):
+    out = _spotify(query, kind)
+    if not out.startswith("OK") and _stop():
+        return "FAILED: stopped: they interrupted; nothing new is confirmed playing."
+    return out
+
+
+def _spotify(query, kind="any"):
     hwnd = _spotify_window() or _launch_spotify()
     if not hwnd:
         return "FAILED: Spotify isn't running and couldn't be started, so nothing was played."
@@ -106,7 +119,7 @@ def spotify(query, kind="any"):
     seen = {n for n, _ in library}
     _open_uri("spotify:search:" + urllib.parse.quote(query))
     deadline, results = time.time() + WAIT_S, []
-    while time.time() < deadline and not results:
+    while time.time() < deadline and not results and not _stop():
         time.sleep(0.6)
         results = [(n, e) for n, e in _buttons(hwnd) if n not in seen]
     if not results:

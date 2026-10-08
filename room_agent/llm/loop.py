@@ -87,6 +87,8 @@ def run_model(history, make_call):
     stopped = False  # (the step limit was reached once: the next round must be words, not tools)
     while True:
         buf, spoken, cut = "", [], False
+        if interrupted_now():  # (stopped while the last tools ran: no further model call at all)
+            return stop_for_interruption(history, [])
         t_call = time.time()
         with make_call(history, fixed, changing, tools) as call:
             for text in call.deltas():

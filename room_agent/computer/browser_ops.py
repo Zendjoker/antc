@@ -37,10 +37,10 @@ WAIT_NAV_S = 6.0
 
 
 def interrupted():
-    """They talked over it, or the turn was cancelled: stop between steps."""
-    eng = rt.engine
-    return bool(rt.turn.cancel.is_set() or getattr(rt.turn, "interrupted", False)
-                or (eng is not None and getattr(eng, "interrupted", None) is not None and eng.interrupted.is_set()))
+    """They talked over it, the turn was cancelled, or an emergency stop: stop between steps (cancel.py)."""
+    from room_agent import cancel
+
+    return cancel.requested() or bool(getattr(rt.turn, "interrupted", False))
 
 
 # ---------------------------------------------------------------- which window
@@ -383,7 +383,7 @@ def navigate(hwnd, key, action, tab=""):
         n_before = len(uia.tabs(hwnd))
         winput.hotkey(combo)
         deadline = time.time() + 3
-        while time.time() < deadline:
+        while time.time() < deadline and not interrupted():
             if len(uia.tabs(hwnd)) > n_before:
                 desk.saw_page(key, hwnd, "", "New tab")
                 return f"OK: opened a new tab in {b.name}."
@@ -394,7 +394,7 @@ def navigate(hwnd, key, action, tab=""):
         rid = uia.runtime_id(doc) if doc is not None else ()
         winput.hotkey(combo)
         deadline = time.time() + WAIT_NAV_S
-        while time.time() < deadline:
+        while time.time() < deadline and not interrupted():
             time.sleep(0.3)
             d2 = uia.document(hwnd, wait=0.3)
             if d2 is not None and rid and uia.runtime_id(d2) != rid:
@@ -448,7 +448,7 @@ def switch_tab(hwnd, key, wanted):
         return f"FAILED: couldn't select the tab \"{name[:60]}\"."
     winput.focus_window(h)
     deadline = time.time() + 2.5
-    while time.time() < deadline:
+    while time.time() < deadline and not interrupted():
         if name[:20].lower() in browsers.title_of(h).lower():
             st = _state(h)
             desk.saw_page(key, h, st["url"], st["title"])

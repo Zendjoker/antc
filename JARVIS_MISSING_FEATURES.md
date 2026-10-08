@@ -12,7 +12,7 @@
 |---|---|---|
 | Restart Jarvis on the current code | The live Jarvis is older than every fix since 00:31 last night | Stop it; `.\.venv\Scripts\python.exe -m room_agent.service --install`, then `--start` |
 | Voiceprint | Without it, echo and other voices can interrupt (live log: "speaker verification not active") | `.\.venv\Scripts\python.exe main.py --enroll-voice` |
-| Google sign-in | 16 email and calendar tools idle; meeting heads-ups and email watches need it | `.\.venv\Scripts\python.exe main.py --connect google` |
+| Google Cloud app publishing status | **Correction: Google IS connected** (10-07 21:28; token refreshed 10-08 09:02). If the Cloud app is in 'Testing', the sign-in expires every 7 days; Jarvis now warns once when it does | Check the OAuth consent screen in Google Cloud; reconnect with `main.py --connect google` when warned |
 | The 20 real-world tasks | The only real measure of reliability | `.\.venv\Scripts\python.exe -m tests.real_world_eval` |
 | Real-model tool-choice test | Nobody knows how often the AI picks the wrong tool | Approve ~$0.50 |
 | FP1E presence sensor | Better arrival and "busy" detection | Pair it in Zigbee2MQTT |

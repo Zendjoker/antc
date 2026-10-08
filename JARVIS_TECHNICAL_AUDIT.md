@@ -49,7 +49,7 @@ So the live-session evidence below is about older code. Everything committed aft
 | Web search snippets, weather, news | **L3** | Summaries: Bitcoin price, weather, news | — |
 | Zigbee lights, sensors, arrival greeting | **L3** | Session: dim, blue, off verified; greeting spoken; door events | The greeting fired, then the door kept firing "busy" every 10 s; it's a noisy sensor |
 | Phone mode (Twilio) | L3 partial | Summary 10-06 18:52 (a call); tunnel up in the log | Exposes a public URL (see security) |
-| Gmail / Calendar (16 tools) | **L0 for you** | Google sign-in was never completed (summary 10-07 21:25) | Blocked on you |
+| Gmail / Calendar (16 tools) | **L3 (connection)** | `connections.json`: connected 10-07 21:28, token refreshed successfully 10-08 09:02; refresh token in the Windows vault | The Gmail/Calendar tools themselves are untested live. If the Google Cloud app is in 'Testing' mode, sign-ins expire after 7 days (around 10-14) |
 | Browser control (open/search/tabs/click/type/scroll/read) | **L2 read-only, L1** | Address read 125 ms, page text 36 ms, 11 tabs listed on your Opera | No real click, type, scroll or open done by Jarvis |
 | Screen vision | L1 | Stub model only | No real vision call made |
 | Research | L1 | Local test server | Never run against the real web through Jarvis |

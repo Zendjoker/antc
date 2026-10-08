@@ -250,11 +250,38 @@ def desk_tick(idle, now=None):
             "stretch for a minute?", "nudge", f"break:{int(_state['active_since'])}", now=now)
 
 
+GOOGLE_CHECK_S = 6 * 3600
+
+
+def google_health(now=None, provider=None):
+    """Every GOOGLE_CHECK_S: refresh the connected Google account's token in the background, so an expired connection
+    is found (and said, once: integrations/google/provider.py) before they need their email. A token refresh is a free
+    call to Google's sign-in service. -> True / False / None (nothing to check)."""
+    now = now or time.time()
+    if now - _state.get("google_at", 0) < GOOGLE_CHECK_S:
+        return None
+    _state["google_at"] = now
+    try:
+        if provider is None:
+            from room_agent.integrations import provider as get
+
+            provider = get("google")
+        if not provider.configured() or provider.connection_status() != "connected":
+            return None
+        ok = provider.refresh_credentials()
+        log.info("triggers: Google connection check: %s", "fine" if ok else "NOT working")
+        return ok
+    except Exception as e:
+        log.debug("triggers: Google check failed: %s", e)
+        return None
+
+
 def _desk_loop():
     while True:
         try:
             desk_tick(idle_seconds())
             meetings_check()
+            google_health()
         except Exception as e:
             log.debug("triggers: desk check failed: %s", e)
         time.sleep(5)

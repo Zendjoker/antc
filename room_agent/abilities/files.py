@@ -87,12 +87,16 @@ def _open(args):
     name = os.path.basename(path)
     from room_agent.computer import browsers
 
+    from room_agent import cancel
+
     deadline = time.time() + 6
     stem = os.path.splitext(name)[0].lower()[:25]
-    while time.time() < deadline:  # (opened = a window showing it appeared)
+    while time.time() < deadline and not cancel.requested():  # (opened = a window showing it appeared)
         if any(stem in t.lower() for _, _, t in browsers._top_windows()):
             return f"OK: opened {name} ({how})."
         time.sleep(0.3)
+    if cancel.requested():
+        return f"FAILED: stopped: they interrupted; {name} was handed to Windows but its window isn't confirmed."
     return f"FAILED: not confirmed: asked Windows to open {name}, but no window showing it appeared."
 
 

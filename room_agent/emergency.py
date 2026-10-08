@@ -20,21 +20,27 @@ from room_agent import runtime as rt
 
 log = logging.getLogger("room-agent")
 stopped_at = [0.0]
+stopping_turn = [None]  # (the turn that asked for the stop by voice: it isn't itself cancelled)
 
 
 def stop_everything(via="voice"):
     """-> what was stopped (for the log / reply)."""
     done = []
-    try:
-        rt.turn.cancel.set()
-        done.append("the current request")
-    except Exception:
-        pass
+    voice = via == "voice"  # (said as a new turn: the request that was running is an older one; this one replies)
+    stopping_turn[0] = rt.turn if voice else None
+    stopped_at[0] = time.time()  # (every request that started before now stops at its next step: cancel.requested)
+    if not voice:
+        try:
+            rt.turn.cancel.set()
+            done.append("the current request")
+        except Exception:
+            pass
     eng = rt.engine
     if eng is not None:
         try:
             eng.flush()
-            eng.interrupted.set()
+            if not voice:
+                eng.interrupted.set()  # (by voice it was already listening: "Stopped." must still be heard)
             done.append("speaking")
         except Exception:
             pass
@@ -80,7 +86,6 @@ def stop_everything(via="voice"):
             done.append(f"{len(running)} running action{'s' if len(running) != 1 else ''}")
     except Exception:
         pass
-    stopped_at[0] = time.time()
     from room_agent import audit
 
     audit.event("emergency_stop", via=via, stopped=done)

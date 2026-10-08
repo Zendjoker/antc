@@ -18,7 +18,9 @@ _NEED = re.compile(r"<\s*need\s*:\s*(\w+)\s*>", re.I)
 
 
 def interrupted_now():
-    return rt.turn.cancel.is_set() or bool(not rt.turn.output and rt.engine and rt.engine.interrupted.is_set())
+    from room_agent import cancel
+
+    return cancel.requested()
 
 
 def stop_for_interruption(history, spoken):

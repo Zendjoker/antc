@@ -105,6 +105,19 @@ def _spoken(result):
     return None
 
 
+def _browser_in_play(args):
+    """Instant browser commands ('go back', 'scroll down', 'open the second one') only when a browser is what they're
+    using: one is in front, or Jarvis used one in the last few minutes. Otherwise 'go back' may mean the previous song,
+    and the model decides."""
+    from room_agent.computer import browsers
+    from room_agent.computer.context import desk
+
+    if args.get("browser"):
+        return _ops().target_window(args["browser"])[0] is not None
+    key, _ = browsers.foreground_browser()
+    return key is not None or desk.current_page() is not None
+
+
 def _site_ok(args):
     from room_agent.computer import browsers
 
@@ -236,7 +249,7 @@ tool("browser_navigate", "In the browser: go back, go forward, refresh / reload,
                                                                       {"action": "refresh"}),
              (r"(?:open\s+)?(?:a\s+)?(?:new|another)\s+tab", {"action": "new_tab"}),
              (r"(?:switch|go)\s+to\s+(?:my\s+|the\s+)?(?P<tab>[\w .'-]{2,40}?)\s+tab", {"action": "switch_tab"})],
-     reflex_check=lambda a: _ops().target_window(a.get("browser", ""))[0] is not None, reflex_say=_spoken)
+     reflex_check=_browser_in_play, reflex_say=_spoken)
 
 
 # ---------------------------------------------------------------- reading
@@ -286,7 +299,7 @@ tool("browser_click", "Click a link, result or button on the current page by its
      event="browser.clicked", examples=["click the second result", "open the first video", "click Sign in"],
      reflex=[(r"(?:open|click|play|pick|choose)\s+(?:on\s+)?the\s+(?P<target>first|second|third|fourth|fifth|last)"
               r"(?:\s+(?:one|result|video|link))?", {})],
-     reflex_check=lambda a: _ops().target_window(a.get("browser", ""))[0] is not None, reflex_say=_spoken)
+     reflex_check=_browser_in_play, reflex_say=_spoken)
 tool("browser_click_sensitive", "Click a button that sends, buys, pays, posts, deletes or signs out (only after they "
      "clearly asked for exactly that). Asks them to confirm first.",
      params({"target": TARGET, "number": NUMBER, "browser": BROWSER_ARG}, ["target"]),
@@ -323,7 +336,7 @@ tool("browser_scroll", "Scroll the page in the browser.",
      _scroll, group="browser", claim="browser",
      reflex=[(r"scroll\s+(?P<direction>down|up)(?:\s+(?P<amount>a lot|a bit|some))?", {}),
              (r"(?:scroll|go)\s+to\s+the\s+(?P<direction>top|bottom)(?:\s+of\s+the\s+page)?", {})],
-     reflex_check=lambda a: _ops().target_window(a.get("browser", ""))[0] is not None, reflex_say=_spoken)
+     reflex_check=_browser_in_play, reflex_say=_spoken)
 
 
 def _copy(args):
@@ -381,6 +394,8 @@ def _analyze(args):
         seen = vision.analyze(shot, question)
     except RuntimeError as e:
         return f"FAILED: couldn't read the screen: {e}."
+    if _ops().interrupted():  # (the answer came back after they stopped it: not used)
+        return "FAILED: stopped: they interrupted, so the screen reading isn't used."
     stale = screen.fresh(shot, max_age=60)
     shot.png = b""  # (the image is never kept)
     desk.screen = {"shot": shot, "elements": seen["elements"], "at": time.time()}
@@ -469,7 +484,9 @@ def _research(args):
             told[0] = True
             say(line)
 
-    report = research.research(question, depth, progress=progress, cancel=_ops().interrupted)
+    from room_agent import cancel
+
+    report = research.research(question, depth, progress=progress, cancel=cancel.requested)
     desk.research = report
     return research.for_model(report)
 
