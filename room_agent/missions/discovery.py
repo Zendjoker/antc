@@ -5,8 +5,9 @@
                                     Data (c) OpenStreetMap contributors, ODbL: reports credit it.
     Google Places (optional)        Text Search (New) when GOOGLE_PLACES_API_KEY is set and the mission allows it. Paid per
                                     request: each call is estimated and checked against the mission budget first.
-                                    Google's terms limit storing Places content: only the place id is kept long-term
-                                    (profile fields from Places are tagged with their source and fetch time).
+                                    Google's terms limit caching Places content (the place id may be kept; other fields
+                                    only briefly). Fields from Places are stored on the lead tagged with their source
+                                    and fetch date; refreshing / purging them on a schedule is NOT automated yet.
 
 Nothing is invented: a business has exactly the fields a source returned; everything else is listed as missing.
 """
