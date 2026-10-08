@@ -9,6 +9,11 @@ Routing safety (reviewed against the other areas):
       a mission or approve anything by themselves.
     - spending more needs raise_mission_budget (always asks, SENSITIVE); start_business_mission ignores a budget the
       user didn't say. Approving an outreach item is SENSITIVE (always asks) and only ever creates a Gmail draft.
+    - stopping a mission for good needs the word "mission" AND a yes (SENSITIVE): "stop researching" / "stop" never
+      cancels one (pausing is the reversible option).
+    - adding work (demos, edits) never resumes a paused mission; results say "queued, not running" with the reason.
+    - Google-only business details are never put in what the model reads (it can end up in conversation memory):
+      voice results use the stored names; the dashboard shows the Google details live, attributed.
     - business names / page titles come from outside sources: what the model reads back is cut short and stripped of
       line breaks, and labelled as data.
 """
@@ -27,6 +32,7 @@ MISSION_INTENT = re.compile(r"\b(missions?|research(ing)?|leads?|prospects?|demo
                             r"background (job|task|work))\b", re.I)
 DEMO_INTENT = re.compile(r"\b(demos?|sites?|websites?|previews?|mock-?ups?)\b", re.I)
 APPROVE_INTENT = re.compile(r"\b(approv\w*|reject\w*|retry|drafts?|go ahead with (number|#)?\s*\d+)\b", re.I)
+STOP_INTENT = re.compile(r"\bmissions?\b", re.I)  # (a permanent stop: never inferred from "research" / "stop")
 MONEY_INTENT = re.compile(r"(\$\s?\d|\b\d+(\.\d+)?\s*(dollars?|bucks|usd|cents?)\b|\bbudget\b|\bspend\b)", re.I)
 register_group(Group("missions", HINTS, lambda: _live(), "background missions",
                      "long jobs that run in the background: finding businesses without a good website, researching "
@@ -51,7 +57,7 @@ def _engine():
 def _live():
     try:
         m = _engine().latest()
-        return bool(m and m["state"] in ("running", "paused", "paused_budget", "interrupted"))
+        return bool(m and m["state"] in ("running", "paused", "paused_budget", "paused_daily", "interrupted"))
     except Exception:
         return False
 
@@ -150,16 +156,16 @@ def _pause(args):
 
 
 def _resume(args):
-    m = _mission(args, ("paused", "paused_budget", "interrupted"))
-    if m is None or m["state"] not in ("paused", "paused_budget", "interrupted"):
+    m = _mission(args, ("paused", "paused_budget", "paused_daily", "interrupted"))
+    if m is None or m["state"] not in ("paused", "paused_budget", "paused_daily", "interrupted"):
         return "OK: no mission is paused."
-    if _engine().resume(m["id"]):
+    eng = _engine()
+    why = eng.resume_blocker(m["id"])
+    if not why and eng.resume(m["id"]):
         return f"OK: resumed '{_clean(m['title'], 80)}' in the background."
-    from room_agent.missions.store import store
-
-    m = store().mission(m["id"])
-    return (f"FAILED: not resumed: it has spent ${m['spent_usd']:.2f} (plus ${m.get('reserved_usd') or 0:.2f} in progress) of "
-            f"its ${m['budget_usd']:.2f} budget. Ask if they want to raise it (raise_mission_budget).")
+    why = why or eng.resume_blocker(m["id"]) or "it couldn't be resumed"
+    hint = " Ask if they want to raise it (raise_mission_budget)." if "mission budget" in why else ""
+    return f"FAILED: not resumed: {why}.{hint}"
 
 
 def _raise_budget(args):
@@ -172,13 +178,28 @@ def _raise_budget(args):
         extra = 0
     if extra <= 0:
         return "NEEDS: how much more to allow, in dollars."
-    new = _engine().raise_budget(m["id"], extra, "voice")
+    from room_agent import config
     from room_agent.missions.store import store
 
-    if new is None or abs(store().mission(m["id"])["budget_usd"] - new) > 1e-9:
+    res = _engine().raise_budget(m["id"], extra, "voice")
+    if res is None:
         return "FAILED: the budget wasn't changed."
-    resumed = m["state"] == "paused_budget" and _engine().resume(m["id"])
-    return f"OK: the mission's budget is now ${new:.2f}" + (" and it's running again." if resumed else ".")
+    old, new = res
+    if new <= old + 1e-9 or abs(store().mission(m["id"])["budget_usd"] - new) > 1e-9:
+        return (f"FAILED: the budget wasn't changed: it's already at the maximum a mission may have "
+                f"(${config.MISSION_MAX_BUDGET_USD:.2f}, MISSION_MAX_BUDGET_USD).")
+    capped = new < old + extra - 1e-9
+    msg = f"OK: the mission's budget went from ${old:.2f} to ${new:.2f}"
+    if capped:
+        msg += f" (capped at the ${config.MISSION_MAX_BUDGET_USD:.2f} maximum, not the full ${extra:.2f} more)"
+    if m["state"] == "paused_budget":
+        if _engine().resume(m["id"]):
+            msg += "; it's running again"
+        else:
+            msg += f"; still paused: {_engine().resume_blocker(m['id']) or 'it could not be resumed'}"
+    elif m["state"] == "paused_daily":
+        msg += "; it's still paused by today's overall model budget, which raising the mission budget doesn't change"
+    return msg + "."
 
 
 def _describe_budget(args):
@@ -188,12 +209,26 @@ def _describe_budget(args):
         return "raise the mission's budget"
 
 
+def _describe_stop(args):
+    m = _mission(args)
+    title = _clean(m["title"], 80) if m else "the mission"
+    return f"cancel '{title}' for good (it can't be resumed; pausing would keep it resumable)"
+
+
 def _stop(args):
-    m = _mission(args, ("running", "paused", "paused_budget", "interrupted", "planned"))
+    m = _mission(args, ("running", "paused", "paused_budget", "paused_daily", "interrupted", "planned"))
     if m is None or m["state"] in ("completed", "cancelled", "finished_with_problems"):
         return "OK: no mission is running or paused."
     return (f"OK: stopped '{_clean(m['title'], 80)}'. What it already found and built is kept in {m['workspace']}."
             if _engine().stop(m["id"]) else "FAILED: couldn't stop it.")
+
+
+def _queued(res, what):
+    """The honest wording for work added to a mission (engine.add_steps' result)."""
+    if res["running"]:
+        return f"OK: queued {what} in the background; NOT done yet. Tell them you'll say when it's ready."
+    return (f"OK: queued {what}, but it is NOT running: {res['why_not']}. Tell them exactly that; don't say it's being "
+            "worked on.")
 
 
 def _demos(args):
@@ -207,18 +242,16 @@ def _demos(args):
     if names and not ids:
         return "FAILED: none of those businesses is in this mission."
     try:
-        picked = business.build_demos(m["id"], int(args.get("count") or 3), ids or None)
-    except (ValueError, TypeError) as e:
+        picked, res = business.build_demos(m["id"], int(args.get("count") or 3), ids or None)
+    except (ValueError, TypeError) as e:  # (engine.MissionClosed is a ValueError: a stopped mission takes no new work)
         return f"FAILED: {e}."
     if not picked:
         return ("OK: nothing to build: no researched business qualifies yet, the best ones already have (or are getting) "
                 "a demo, or they're only known from Google Maps. Check mission_status.")
-    return (f"OK: queued demo sites for {', '.join(_clean(x['name']) for x in picked)} in the background; NOT built yet. "
-            "Tell them you'll say when they're ready.")
+    return _queued(res, "demo sites for " + ", ".join(_clean(x["name"]) for x in picked))
 
 
 def _leads(args):
-    from room_agent.missions import business
     from room_agent.missions.store import store
 
     m = _mission(args)
@@ -233,7 +266,7 @@ def _leads(args):
     if not rows:
         return "OK: no researched businesses yet."
     return "OK: (names are web data) " + " | ".join(
-        f"{_clean(business.display_name(x))}: {x['website_status']}, score {x.get('score')} ({x.get('level')}), "
+        f"{_clean(x['name'])}: {x['website_status']}, score {x.get('score')} ({x.get('level')}), "
         f"phone {'yes' if x.get('phone') else 'no'}, email {'yes' if x.get('email') else 'no'}, status {x['status']}"
         for x in rows)
 
@@ -267,9 +300,13 @@ def _preview(args):
     m, proj, err = _project_for(args)
     if err:
         return err
+    url = preview.url_for(proj["path"])
+    if not url:
+        return (f"FAILED: this demo is outside the current missions folder (MISSIONS_DIR changed), so the preview server "
+                f"can't show it. Its page is {proj['path']}\\index.html.")
     if not preview.start():
         return "FAILED: the local preview server couldn't start (the port may be in use: MISSION_PREVIEW_PORT)."
-    return browsers.open_url(preview.url_for(proj["path"]), args.get("browser") or "", said="", query="design preview")
+    return browsers.open_url(url, args.get("browser") or "", said="", query="design preview")
 
 
 def _edit(args):
@@ -284,20 +321,25 @@ def _edit(args):
         return f"FAILED: '{_clean(color, 20)}' isn't a colour I know (try e.g. {', '.join(list(design.NAMED)[:6])})."
     instruction = (args.get("change") or "").strip()
     if (layout or color) and not instruction:
-        key = business.request_redesign(m["id"], proj["id"], layout, color)
-        if key is None:
+        try:
+            res = business.request_redesign(m["id"], proj["id"], layout, color)
+        except ValueError as e:
+            return f"FAILED: {e}."
+        if res is None:
             return "OK: that exact change is already queued."
-        return ("OK: queued the new look (rebuilt from the facts, free); NOT done yet. The current version is kept; "
-                "you'll hear when it's ready.")
+        return _queued(res, "the new look (rebuilt from the facts, free; the current version is kept)")
     if not instruction:
         return "NEEDS: what to change."
     if coder.backend() == "none":
         return "FAILED: no coding worker is set up (set ANTHROPIC_API_KEY, or CODER_BACKEND=claude_cli with Claude Code)."
-    key = business.request_edit(m["id"], proj["id"], instruction[:500])
-    if key is None:
+    try:
+        res = business.request_edit(m["id"], proj["id"], instruction[:500])
+    except ValueError as e:
+        return f"FAILED: {e}."
+    if res is None:
         return "OK: that same change is already queued."
-    return (f"OK: queued the change in the background ({coder.backend()}, a paid model call within the mission budget); "
-            "NOT done yet. It works on a copy; the site only changes if the result passes the checks.")
+    return _queued(res, f"the change ({coder.backend()}, a paid model call within the mission budget; it works on a "
+                        "copy and the site only changes if the result passes the checks)")
 
 
 def _approvals(args):
@@ -387,6 +429,7 @@ tool("start_business_mission",
      verification="internal", verified_by="the mission and its plan are read back from the database")
 tool("mission_status", "How the background mission is going (from its stored state): found / checked / qualifying "
      "businesses, demos, drafts, spend, problems.", params(MID), _status, group="missions", changes_state=False,
+     private=True,
      examples=["how's the mission going", "how far along is the research"])
 tool("pause_mission", "Pause the running background mission (resumable). Not for music or timers.",
      params(MID), _pause, group="missions", intent=MISSION_INTENT,
@@ -399,9 +442,11 @@ tool("raise_mission_budget", "Allow the background mission to spend more (and re
      params({**MID, "extra_usd": {"type": "number", "description": "how many more dollars"}}, ["extra_usd"]),
      _raise_budget, group="missions", risk=Risk.SENSITIVE, intent=MONEY_INTENT, describe=_describe_budget,
      confirm_keys=["extra_usd"], verification="internal", verified_by="the new budget is read back from the database")
-tool("stop_mission", "Stop the background mission for good (what it found and built is kept). Not for music or timers.",
-     params({**MID, "confidence": CONFIDENCE}), _stop, group="missions", risk=Risk.CONFIRM, min_confidence=0.7,
-     intent=MISSION_INTENT, verification="internal", verified_by="the mission and its pending steps are marked cancelled")
+tool("stop_mission", "Cancel the background mission FOR GOOD (it can't be resumed; what it found and built is kept). "
+     "Only when they say to stop / cancel the MISSION; for 'stop researching', 'stop', or anything unclear use "
+     "pause_mission (resumable). Not for music, timers or web research.",
+     params(MID), _stop, group="missions", risk=Risk.SENSITIVE, intent=STOP_INTENT, describe=_describe_stop,
+     verification="internal", verified_by="the mission and its pending steps are marked cancelled")
 tool("build_mission_demos", "Build demo sites (and outreach drafts) for the best businesses a mission found, or for "
      "named ones.", params({**MID, "count": {"type": "integer", "description": "how many (default 3)"},
                             "businesses": {"type": "array", "items": {"type": "string"}, "description": "names, if they said"}}),
@@ -442,7 +487,7 @@ def _context(user_text):
         m = _engine().latest()
     except Exception:
         return []
-    if not m or m["state"] not in ("running", "paused", "paused_budget", "interrupted"):
+    if not m or m["state"] not in ("running", "paused", "paused_budget", "paused_daily", "interrupted"):
         return []
     return [f"- background mission {m['id']} '{_clean(m['title'], 80)}' is {m['state']} (mission_status for details)"]
 

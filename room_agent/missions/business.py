@@ -117,26 +117,40 @@ def _research_steps(leads):
 
 
 def step_discover(ctx, step):
+    """Each batch (OpenStreetMap, then every paid Google page) is stored the moment it arrives and the progress is
+    checkpointed, so a run cut off by a budget pause / restart resumes without buying the same pages again."""
     p = ctx.params
+    cp_key = f"discover:{ctx.id}"
+    cp = ctx.store.cache_get(cp_key, 10 ** 9) or {}
     known = ctx.store.leads(mission_id=ctx.id, limit=1000)
-    if known:  # (a resumed / retried discovery: the businesses are already stored; don't search (or pay) again)
+    if known and (cp.get("done") or not cp):  # (finished before, or stored by an older version: reuse, don't pay)
         return StepResult(True, {"found": len(known), "reused": True},
                           evidence=f"{len(known)} businesses already found by this mission (not searched again)",
                           add=_research_steps(known))
     pool = min(max(p["count"] * 3, 30), 150)
-    center, profiles, notes = discovery.discover(p["category"], p["location"], p["radius_km"], pool, p["use_places"],
-                                                 cancel=ctx.stop_requested)
-    profiles = _dedupe(profiles)[:pool]
-    if not profiles:
-        return StepResult(False, error="no businesses of that kind were found there (" + "; ".join(notes) + ")")
-    new = 0
-    for prof in profiles:
-        _, created = ctx.store.upsert_lead(prof, ctx.id)
-        new += created
+    counts = {"new": 0}
+
+    def store_batch(profiles, progress):
+        # (a batch that arrived was already paid for: it's recorded with the plain store even if a pause lands right
+        # now, so the checkpoint never lags behind what was bought and nothing is bought twice)
+        raw = store()
+        for prof in _dedupe(profiles):
+            _, created = raw.upsert_lead(prof, ctx.id)
+            counts["new"] += created
+        cp.update(progress)
+        raw.cache_put(cp_key, cp)
+        ctx.check()
+
+    center, _, notes = discovery.discover(p["category"], p["location"], p["radius_km"], pool, p["use_places"],
+                                          cancel=ctx.stop_requested, on_batch=store_batch, resume=cp)
+    cp["done"] = True
+    ctx.store.cache_put(cp_key, cp)
     for n in notes:
         ctx.log(n)
     leads = ctx.store.leads(mission_id=ctx.id, limit=1000)
-    return StepResult(True, {"found": len(leads), "new": new, "center": center, "notes": notes},
+    if not leads:
+        return StepResult(False, error="no businesses of that kind were found there (" + "; ".join(notes) + ")")
+    return StepResult(True, {"found": len(leads), "new": counts["new"], "center": center, "notes": notes},
                       evidence=f"{len(leads)} businesses from: " + "; ".join(notes), add=_research_steps(leads))
 
 
@@ -230,9 +244,15 @@ def step_research(ctx, step):
         if search and search["status"] == "found" and (not lead.get("website") or
                                                        websites.kind_of(lead.get("website", "")) != "site"):
             fields["website"] = search["website"]
+            extra["verified_by"] = {**(extra.get("verified_by") or {}),
+                                    "website": "web search; the site shows their phone / address"}
     emails = analysis.get("emails") or []
+    if google_only and "website" not in (extra.get("verified_by") or {}):
+        emails = []  # (a site Google pointed to that nothing confirms is theirs: its email isn't kept either)
     if emails and not lead.get("email"):
         fields["email"] = emails[0]  # (from the business's own site: not Google content)
+        extra["verified_by"] = {**(extra.get("verified_by") or {}),
+                                "email": analysis.get("contact_page") or analysis.get("final_url") or "their website"}
     if search:
         extra["web_search"] = {k: search.get(k) for k in ("query", "social", "directories", "possible") if search.get(k)}
     fields["extra"] = extra
@@ -357,7 +377,9 @@ def step_demo(ctx, step):
         s.update_lead(lead["id"], status="demo built")
     from room_agent.missions import preview
 
-    return StepResult(True, {"project_id": proj["id"], "folder": str(folder), "preview": preview.url_for(folder)},
+    url = preview.url_for(folder)  # ("" if MISSIONS_DIR changed since: the site is still built and checked)
+    return StepResult(True, {"project_id": proj["id"], "folder": str(folder), "preview": url,
+                             "open": url or str(folder / "index.html")},
                       evidence=f"{folder / 'index.html'} built in staging, checked (name, 'not official' banner, noindex, "
                                "no reviews / prices / external resources, contrast) and swapped in")
 
@@ -376,9 +398,10 @@ def step_redesign(ctx, step):
     if problems:
         return StepResult(False, error="the new design failed its checks (nothing was changed): " + "; ".join(problems),
                           final=True)
-    s.project_history(proj["id"], {"what": f"redesign {overrides}", "by": "template"})
+    store().project_history(proj["id"], {"what": f"redesign {overrides}", "by": "template"})
     engine._announce(f"{lead['name']}'s demo has the new look.", ctx.id)
-    return StepResult(True, {"folder": str(folder), **overrides}, evidence=f"rebuilt with {overrides}, checked, swapped in")
+    return StepResult(True, {"folder": str(folder), **overrides}, evidence=f"rebuilt with {overrides}, checked, swapped in",
+                      committed=True)
 
 
 def step_outreach(ctx, step):
@@ -410,15 +433,20 @@ def step_edit(ctx, step):
     if proj is None:
         return StepResult(False, error="that demo site isn't part of this mission", final=True)
     lead = s.lead(proj["lead_id"])
-    r = coder.edit(proj["path"], lead, step["args"]["instruction"])
-    s.project_history(proj["id"], {"what": step["args"]["instruction"][:200], "by": r.get("backend"), "ok": r["ok"],
-                                   "changed": r.get("changed"), "problems": r.get("problems")})
+    r = coder.edit(proj["path"], lead, step["args"]["instruction"], workspace=ctx.workspace)
+    entry = {"what": step["args"]["instruction"][:200], "by": r.get("backend"), "ok": r["ok"],
+             "changed": r.get("changed"), "problems": r.get("problems")}
     if not r["ok"]:
+        s.project_history(proj["id"], entry)
         why = "; ".join(r.get("problems") or ["the edit didn't work"])
         engine._announce(f"The change to {lead['name']}'s demo wasn't applied: {why[:200]}", ctx.id)
         return StepResult(False, error=why + " (the site is unchanged)", final=True)
+    # The new version is live (swapped in). From here on nothing may turn that into a "failure": the bookkeeping uses
+    # the plain store (a pause right now must not block recording what already happened) and the result is committed.
+    store().project_history(proj["id"], entry)
     engine._announce(f"The change to {lead['name']}'s demo is done. {r.get('summary') or ''}"[:300], ctx.id)
-    return StepResult(True, r, evidence=f"changed {', '.join(r['changed'])} in a sandbox copy; checked; swapped in")
+    return StepResult(True, r, evidence=f"changed {', '.join(r['changed'])} in a sandbox copy; checked; swapped in",
+                      committed=True)
 
 
 # ---------------------------------------------------------------- reporting / recovery
@@ -430,12 +458,13 @@ def progress(ctx):
     return {"leads_found": len(leads), "leads_researched": sum(1 for x in leads if x.get("researched")),
             "leads_qualifying": sum(_matches_filter(x, flt) for x in leads if x.get("researched")),
             "target": ctx.params["count"], "demos": len(projects), "drafts": len(drafts),
-            "top": [{"id": x["id"], "name": display_name(x), "score": x.get("score"), "status": x["website_status"]}
+            "top": [{"id": x["id"], "name": x["name"], "score": x.get("score"), "status": x["website_status"]}
                     for x in leads if x.get("researched") and _matches_filter(x, flt)][:5]}
 
 
 def status_line(ctx, p):
-    state = {"running": "working", "paused": "paused", "paused_budget": "paused (budget used up)",
+    state = {"running": "working", "paused": "paused", "paused_budget": "paused (the mission's budget is used up)",
+             "paused_daily": "paused (today's overall model budget is used up; the mission's own budget isn't)",
              "interrupted": "paused (Jarvis restarted)", "completed": "finished", "cancelled": "stopped",
              "finished_with_problems": "finished, with some problems"}.get(p["state"], p["state"])
     parts = [f"The mission '{p['title']}' is {state}."]
@@ -517,8 +546,11 @@ def build_demos(mid, n=3, lead_ids=None):
                       key=lambda x: (-(x.get("score") or 0), -(x.get("confidence") or 0)))
     pick = [x for x in pick if x["id"] not in have and x["id"] not in queued and not sitegen.demo_blockers(x)]
     pick = pick[: max(1, min(int(n), 10))]
-    engine.add_steps(mid, _demo_specs(pick, p.get("outreach", True)))
-    return pick
+    if m["state"] == "cancelled":
+        raise engine.MissionClosed("that mission was stopped for good; start a new one")
+    if not pick:
+        return pick, {"added": 0, "state": m["state"], "running": m["state"] == "running", "why_not": ""}
+    return pick, engine.add_steps(mid, _demo_specs(pick, p.get("outreach", True)))
 
 
 def _same_pending(mid, kind, project_id, sig):
@@ -527,15 +559,15 @@ def _same_pending(mid, kind, project_id, sig):
 
 
 def request_edit(mid, project_id, instruction):
-    """Queue a coding-worker edit. The same request already waiting / running isn't queued again. -> key or None"""
+    """Queue a coding-worker edit. The same request already waiting / running isn't queued again.
+    -> engine.add_steps' result, or None if it was already queued. Raises engine.MissionClosed for a stopped mission."""
     sig = hashlib.sha1(re.sub(r"\s+", " ", instruction.lower()).strip().encode()).hexdigest()[:10]
     if _same_pending(mid, "edit", project_id, sig):
         return None
     key = f"edit:{project_id}:{sig}:{int(time.time())}"
-    engine.add_steps(mid, [StepSpec(key, "edit", f"Edit demo: {instruction[:60]}",
-                                    {"project_id": project_id, "instruction": instruction, "sig": sig}, [],
-                                    idempotent=False, max_attempts=1)])
-    return key
+    return engine.add_steps(mid, [StepSpec(key, "edit", f"Edit demo: {instruction[:60]}",
+                                           {"project_id": project_id, "instruction": instruction, "sig": sig}, [],
+                                           idempotent=False, max_attempts=1)])
 
 
 def request_redesign(mid, project_id, layout=None, color=None):
@@ -543,7 +575,6 @@ def request_redesign(mid, project_id, layout=None, color=None):
     if _same_pending(mid, "redesign", project_id, sig):
         return None
     key = f"redesign:{project_id}:{int(time.time())}"
-    engine.add_steps(mid, [StepSpec(key, "redesign", f"New look for demo ({layout or ''} {color or ''})".strip(),
-                                    {"project_id": project_id, "layout": layout, "color": color, "sig": sig}, [],
-                                    max_attempts=2)])
-    return key
+    return engine.add_steps(mid, [StepSpec(key, "redesign", f"New look for demo ({layout or ''} {color or ''})".strip(),
+                                           {"project_id": project_id, "layout": layout, "color": color, "sig": sig}, [],
+                                           max_attempts=2)])

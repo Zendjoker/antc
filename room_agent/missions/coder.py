@@ -26,6 +26,7 @@ import json
 import logging
 import re
 import shutil
+import sys
 from pathlib import Path
 
 from room_agent import config
@@ -106,6 +107,17 @@ def _run_model(sb, instruction):
     return str(data.get("summary") or "")[:300]
 
 
+# CLI messages that mean it stopped before talking to the API (setup problems). Anything not matching these, with no
+# reported cost, is counted at the full reservation: an early exit isn't assumed to be free.
+STARTUP_FAILURES = ("requires git-bash", "git bash", "claude_code_git_bash_path", "unknown option", "unknown argument",
+                    "invalid value for", "error: option", "command not found", "is not recognized as")
+
+
+def _startup_failure(text):
+    t = (text or "").lower()
+    return any(m in t for m in STARTUP_FAILURES)
+
+
 def _run_cli(sb, instruction):
     if not config.ANTHROPIC_KEY:
         raise CoderUnavailable("the sandboxed Claude Code worker needs ANTHROPIC_API_KEY (it can't use your Claude login "
@@ -113,6 +125,18 @@ def _run_cli(sb, instruction):
     exe = shutil.which(config.CODER_CLI)
     if not exe:
         raise CoderUnavailable(f"'{config.CODER_CLI}' isn't installed (CODER_CLI)")
+    if sys.platform == "win32" and not sandbox.git_bash():
+        raise CoderUnavailable("Claude Code on Windows needs Git for Windows (bash.exe); install it or set "
+                               "CLAUDE_CODE_GIT_BASH_PATH")
+    env = sandbox.env(sb, config.ANTHROPIC_KEY)
+    # Free preflight, before any budget is reserved: does the CLI start at all in this sandbox? ('--version' makes no
+    # API request.) A failure here costs nothing and is reported as a setup problem, not a paid failure.
+    try:
+        code, out, err = sandbox.run([exe, "--version"], sb, env, 60)
+    except (sandbox.SandboxError, TimeoutError, OSError) as e:
+        raise CoderUnavailable(f"Claude Code can't start in the sandbox ({e})")
+    if code != 0:
+        raise CoderUnavailable(f"Claude Code can't start in the sandbox (exit {code}: {(err or out).strip()[:200]})")
     mcp = Path(sb) / "mcp.json"
     mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
     cmd = [exe, "-p", f"{instruction}\n\n{RULES}\nWork only on the files in the current folder.",
@@ -122,7 +146,7 @@ def _run_cli(sb, instruction):
         cmd += ["--model", config.CODER_MODEL]
     est = config.CODER_MAX_USD
     with meter.paid(est, "Claude Code edit", provider="claude_code", model=config.CODER_MODEL or "default") as charge:
-        code, out, err = sandbox.run(cmd, sb, sandbox.env(sb, config.ANTHROPIC_KEY), config.CODER_TIMEOUT_S)
+        code, out, err = sandbox.run(cmd, sb, env, config.CODER_TIMEOUT_S)
         try:
             data = json.loads(out)
         except ValueError:
@@ -131,19 +155,25 @@ def _run_cli(sb, instruction):
         usage = data.get("usage") or {}
         if isinstance(cost, (int, float)):
             charge.actual(float(cost), int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
-        # (no cost in the output: settled at the full reservation, as uncertain)
+        elif code != 0 and _startup_failure(err or out):
+            # evidence that no request was made: the CLI itself says it couldn't start / was misconfigured
+            charge.not_billed()
+        # (anything else without a reported cost: settled at the full reservation, as uncertain)
     if code != 0:
         raise RuntimeError(f"Claude Code exited with {code}: {(err or out or '').strip()[:300]}")
     return str(data.get("result") or "")[:600]
 
 
-def edit(folder, lead, instruction, cancel=None):
-    """Apply one change to a demo site. -> dict(ok, summary, changed, problems, backend, version)"""
+def edit(folder, lead, instruction, workspace=None):
+    """Apply one change to a demo site. -> dict(ok, summary, changed, problems, backend, version)
+    workspace: the mission's own folder (it may be outside today's MISSIONS_DIR if that setting changed)."""
     folder = Path(folder).resolve()
-    root = Path(config.MISSIONS_DIR).resolve()
-    if root not in folder.parents or folder.parent.name != "sites" or not (folder / "index.html").exists():
-        return {"ok": False, "problems": ["that isn't a demo-site folder inside the missions folder"]}
-    workspace = folder.parent.parent
+    ws = Path(workspace).resolve() if workspace else folder.parent.parent
+    allowed = (ws / "sites").resolve()
+    if folder.parent != allowed or not (folder / "index.html").exists() or (
+            workspace is None and Path(config.MISSIONS_DIR).resolve() not in folder.parents):
+        return {"ok": False, "problems": ["that isn't a demo-site folder of this mission"]}
+    workspace = ws
     b = backend()
     if b not in ("anthropic", "claude_cli"):
         return {"ok": False, "backend": b, "problems": ["no coding worker is set up (set ANTHROPIC_API_KEY, or "
@@ -177,7 +207,8 @@ def edit(folder, lead, instruction, cancel=None):
         if not changed:
             return {"ok": False, "backend": b, "problems": ["nothing in the site changed"], "summary": summary}
         staged = sitegen.stage(workspace, folder.name, after)
-        problems = sitegen.check(staged, lead)
+        trusted_owner, _, _ = sitegen.load_owner(workspace, folder.name)  # (never the worker-editable site.json)
+        problems = sitegen.check(staged, lead, trusted_owner)
         if problems:
             sitegen.discard(staged)
             return {"ok": False, "backend": b, "problems": problems, "changed": changed}

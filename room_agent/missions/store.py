@@ -448,34 +448,56 @@ class Store:
         """Reserve budget for a paid call, atomically. -> charge id, or None if it would pass the budget."""
         est = max(0.0, float(estimate_usd))
         with self._lock:
-            cur = self.db.execute("UPDATE missions SET reserved_usd=reserved_usd+?, updated=? WHERE id=? AND "
-                                  "spent_usd+reserved_usd+? <= budget_usd + 1e-9", (est, time.time(), mid, est))
-            if cur.rowcount != 1:
-                self.db.rollback()
-                return None
-            cid = self.db.execute("INSERT INTO charges(mission_id, step_key, what, provider, model, estimate_usd, state, "
-                                  "created) VALUES(?,?,?,?,?,?,?,?)", (mid, step_key, what[:200], provider, model, est,
-                                                                       "reserved", time.time())).lastrowid
-            self.db.commit()
-            return cid
+            if self.db.in_transaction:  # (nothing else may be pending on this connection: commit it separately)
+                self.db.commit()
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                cur = self.db.execute("UPDATE missions SET reserved_usd=reserved_usd+?, updated=? WHERE id=? AND "
+                                      "spent_usd+reserved_usd+? <= budget_usd + 1e-9", (est, time.time(), mid, est))
+                if cur.rowcount != 1:
+                    self.db.rollback()
+                    return None
+                cid = self.db.execute("INSERT INTO charges(mission_id, step_key, what, provider, model, estimate_usd, "
+                                      "state, created) VALUES(?,?,?,?,?,?,?,?)",
+                                      (mid, step_key, what[:200], provider, model, est, "reserved", time.time())).lastrowid
+                self.db.commit()
+                return cid
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.rollback()  # (the reserved amount and its ledger row exist together or not at all)
+                raise
 
     def settle(self, cid, actual_usd, tokens_in=0, tokens_out=0, state="settled", note=""):
         """Close a reservation: release the estimate, add what it really cost. state: settled / uncertain / released.
         -> the charge row (None if it was already closed: settling twice can't double-count)."""
         with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
             row = self.db.execute("SELECT * FROM charges WHERE id=? AND state='reserved'", (cid,)).fetchone()
             if row is None:
                 return None
-            actual = 0.0 if state == "released" else max(0.0, float(actual_usd))
-            self.db.execute("UPDATE charges SET state=?, actual_usd=?, tokens_in=?, tokens_out=?, note=?, settled=? "
-                            "WHERE id=?", (state, actual, int(tokens_in), int(tokens_out), note[:300], time.time(), cid))
-            self.db.execute("UPDATE missions SET reserved_usd=MAX(0, reserved_usd-?), spent_usd=spent_usd+?, "
-                            "uncertain_usd=uncertain_usd+?, tokens_in=tokens_in+?, tokens_out=tokens_out+?, "
-                            "requests=requests+?, updated=? WHERE id=?",
-                            (row["estimate_usd"], actual, actual if state == "uncertain" else 0.0, int(tokens_in),
-                             int(tokens_out), 0 if state == "released" else 1, time.time(), row["mission_id"]))
-            self.db.commit()
-            return dict(row)
+            try:
+                return self._settle_locked(row, actual_usd, tokens_in, tokens_out, state, note)
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                raise
+
+    def _settle_locked(self, row, actual_usd, tokens_in, tokens_out, state, note):
+        """(caller holds the lock) Both updates in one transaction: the ledger and the mission totals agree."""
+        cid = row["id"]
+        actual = 0.0 if state == "released" else max(0.0, float(actual_usd))
+        self.db.execute("BEGIN IMMEDIATE")
+        self.db.execute("UPDATE charges SET state=?, actual_usd=?, tokens_in=?, tokens_out=?, note=?, settled=? "
+                        "WHERE id=? AND state='reserved'", (state, actual, int(tokens_in), int(tokens_out), note[:300],
+                                                            time.time(), cid))
+        self.db.execute("UPDATE missions SET reserved_usd=MAX(0, reserved_usd-?), spent_usd=spent_usd+?, "
+                        "uncertain_usd=uncertain_usd+?, tokens_in=tokens_in+?, tokens_out=tokens_out+?, "
+                        "requests=requests+?, updated=? WHERE id=?",
+                        (row["estimate_usd"], actual, actual if state == "uncertain" else 0.0, int(tokens_in),
+                         int(tokens_out), 0 if state == "released" else 1, time.time(), row["mission_id"]))
+        self.db.commit()
+        return dict(row)
 
     def open_charges(self, mid=None):
         if mid:
@@ -498,7 +520,14 @@ class Store:
                 places = extra.get("places") or {}
                 fields = {}
                 if google_only:
-                    for f in ("address", "phone", "website", "email", "category"):
+                    if row.get("category") and "category" not in verified and \
+                            norm_text(row["category"]) in self._mission_categories(row["id"]):
+                        verified = {**verified, "category": "mission search terms"}  # (our own words, not Google's)
+                        extra["verified_by"] = verified
+                        fields["extra"] = extra
+                    # (email is never Places content: the field masks don't request it; it only ever comes from the
+                    # business's own site)
+                    for f in ("address", "phone", "website", "category"):
                         if row.get(f) and f not in verified:
                             fields[f] = ""
                     if "name" not in verified and not str(row["name"]).startswith("Google place "):
@@ -506,7 +535,9 @@ class Store:
                     if row.get("lat") is not None and "lat" not in verified:
                         fields["lat"] = None
                         fields["lon"] = None
-                    fields["sources"] = [u for u in (row.get("sources") or []) if "google." not in u]
+                    kept = [u for u in (row.get("sources") or []) if "google." not in u]
+                    if kept != (row.get("sources") or []):
+                        fields["sources"] = kept
                 if set(places) - {"id"}:
                     extra["places"] = {"id": places.get("id", "")}
                     fields["extra"] = extra
@@ -520,6 +551,15 @@ class Store:
                                (row["id"],))
             self._exec("DELETE FROM cache WHERE key LIKE 'places:%'")
         return n
+
+    def _mission_categories(self, lead_id):
+        out = set()
+        for r in self._rows("SELECT m.params FROM missions m JOIN lead_missions l ON l.mission_id=m.id WHERE l.lead_id=?",
+                            (lead_id,)):
+            params = r["params"] if isinstance(r["params"], dict) else {}
+            if params.get("category"):
+                out.add(norm_text(params["category"]))
+        return out
 
     # ---------------------------------------------------------------- cache
     def cache_get(self, key, max_age_s):

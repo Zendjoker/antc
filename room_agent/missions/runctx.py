@@ -23,6 +23,11 @@ class Cancelled(Exception):
     """The work this thread is doing was stopped (timeout, pause, stop, emergency stop)."""
 
 
+class CancelledBeforeSend(Cancelled):
+    """Stopped BEFORE a request was sent (waiting for its turn, or at the last check before sending): nothing reached
+    the provider, so a budget reservation for it is released (meter.paid), not counted."""
+
+
 class Token:
     def __init__(self, mission_id="", step_key="", deadline=None, should_stop=None):
         self.mission_id, self.step_key = mission_id, step_key
@@ -59,6 +64,10 @@ class Token:
         if self.cancelled:
             raise Cancelled(self.reason or "stopped")
 
+    def check_before_send(self):
+        if self.cancelled:
+            raise CancelledBeforeSend(self.reason or "stopped")
+
     def wait(self, seconds):
         """Sleep that ends early (raising Cancelled) when the token is cancelled."""
         end = time.time() + seconds
@@ -81,6 +90,13 @@ def check():
     t = current()
     if t is not None:
         t.check()
+
+
+def check_before_send():
+    """The checkpoint right before a (possibly paid) request goes out: raises CancelledBeforeSend."""
+    t = current()
+    if t is not None:
+        t.check_before_send()
 
 
 def cancelled():

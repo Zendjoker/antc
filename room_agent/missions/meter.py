@@ -5,8 +5,13 @@
         charge.actual(usd, tokens_in, tokens_out)   # what the provider's usage numbers say it cost
 
     - reserve: ATOMIC in SQLite (one UPDATE ... WHERE spent + reserved + estimate <= budget): two steps, or an
-      abandoned step and a new one, can't both squeeze under the budget. Refused -> BudgetExceeded (the engine pauses
-      the mission, "paused: budget"). The PC's daily model budget (DAILY_BUDGET_USD) is checked too.
+      abandoned step and a new one, can't both squeeze under the budget. The UPDATE and its ledger row are one
+      transaction (rolled back together). Refused -> BudgetExceeded (the engine pauses the mission: "paused_budget").
+      The PC's daily model budget (DAILY_BUDGET_USD) is checked too: DailyBudgetExceeded ("paused_daily"; raising the
+      mission budget doesn't help).
+    - "never sent" vs "uncertain": a stop before sending (runctx.CancelledBeforeSend), a request refused before it went
+      out, or a connection that never opened (NotSent) releases the reservation. Anything that may have reached the
+      provider is counted (see below).
     - settle: the reservation is replaced by the actual cost. If the call failed in a way where the provider may
       still have charged (timeout, dropped connection, server error, no usage numbers), the FULL estimate is recorded
       as an "uncertain" charge: the budget never assumes a free call that might not have been free.
@@ -32,6 +37,11 @@ class BudgetExceeded(Exception):
     def __init__(self, spent, budget, estimate, what):
         super().__init__(f"{what} would cost up to ${estimate:.4f}; spent / reserved ${spent:.4f} of ${budget:.2f}")
         self.spent, self.budget, self.estimate, self.what = spent, budget, estimate, what
+
+
+class DailyBudgetExceeded(BudgetExceeded):
+    """Jarvis's whole-PC daily model budget (DAILY_BUDGET_USD) is the limit, not the mission's own budget: raising the
+    mission budget can't help; it resets the next day."""
 
 
 class NotSent(Exception):
@@ -65,7 +75,14 @@ def _daily_check(estimate, what):
     from room_agent.llm.budget import budget
 
     if budget.limit > 0 and budget.total() + estimate > budget.limit:
-        raise BudgetExceeded(budget.total(), budget.limit, estimate, f"{what} (today's model budget, DAILY_BUDGET_USD)")
+        raise DailyBudgetExceeded(budget.total(), budget.limit, estimate, f"{what} (today's model budget, DAILY_BUDGET_USD)")
+
+
+def daily_exhausted(estimate=0.0):
+    """True if today's model budget can't take another call of this size (for resume decisions)."""
+    from room_agent.llm.budget import budget
+
+    return budget.limit > 0 and budget.total() + float(estimate) > budget.limit
 
 
 @contextmanager
@@ -91,8 +108,8 @@ def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True)
     c = _Charge(cid, est)
     try:
         yield c
-    except NotSent as e:
-        s.settle(cid, 0, state="released", note=f"not sent: {e}"[:300])
+    except (NotSent, runctx.CancelledBeforeSend) as e:  # (provably never reached the provider: nothing to count)
+        s.settle(cid, 0, state="released", note=f"not sent: {e.__class__.__name__}: {e}"[:300])
         raise
     except BaseException as e:
         if c._actual is not None and c._actual[0] == "released":

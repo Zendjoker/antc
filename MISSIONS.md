@@ -19,6 +19,11 @@ reviewed statically. No test, live request, model call, Places call, coding-work
 - Limit: Python can't kill a thread. A run blocked inside one HTTP request finishes that request (at most its timeout:
   20–90 s), then stops at the next checkpoint. The dashboard shows these as "stopped step still finishing a request".
 - Limit: there's a tiny window between a token check and the write it guards.
+- A step whose change is already in place (a demo site swapped in) is "committed": a pause arriving while it finishes
+  its bookkeeping doesn't turn it into a failure.
+- Adding work (demos, edits, redesigns) **never resumes** a paused, interrupted or budget-paused mission. The reply
+  says "queued, not running" and why. A stopped (cancelled) mission takes no new work at all. Only a finished mission
+  starts a new run for added work.
 
 ## 2. Coding worker
 - Default: `CODER_BACKEND=auto`, which means `anthropic`. One model call, no tools, no code execution.
@@ -38,20 +43,29 @@ reviewed statically. No test, live request, model call, Places call, coding-work
     not filesystem permissions. An AppContainer or low-integrity token isn't implemented.
 - Tripwire: Jarvis's own source files are fingerprinted before and after each edit. A change blocks the edit and is
   logged.
+- Before any budget is reserved, `claude --version` runs in the sandbox (free, no API request). Git for Windows'
+  `bash.exe` must be found (`CLAUDE_CODE_GIT_BASH_PATH`, or found next to `git`). Setup failures cost nothing.
+- After a run, a reservation is released only on evidence that no request was made: the CLI's own startup / option
+  error. Any other failure without a reported cost is counted at `CODER_MAX_USD`.
+- Owner content that permits prices / menus / claims is read only from `owner-content/` (which only you write), never
+  from the `site.json` the worker can edit.
 
 ## 3. Budget
 - Every paid call is **reserved** atomically before it's made (spent + reserved + estimate ≤ budget, in one SQL
   UPDATE), then **settled** afterwards.
   - A failure where the provider may still have charged (timeout, dropped connection, server error, no usage reported)
     is counted at the **full estimate** ("uncertain").
-  - A reservation is released only if the request was never sent, or was rejected with a 4xx.
+  - A reservation is released only if the request provably never reached the provider (stopped before sending,
+    refused before sending, the connection never opened), or was rejected with a 4xx.
   - Reservations open at a crash are counted at full estimate at the next start.
 - Estimates are upper bounds:
   - input at about 3 characters per token, plus 200 tokens of overhead
   - output at its full cap (×3 for GPT-5 thinking)
   - unknown models at the expensive default price
 - Mission model calls use `max_retries=0`, so an SDK can't silently pay twice.
-- The day's model budget (`DAILY_BUDGET_USD`) is checked too.
+- The day's model budget (`DAILY_BUDGET_USD`) is checked too. Hitting it pauses the mission as `paused_daily` (not
+  "mission budget used up"). Raising the mission budget doesn't help; it can resume once the daily budget resets.
+- A budget increase that the maximum (`MISSION_MAX_BUDGET_USD`) caps or blocks is reported as such.
 - Ledger: the `charges` table, shown on the dashboard.
 - Not verified:
   - Google Places prices (`PLACES_COST_PER_REQUEST`, `PLACES_DETAILS_COST_PER_REQUEST` are your estimates)
@@ -62,7 +76,9 @@ reviewed statically. No test, live request, model call, Places call, coding-work
 - Missions come back **interrupted**. Resume by voice or from the dashboard.
 - A running step that's safe to repeat goes back to pending. Any other running step is marked failed and is never
   repeated automatically.
-- Re-running discovery reuses the businesses already found, so there's no second paid search.
+- Discovery stores each batch as it arrives: OpenStreetMap first, then each paid Places page. Progress is
+  checkpointed, so a re-run never buys the same pages again. A Places search cut off mid-way continues only from a
+  still-fresh in-memory page token; otherwise it stops with a note.
 - Leads are deduplicated by key, then place id, then phone, then name + address, under one lock.
 - Research rows are keyed per mission + lead, so a retry replaces its row.
 - A draft is updated in place. Each draft gets at most one approval, ever.
@@ -74,6 +90,10 @@ reviewed statically. No test, live request, model call, Places call, coding-work
 
 ## 5. Voice routing
 - Every state-changing mission tool is intent-gated: your own words must mention the mission, demo, site or approval.
+- Stopping a mission for good needs the word "mission" and a yes (SENSITIVE). "Stop researching" or "stop" never
+  cancels one; pausing is the reversible option.
+- Voice results never contain Google-only business details (they could end up in conversation memory). They use the
+  stored names; the dashboard shows the Google details live with "Google Maps" attribution.
   - So "pause" / "stop" / "resume" (music, timers) and "find restaurants near me" don't reach mission tools.
   - Text inside emails or web pages can't trigger them either.
 - More budget needs `raise_mission_budget`, which always asks. A budget you didn't say is ignored when a mission starts.
@@ -92,7 +112,8 @@ reviewed statically. No test, live request, model call, Places call, coding-work
   prices) and photos (only with `"rights_confirmed": true`). It's the only source of prices or photos.
 - Every version is checked:
   - banner, noindex, viewport
-  - no reviews / ratings / prices except the owner's
+  - no reviews / ratings / prices except the owner's (sourced facts, e.g. a name like "Top Rated Plumbing" or an
+    address with "#1", are facts and are exempt; the exemption comes from the database, never from `site.json`)
   - no scripts or external resources
   - no missing files, flat folder
   - contrast
@@ -116,6 +137,16 @@ reviewed statically. No test, live request, model call, Places call, coding-work
   - EEA-specific terms (if your Google billing address is in the EEA)
   - refreshing place ids older than 12 months
   - the Google Maps logo (the text attribution is used)
+
+## Network
+- Every mission request (pages, robots.txt, APIs) goes through one function. It requires a public address, follows
+  redirects by hand checking each hop first, drops API keys on a redirect to another host, and caps the size
+  (robots.txt: 512 KB). POSTs don't follow redirects.
+- Residual: the name is resolved for the check and again when connecting (DNS rebinding isn't prevented).
+- Not covered here: `computer/pages.py` (Jarvis's general web-research fetcher, not used by missions) still lets
+  `requests` follow redirects before checking the final address.
+- Scraped emails are kept only if each one is exactly one valid address. Before a Gmail draft is claimed, the
+  recipient is validated again and the message is built locally. A local failure leaves nothing claimed or sent.
 
 ## Unverified, all of it
 Nothing has run, including:

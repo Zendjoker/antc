@@ -37,6 +37,7 @@ SEARCH_FIELDS = ("places.id,places.displayName,places.formattedAddress,places.lo
 DETAILS_FIELDS = ("id,displayName,formattedAddress,location,nationalPhoneNumber,internationalPhoneNumber,websiteUri,"
                   "primaryTypeDisplayName,businessStatus")
 _mem = {}
+_next_tokens = {}  # query -> (nextPageToken, when): memory only
 _lock = threading.Lock()
 
 
@@ -98,8 +99,7 @@ def _send(method, url, body, field_mask, cost, what):
             r = net.post(url, json_body=body, headers=headers, timeout=30)
         else:
             r = net.get(url, headers=headers, timeout=30, respect_robots=False)
-            r.sent = True if r.status else (False if r.error.startswith("not fetched") else None)
-        if r.sent is False:
+        if r.sent is False:  # (refused before sending / the connection never opened: provably not billed)
             raise meter.NotSent(r.error or "not sent")
         if r.status and 400 <= r.status < 500:
             charge.not_billed()  # (rejected: invalid request / key / quota; Google doesn't bill these)
@@ -114,25 +114,45 @@ def _send(method, url, body, field_mask, cost, what):
         raise PlacesError("Google Places answered something that isn't JSON")
 
 
-def text_search(query, limit=60, pages=3):
-    """-> [(place_id, content)] for a text query; content is kept in memory only."""
-    out, token, n = [], None, 0
+def text_search(query, limit=60, pages=3, start_token=None, on_page=None):
+    """-> [(place_id, content)] for a text query; content is kept in memory only.
+    on_page(page, pages_done, complete) is called after every paid page, so the caller can store what it may keep
+    (place ids, OSM matches) before the next page is bought. start_token continues a search that was cut off."""
+    out, token, n = [], start_token, 0
     while len(out) < limit and n < pages:
         body = {"textQuery": query, "pageSize": 20, "languageCode": "en"}
         if token:
             body["pageToken"] = token
         data = _request("POST", SEARCH_URL, body, SEARCH_FIELDS, config.PLACES_COST_PER_REQUEST, "Google Places search")
         n += 1
+        page = []
         for p in data.get("places", []):
             if not p.get("id"):
                 continue
             c = _content(p)
             remember(p["id"], c)
-            out.append((p["id"], c))
+            page.append((p["id"], c))
+        out += page
         token = data.get("nextPageToken")
+        with _lock:  # (in memory only: lets a search cut off by a budget pause continue without re-buying pages)
+            if token:
+                _next_tokens[query] = (token, time.time())
+            else:
+                _next_tokens.pop(query, None)
+        done = not token or n >= pages or len(out) >= limit
+        if on_page is not None:
+            on_page(page, n, done)
         if not token:
             break
     return out[:limit]
+
+
+def next_token(query, max_age_s=120):
+    """The page token to continue `query` from, if this process still has a fresh one (Google's tokens are
+    short-lived). -> str or None"""
+    with _lock:
+        t = _next_tokens.get(query)
+    return t[0] if t and time.time() - t[1] < max_age_s else None
 
 
 def content(place_id):

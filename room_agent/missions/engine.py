@@ -39,7 +39,15 @@ log = logging.getLogger("room-agent")
 DONE = ("completed", "skipped")
 DEAD = ("failed", "blocked", "cancelled")
 LIVE_MISSION = ("planned", "running")
-PAUSED = ("paused", "paused_budget", "interrupted")
+PAUSED = ("paused", "paused_budget", "paused_daily", "interrupted")
+RESTARTABLE = ("completed", "finished_with_problems")  # the only states new work may start a new run from
+WHY_NOT_RUNNING = {
+    "paused": "the mission is paused: say 'resume the mission' to run it",
+    "interrupted": "the mission was interrupted by a restart: say 'resume the mission' to run it",
+    "paused_budget": "the mission's budget is used up: raise it (and resume) to run it",
+    "paused_daily": "today's model budget (DAILY_BUDGET_USD) is used up: it can run after it resets",
+    "planned": "the mission hasn't started yet",
+}
 FINAL = ("completed", "cancelled", "finished_with_problems")
 STEP_TIMEOUT_S = 300
 BACKOFF_S = (5, 20, 60)
@@ -66,6 +74,8 @@ class StepResult:
     skip: list = field(default_factory=list)  # keys of pending steps that are no longer needed
     error: str = ""
     final: bool = False                     # a failure that retrying can't fix (don't retry)
+    committed: bool = False                 # its side effect is done (e.g. a site swapped in): record it even if the
+                                            # run was cancelled while finishing up
 
 
 @dataclass
@@ -158,18 +168,33 @@ def create(kind, params, budget_usd=None):
     return s.mission(mid)
 
 
-def add_steps(mid, specs, resume=True):
-    """Extend a mission's plan (e.g. 'build demos for the best three' after the research finished)."""
+class MissionClosed(ValueError):
+    """New work for a mission that was stopped for good."""
+
+
+def add_steps(mid, specs):
+    """Extend a mission's plan (e.g. 'build demos for the best three'). Never resumes a paused / interrupted / budget-
+    paused mission: the steps wait until it's resumed explicitly. A finished mission starts a new run for them.
+    -> {"added": n, "state": the mission's state afterwards, "running": bool, "why_not": text when not running}
+    Raises MissionClosed for a cancelled (stopped) mission."""
     s = store()
-    added = sum(s.add_step(mid, x.key, x.kind, x.title, x.args, x.depends, x.idempotent, x.max_attempts) for x in specs)
     m = s.mission(mid)
-    if resume and added and m and m["state"] in ("completed", "finished_with_problems") + PAUSED:
-        if _headroom(m) > 0 or m["state"] != "paused_budget":
-            s.update_mission(mid, state="running")
-            s.event(mid, f"{added} step{'s' if added != 1 else ''} added; running again")
-    if added and m and s.mission(mid)["state"] == "running":
+    if m is None:
+        raise MissionClosed("there's no such mission")
+    if m["state"] == "cancelled":
+        raise MissionClosed("that mission was stopped for good; start a new one")
+    added = sum(s.add_step(mid, x.key, x.kind, x.title, x.args, x.depends, x.idempotent, x.max_attempts) for x in specs)
+    if added and m["state"] in RESTARTABLE:
+        s._exec("UPDATE missions SET state='running', updated=? WHERE id=? AND state IN ('completed', "
+                "'finished_with_problems')", (time.time(), mid))
+        s.event(mid, f"{added} step{'s' if added != 1 else ''} added; running again")
+    state = s.mission(mid)["state"]
+    if added and state == "running":
         start_runner()
-    return added
+    elif added:
+        s.event(mid, f"{added} step{'s' if added != 1 else ''} added; waiting ({state})")
+    return {"added": added, "state": state, "running": state == "running",
+            "why_not": "" if state == "running" else WHY_NOT_RUNNING.get(state, f"the mission is {state}")}
 
 
 def _cancel_active(mid, why):
@@ -194,27 +219,50 @@ def _headroom(m):
 
 
 def raise_budget(mid, extra_usd, via):
-    """More budget for a mission (only from an explicit request: a voice tool that always asks, or a dashboard click)."""
+    """More budget for a mission (only from an explicit request: a voice tool that always asks, or a dashboard click).
+    -> (old budget, new budget), or None for no such mission / a non-positive amount. new == old when the ceiling
+    (MISSION_MAX_BUDGET_USD) allowed no increase; new < old + extra when it was capped."""
     s = store()
     m = s.mission(mid)
     if m is None or extra_usd <= 0:
         return None
-    new = min(m["budget_usd"] + float(extra_usd), config.MISSION_MAX_BUDGET_USD)
+    old = m["budget_usd"]
+    new = min(old + float(extra_usd), config.MISSION_MAX_BUDGET_USD)
+    if new <= old + 1e-9:
+        return old, old
     s.update_mission(mid, budget_usd=new)
     s.event(mid, f"budget raised to ${new:.2f} ({via})")
     _audit("mission_budget_raised", mid, budget=new, via=via)
-    return new
+    return old, new
+
+
+def resume_blocker(mid):
+    """Why the mission can't be resumed right now ("" = it can)."""
+    m = store().mission(mid)
+    if m is None:
+        return "there's no such mission"
+    if m["state"] not in PAUSED:
+        return f"it isn't paused (it's {m['state'].replace('_', ' ')})"
+    if _headroom(m) <= 0 and (m["budget_usd"] > 0 or m["spent_usd"] > 0):
+        return (f"its budget is used up (${m['spent_usd']:.2f} spent + ${m.get('reserved_usd') or 0:.2f} in progress of "
+                f"${m['budget_usd']:.2f}); raise the mission budget first")
+    if m["state"] == "paused_daily" and meter.daily_exhausted():
+        return ("today's model budget (DAILY_BUDGET_USD) is still used up; raising the mission's budget won't help. "
+                "It resets tomorrow")
+    return ""
 
 
 def resume(mid):
     s = store()
-    m = s.mission(mid)
-    if m is None or m["state"] not in PAUSED:
+    why = resume_blocker(mid)
+    if why:
+        if s.mission(mid) is not None:
+            s.event(mid, f"not resumed: {why}", "warn")
         return False
-    if _headroom(m) <= 0:
-        s.event(mid, "not resumed: the budget is used up (raise it to continue)", "warn")
+    changed = s._exec("UPDATE missions SET state='running', updated=? WHERE id=? AND state IN (" +
+                      ",".join("?" * len(PAUSED)) + ")", (time.time(), mid, *PAUSED)).rowcount
+    if changed != 1:  # (stopped / resumed by someone else in the meantime)
         return False
-    s.update_mission(mid, state="running")
     s.event(mid, "resumed")
     _audit("mission_resumed", mid)
     start_runner()
@@ -382,11 +430,19 @@ def _run_mission(mid):
         _run_step(wf, m, st, started)
 
 
-def _budget_pause(mid, m):
+def _budget_pause(mid, m, daily=False):
+    """Pause for the limit that was actually hit: the mission's own budget, or the PC's daily model budget."""
     s = store()
-    s.update_mission(mid, state="paused_budget")
-    s.event(mid, f"paused: the budget is used up (${m['spent_usd']:.4f} spent, ${m.get('reserved_usd') or 0:.4f} reserved, "
-                 f"of ${m['budget_usd']:.2f}); raise it to continue", "warn")
+    if daily:
+        s._exec("UPDATE missions SET state='paused_daily', updated=? WHERE id=? AND state='running'", (time.time(), mid))
+        s.event(mid, "paused: today's model budget (DAILY_BUDGET_USD) is used up; the mission's own budget isn't. It can "
+                     "resume after the daily budget resets", "warn")
+        _announce(f"I paused the mission '{m['title']}': today's overall model budget is used up (the mission still has "
+                  "budget left). It can continue tomorrow.", mid)
+        return
+    s._exec("UPDATE missions SET state='paused_budget', updated=? WHERE id=? AND state='running'", (time.time(), mid))
+    s.event(mid, f"paused: the mission budget is used up (${m['spent_usd']:.4f} spent, ${m.get('reserved_usd') or 0:.4f} "
+                 f"reserved, of ${m['budget_usd']:.2f}); raise it to continue", "warn")
     _announce(f"I paused the mission '{m['title']}': it reached its budget of ${m['budget_usd']:.2f}. Raise it if you want "
               "me to continue.", mid)
 
@@ -415,15 +471,16 @@ def _call(handler, ctx, st, token):
             log.warning("mission %s: step %s abandoned (%s); it can't act any more", ctx.id, st["key"], token.reason)
             return "cancelled", token.reason
     _abandoned[:] = [a for a in _abandoned if a[0].is_alive()]
-    if token.cancelled and "r" not in out:
-        return "cancelled", token.reason
     if "e" in out:
-        if isinstance(out["e"], runctx.Cancelled):
+        if token.cancelled or isinstance(out["e"], runctx.Cancelled):
             return "cancelled", token.reason or str(out["e"])
         return "error", out["e"]
-    if token.cancelled:  # (finished, but after being cancelled: the result is not trusted / used)
+    if token.cancelled and "r" not in out:
         return "cancelled", token.reason
-    return "ok", out.get("r")
+    r = out.get("r")
+    if token.cancelled and not (isinstance(r, StepResult) and r.committed):
+        return "cancelled", token.reason  # (finished, but after being cancelled: the result is not trusted / used)
+    return "ok", r
 
 
 def _run_step(wf, m, st, started):
@@ -453,7 +510,7 @@ def _run_step(wf, m, st, started):
 
     if kind == "error" and isinstance(res, meter.BudgetExceeded):
         finish(state="pending", attempts=attempt - 1, error=str(res), cost_usd=cost)
-        _budget_pause(mid, s.mission(mid))
+        _budget_pause(mid, s.mission(mid), daily=isinstance(res, meter.DailyBudgetExceeded))
         return
     if kind == "cancelled":
         reason = res or "stopped"
@@ -479,7 +536,9 @@ def _run_step(wf, m, st, started):
     if res.ok:
         if not finish(state="completed", ended=time.time(), result=res.result, evidence=res.evidence[:2000], error="",
                       cost_usd=cost):
-            return  # (stopped meanwhile: its outcome isn't recorded, its follow-up steps aren't added)
+            if res.committed:  # (the mission was stopped meanwhile, but this step's change did happen: say so)
+                s.event(mid, f"'{st['title']}' was completed just before the stop: {res.evidence[:300]}", "warn")
+            return  # (stopped meanwhile: its outcome isn't recorded as the step's, its follow-up steps aren't added)
         for spec in res.add:
             s.add_step(mid, spec.key, spec.kind, spec.title, spec.args, spec.depends, spec.idempotent, spec.max_attempts)
         if res.skip:

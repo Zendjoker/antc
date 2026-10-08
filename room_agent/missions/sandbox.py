@@ -96,6 +96,30 @@ def remove(d):
         pass
 
 
+def git_bash():
+    """Claude Code on native Windows needs Git for Windows' bash.exe (CLAUDE_CODE_GIT_BASH_PATH). -> path or None.
+    Only the variable is passed to the worker: Git is NOT put on its PATH (its shell tool is disabled anyway)."""
+    cand = []
+    given = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH", "").strip()
+    if given:
+        cand.append(Path(given))
+    git = shutil.which("git")
+    if git:
+        root_dir = Path(git).resolve().parent.parent  # (...\Git\cmd\git.exe -> ...\Git)
+        cand.append(root_dir / "bin" / "bash.exe")
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", ""),
+                 str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs")):
+        if base:
+            cand.append(Path(base) / "Git" / "bin" / "bash.exe")
+    for c in cand:
+        try:
+            if c.is_file():
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
 def env(sandbox, api_key=""):
     e = {k: os.environ[k] for k in ENV_KEEP if k in os.environ}
     sysroot = os.environ.get("SYSTEMROOT", r"C:\Windows")
@@ -112,6 +136,9 @@ def env(sandbox, api_key=""):
              LOCALAPPDATA=str(Path(sandbox) / "localappdata"), TEMP=str(Path(sandbox) / "tmp"),
              TMP=str(Path(sandbox) / "tmp"), DISABLE_AUTOUPDATER="1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",
              DISABLE_TELEMETRY="1")
+    bash = git_bash() if sys.platform == "win32" else None
+    if bash:
+        e["CLAUDE_CODE_GIT_BASH_PATH"] = bash
     if api_key:
         e["ANTHROPIC_API_KEY"] = api_key
     return e

@@ -356,7 +356,7 @@
   }
 
   // ---- missions (from missions.db, through the running Jarvis): progress, leads with evidence, demos, drafts, approvals
-  const M_TONE = { running: "blue", completed: "green", finished_with_problems: "amber", paused: "amber", paused_budget: "amber",
+  const M_TONE = { running: "blue", completed: "green", finished_with_problems: "amber", paused: "amber", paused_budget: "amber", paused_daily: "amber",
                    interrupted: "amber", cancelled: "", planned: "blue" };
   const S_TONE = { completed: "green", skipped: "", running: "blue", pending: "", failed: "red", blocked: "red", cancelled: "" };
   const W_TONE = { none_found: "amber", social_only: "amber", directory_only: "amber", broken: "red", poor: "amber", ok: "green" };
@@ -439,7 +439,7 @@
     if (m.uncertain_usd) stat("counted at full estimate", `$${m.uncertain_usd.toFixed(4)}`);
     const acts = el("div", "m-actions");
     if (["running", "planned"].includes(m.state)) acts.append(mBtn("Pause", "pause", { do: "mission_pause" }));
-    if (["paused", "paused_budget", "interrupted"].includes(m.state)) {
+    if (["paused", "paused_budget", "paused_daily", "interrupted"].includes(m.state)) {
       acts.append(mBtn("Resume", "play", { do: "mission_resume" }));
       if (m.state === "paused_budget") acts.append(mBtn("Add $1 and resume", "dollar", { do: "mission_budget", extra_usd: 1 }));
     }

@@ -40,6 +40,22 @@ def _not_billed(e):
     return isinstance(status, int) and 400 <= status < 500
 
 
+def _never_sent(e):
+    """A connection that couldn't be opened (DNS failure, refused, connect timeout): the request never reached the
+    provider. A read timeout / dropped connection after sending is NOT this (the provider may have charged)."""
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        return False
+    seen, cur = set(), e
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol)):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def complete(prompt, system="", tier="light", max_tokens=800, what="model call"):
     """-> text. Raises meter.BudgetExceeded before spending past the mission's budget, ModelUnavailable without a key,
     runctx.Cancelled if the step was stopped (before sending; a call already sent is still charged)."""
@@ -49,14 +65,19 @@ def complete(prompt, system="", tier="light", max_tokens=800, what="model call")
     out_cap = max_tokens * 3 if provider == "openai" else max_tokens  # (GPT-5 thinking tokens count as output)
     estimate = meter.model_estimate(model, len(prompt) + len(system), out_cap)
     t0 = time.time()
+    runctx.check_before_send()
     with meter.paid(estimate, what, provider=provider, model=model) as charge:
-        runctx.check()
+        runctx.check_before_send()  # (released, not counted, if stopped here: nothing was sent yet)
         try:
             if provider == "openai":
                 text, tin, tout, usd = _openai(model, prompt, system, out_cap, TIMEOUT_S[tier], budget)
             else:
                 text, tin, tout, usd = _claude(model, prompt, system, max_tokens, TIMEOUT_S[tier], budget)
+        except runctx.CancelledBeforeSend:
+            raise
         except Exception as e:
+            if _never_sent(e):
+                raise meter.NotSent(f"{e.__class__.__name__}: the connection never opened") from e
             if _not_billed(e):
                 charge.not_billed()
             raise
@@ -80,7 +101,7 @@ def _openai(model, prompt, system, out_cap, timeout, budget):
     except openai.BadRequestError as e:  # (400: not billed; this model doesn't take reasoning_effort)
         if "reasoning" not in str(e).lower() or not config.OPENAI_REASONING:
             raise
-        runctx.check()
+        runctx.check_before_send()  # (the first request was rejected unbilled; this one isn't sent yet)
         r = c.chat.completions.create(**kw)
     u = r.usage
     cached = getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0

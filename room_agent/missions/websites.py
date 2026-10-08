@@ -40,6 +40,19 @@ BUILDERS = {"wix": "Wix", "squarespace": "Squarespace", "weebly": "Weebly", "god
 PARKED = re.compile(r"domain (is |may be )?for sale|buy this domain|this domain (has expired|is parked)|parked free|"
                     r"domain parking|hugedomains|sedo\.com|afternic|dan\.com|is available for registration", re.I)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}")
+# ONE address, nothing else: no spaces, commas, semicolons, angle brackets, line breaks, quotes, or a display name
+VALID_EMAIL = re.compile(r"(?=.{6,254}$)[a-z0-9](?:[a-z0-9._%+-]{0,62}[a-z0-9_%+-])?@"
+                         r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}")
+
+
+def valid_email(addr):
+    """-> the address (lower-case) if it's exactly one plain, well-formed email address, else ""."""
+    a = str(addr or "").strip().lower()
+    if not a or ".." in a or any(c in a for c in " ,;<>\"'\r\n\t()[]:"):
+        return ""
+    return a if VALID_EMAIL.fullmatch(a) else ""
+
+
 BAD_EMAIL_DOMAINS = ("example.com", "sentry.io", "wixpress.com", "sentry-next.wixpress.com", "domain.com", "email.com",
                      "yourdomain.com", "godaddy.com", "squarespace.com", "w3.org", "schema.org")
 
@@ -75,11 +88,16 @@ def _visible_text(html):
 def _emails(html, site_host):
     found = set()
     for m in re.finditer(r"mailto:([^\"'?>\s]+)", html, re.I):
-        found.add(urllib.parse.unquote(m.group(1)).strip().lower())
+        # (a mailto may list several addresses, or carry encoded line breaks: each candidate is checked on its own)
+        for part in re.split(r"[,;]", urllib.parse.unquote(m.group(1))):
+            found.add(part.strip().lower())
     for m in EMAIL.finditer(html):
         found.add(m.group(0).strip().lower())
     good = []
     for e in sorted(found):
+        e = valid_email(e)
+        if not e:
+            continue
         dom = e.rsplit("@", 1)[-1]
         if re.search(r"\.(png|jpe?g|gif|svg|webp|css|js)$", e) or any(dom == b or dom.endswith("." + b) for b in BAD_EMAIL_DOMAINS):
             continue
@@ -94,6 +112,10 @@ def analyze(url, lead, cancel=None):
     """Load a business's site (robots.txt respected) and check it. -> analysis dict with status, checks, evidence."""
     now = time.strftime("%Y-%m-%d %H:%M")
     a = {"url": url, "checked": now, "checks": [], "status": "unknown", "emails": [], "evidence": []}
+    public, why = net._public(url)
+    if not public:  # (never requested at all, robots.txt included)
+        a.update(status="broken", error=f"not fetched: {why}", evidence=[f"{url} wasn't fetched: {why} ({now})"])
+        return a
     if not net.allowed_by_robots(url, cancel):
         a.update(status="blocked", evidence=[f"robots.txt at {host(url)} doesn't allow automated reading ({now})"])
         return a

@@ -213,54 +213,93 @@ def _match_osm(c, osm):
     return None
 
 
-def from_places(category, place, osm, limit=60):
-    """-> [persistable profile] for Google-found businesses. Matched to OpenStreetMap: the OSM profile (OSM fields,
-    OSM source) plus the place id. Not matched: only the place id and our own search terms; the Google content stays
-    in memory (places.recall) until a non-Google source confirms it during research."""
-    found = places.text_search(f"{category} in {place}", limit=limit)
+def _google_profile(pid, c, osm, used, category, place):
+    """-> the persistable profile for one Google result (None for a closed business)."""
+    if c.get("status") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"):
+        return None  # (used, not stored)
+    m = _match_osm(c, osm)
+    if m is not None and m["key"] not in used:
+        used.add(m["key"])
+        prof = dict(m)
+        prof["place_id"] = pid
+        prof["extra"] = {**m["extra"], "places": {"id": pid}, "google_match": "matched on OpenStreetMap"}
+        return prof
+    # (only our own search terms and the place id are stored; provenance says so)
+    return {"key": f"gplaces:{pid}", "place_id": pid, "name": f"Google place {pid[:10]}", "category": category,
+            "city": place, "sources": [],
+            "extra": {"places": {"id": pid}, "google_only": True,
+                      "verified_by": {"category": "mission search terms", "city": "mission search terms"}}}
+
+
+def places_query(category, place):
+    return f"{category} in {place}"
+
+
+def from_places(category, place, osm, limit=60, on_batch=None, start_token=None, pages=3):
+    """-> ([persistable profile], used OSM keys) for Google-found businesses. Matched to OpenStreetMap: the OSM profile
+    (OSM fields, OSM source) plus the place id. Not matched: only the place id and our own search terms; the Google
+    content stays in memory (places.recall) until a non-Google source confirms it during research.
+    on_batch(profiles, progress) runs after every paid page, before the next one is bought."""
     out, used = [], set()
-    for pid, c in found:
-        if c.get("status") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"):
-            continue  # (used, not stored)
-        m = _match_osm(c, osm)
-        if m is not None and m["key"] not in used:
-            used.add(m["key"])
-            prof = dict(m)
-            prof["place_id"] = pid
-            prof["extra"] = {**m["extra"], "places": {"id": pid}, "google_match": "matched on OpenStreetMap"}
-            out.append(prof)
-            continue
-        out.append({"key": f"gplaces:{pid}", "place_id": pid, "name": f"Google place {pid[:10]}",
-                    "category": category, "city": place, "sources": [],
-                    "extra": {"places": {"id": pid}, "google_only": True, "verified_by": {}}})
+
+    def page_done(page, n, complete):
+        batch = [x for x in (_google_profile(pid, c, osm, used, category, place) for pid, c in page) if x]
+        out.extend(batch)
+        if on_batch is not None:
+            on_batch(batch, {"places_pages": n, "places_complete": complete})
+
+    places.text_search(places_query(category, place), limit=limit, pages=pages, start_token=start_token,
+                       on_page=page_done)
     return out, used
 
 
-def discover(category, place, radius_km=3.0, pool=60, use_places="auto", cancel=None):
-    """-> (center or None, [persistable profile], notes). OpenStreetMap always; Google Places too when allowed."""
+def discover(category, place, radius_km=3.0, pool=60, use_places="auto", cancel=None, on_batch=None, resume=None):
+    """-> (center or None, [persistable profile], notes). OpenStreetMap always (free); Google Places too when allowed.
+    on_batch(profiles, progress) receives each batch as soon as it's known (OpenStreetMap first, then every paid
+    Places page), so the caller can checkpoint it. resume: the progress saved by an earlier, cut-off run: Places pages
+    already bought are never bought again (the search continues only from a still-fresh in-memory page token)."""
     notes = []
+    resume = resume or {}
     want_places = use_places is True or (use_places == "auto" and places.enabled())
     center, osm, osm_error = None, [], None
     try:
         center, osm = from_osm(category, place, radius_km, limit=max(pool * 2, 60), cancel=cancel)
+        osm = [p for p in osm if not p["extra"].get("disused")]
         notes.append(f"OpenStreetMap: {len(osm)} businesses within {radius_km:g} km of {center['name'][:80]}")
+        if on_batch is not None:
+            on_batch(osm[:pool], {"osm_done": True})
     except DiscoveryError as e:
         osm_error = e
         notes.append(f"OpenStreetMap not used: {e}")
     found = []
-    if want_places:
-        try:
-            g, used = from_places(category, place, osm, limit=pool)
-            matched = sum(1 for p in g if not p["key"].startswith("gplaces:"))
-            notes.append(f"Google Places: {len(g)} businesses ({matched} confirmed on OpenStreetMap; the rest are kept as "
-                         "place ids until their own website confirms them)")
-            found += g
-            osm = [p for p in osm if p["key"] not in used]
-        except meter.BudgetExceeded:
-            raise
-        except places.PlacesError as e:
-            notes.append(f"Google Places not used: {e}")
-    found += osm
-    if not found and osm_error is not None:
+    pages_done = int(resume.get("places_pages") or 0)
+    if want_places and resume.get("places_complete"):
+        notes.append(f"Google Places: already searched ({pages_done} page(s)); not searched again")
+    elif want_places:
+        start, pages_left = None, 3
+        if pages_done:
+            start = places.next_token(places_query(category, place))
+            pages_left = 3 - pages_done
+            if start is None or pages_left <= 0:
+                notes.append(f"Google Places: the search stopped after {pages_done} paid page(s) and can't be continued "
+                             "without buying them again, so it wasn't repeated")
+                if on_batch is not None:
+                    on_batch([], {"places_pages": pages_done, "places_complete": True})
+                pages_left = 0
+        if pages_left > 0:
+            try:
+                g, used = from_places(category, place, osm, limit=pool, on_batch=on_batch, start_token=start,
+                                      pages=pages_left)
+                matched = sum(1 for p in g if not p["key"].startswith("gplaces:"))
+                notes.append(f"Google Places: {len(g)} businesses ({matched} confirmed on OpenStreetMap; the rest are kept "
+                             "as place ids until their own website confirms them)")
+                found += g
+                osm = [p for p in osm if p["key"] not in used]
+            except meter.BudgetExceeded:
+                raise
+            except places.PlacesError as e:
+                notes.append(f"Google Places not used: {e}")
+    found += osm[:pool]
+    if not found and osm_error is not None and not pages_done:
         raise osm_error
-    return center, [p for p in found if not p["extra"].get("disused")][: max(pool * 2, pool)], notes
+    return center, found, notes

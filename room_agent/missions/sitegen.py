@@ -193,6 +193,18 @@ def content_for(lead, owner, prev_design=None, overrides=None):
 
 
 # ---------------------------------------------------------------- rendering
+def _kind(cuisine, category):
+    """'pizza' + 'pizza restaurant' -> 'pizza restaurant' (not 'pizza pizza restaurant'); 'thai' + 'restaurant' ->
+    'thai restaurant'."""
+    cuisine, category = (cuisine or "").strip(), (category or "").strip()
+    if not cuisine:
+        return category
+    words = set(re.findall(r"[a-z]+", category.lower()))
+    if all(w in words for w in re.findall(r"[a-z]+", cuisine.lower())):
+        return category
+    return f"{cuisine} {category}".strip()
+
+
 def _sample(text):
     return f'<p class="sample"><span class="tag">Sample</span> {_e(text)}</p>'
 
@@ -200,7 +212,7 @@ def _sample(text):
 def render_html(c):
     f, o, dz = c["facts"], c["owner"], c["design"]
     name = f["name"]["value"]
-    kind = (f.get("cuisine", {}).get("value", "") + " " if f.get("cuisine") else "") + f.get("category", {}).get("value", "")
+    kind = _kind(f.get("cuisine", {}).get("value", ""), f.get("category", {}).get("value", ""))
     eyebrow = " · ".join(x for x in (kind.strip().title(), f.get("city", {}).get("value", "")) if x)
     phone = f.get("phone", {}).get("value", "")
     tel = re.sub(r"[^\d+]", "", phone)
@@ -552,7 +564,8 @@ def restore(workspace, s, version_dir, lead):
     files = {p.name: p.read_bytes() for p in Path(version_dir).iterdir() if p.is_file() and p.name not in ("WHY.txt",)
              and p.suffix.lower() in ALLOWED_EXT}
     staged = stage(workspace, s, files)
-    problems = check(staged, lead)
+    owner, _, _ = load_owner(workspace, s)
+    problems = check(staged, lead, owner)
     if problems:
         discard(staged)
         return problems
@@ -563,10 +576,10 @@ def restore(workspace, s, version_dir, lead):
 def build(lead, workspace, overrides=None):
     """Generate (or regenerate) the demo site. -> (live folder, [problems]). Nothing changes unless the new version
     passes check(); then it's swapped in atomically."""
-    files, c, _ = build_files(lead, workspace, overrides)
+    files, c, _ = build_files(lead, workspace, overrides)  # (c["owner"]: loaded from owner-content/, trusted)
     s = slug(lead["name"], lead["id"])
     staged = stage(workspace, s, files)
-    problems = check(staged, lead)
+    problems = check(staged, lead, c["owner"])
     if problems:
         discard(staged)
         return sites_dir(workspace) / s, problems
@@ -574,8 +587,22 @@ def build(lead, workspace, overrides=None):
     return sites_dir(workspace) / s, []
 
 
+def fact_strings(lead):
+    """The lead's stored, sourced facts as they can appear on the page (from the database, never from site.json)."""
+    extra = lead.get("extra") or {}
+    out = [lead.get(k) for k in ("name", "address", "city", "category", "phone", "email", "website")]
+    out += [part.strip() for part in str(lead.get("address") or "").split(",")]  # (the page also shows the street alone)
+    cuisine = (extra.get("cuisine") or "").replace(";", ", ").replace("_", " ")
+    out += [cuisine, _kind(cuisine, lead.get("category", "")), extra.get("opening_hours")]
+    out += [v for v in (extra.get("social") or {}).values() if isinstance(v, str)]
+    return [str(x) for x in out if x]
+
+
 def check(folder, lead, owner=None):
-    """The site's own rules, read back from disk. -> [problems] (empty = fine)."""
+    """The site's own rules, read back from disk. -> [problems] (empty = fine).
+    owner: the TRUSTED owner content (sitegen.load_owner from owner-content/, which only you write). It is never read
+    from the site's own site.json: a site (or the coding worker editing it) can't authorize its own prices, menus or
+    claims. None = no owner content (strictest)."""
     folder = Path(folder)
     problems = []
     try:
@@ -583,11 +610,7 @@ def check(folder, lead, owner=None):
         css = (folder / "styles.css").read_text(encoding="utf-8")
     except OSError as e:
         return [f"the site's files can't be read ({e.__class__.__name__})"]
-    if owner is None:
-        try:
-            owner = json.loads((folder / "site.json").read_text(encoding="utf-8")).get("owner") or {}
-        except (OSError, ValueError, AttributeError):
-            owner = {}
+    owner = owner or {}
     if html.escape(lead["name"]) not in page and lead["name"] not in page:
         problems.append("the business name isn't on the page")
     if "not the official website" not in page.lower():
@@ -597,8 +620,10 @@ def check(folder, lead, owner=None):
     if "noindex" not in page:
         problems.append("the page isn't marked noindex")
     body = html.unescape(re.sub(r"<[^>]+>", " ", re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", page, flags=re.S | re.I)))
-    for s in sorted(owner_strings(owner), key=len, reverse=True):  # (the owner's own words may name prices etc.)
-        body = body.replace(s, " ")
+    # the owner's own words may name prices etc.; sourced facts (a name like "Top Rated Plumbing", an address with
+    # "#1") are facts, not claims. Both are removed before the check; anything else must pass it.
+    for s in sorted(set(owner_strings(owner)) | set(fact_strings(lead)), key=len, reverse=True):
+        body = re.sub(re.escape(s), " ", body, flags=re.I)
     hit = FORBIDDEN.search(body)
     if hit:
         problems.append(f"contains review / rating / award wording ('{hit.group(0)}') that didn't come from the owner")

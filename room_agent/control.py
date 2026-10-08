@@ -209,10 +209,7 @@ def mission_detail(mid):
     projects = []
     for p in s.projects(mid):
         lead = s.lead(p["lead_id"]) or {}
-        try:
-            url = preview.url_for(p["path"])
-        except ValueError:
-            url = ""
+        url = preview.url_for(p["path"])  # ("" when MISSIONS_DIR changed since: shown without a preview button)
         projects.append({"id": p["id"], "lead": lead.get("name", ""), "path": p["path"], "preview": url,
                          "status": p["status"], "history": (p.get("history") or [])[-5:]})
     return {"mission": engine.progress(mid), "params": m["params"],
@@ -238,28 +235,48 @@ def _mission_action(what, body):
     if what == "mission_pause":
         return {"ok": engine.pause(mid, "paused from the dashboard"), "message": "Paused."}
     if what == "mission_resume":
-        ok = engine.resume(mid)
-        return {"ok": ok, "message": "Resumed." if ok else "Not resumed (budget used up? raise it first)."}
+        why = engine.resume_blocker(mid)
+        ok = not why and engine.resume(mid)
+        return {"ok": ok, "message": "Resumed." if ok else f"Not resumed: {why or engine.resume_blocker(mid) or 'it changed meanwhile'}."}
     if what == "mission_budget":
         extra = max(0.0, min(float(body.get("extra_usd") or 0), 10.0))
-        new = engine.raise_budget(mid, extra, "dashboard")
-        if new is None:
+        res = engine.raise_budget(mid, extra, "dashboard")
+        if res is None:
             return {"ok": False, "message": "The budget wasn't changed."}
+        old, new = res
+        if new <= old + 1e-9:
+            return {"ok": False, "message": f"Not changed: the budget is already at the maximum (${new:.2f}, "
+                                            "MISSION_MAX_BUDGET_USD)."}
+        msg = f"Budget raised from ${old:.2f} to ${new:.2f}" + (" (capped at the maximum)" if new < old + extra - 1e-9 else "")
         m = s.mission(mid)
         if m and m["state"] == "paused_budget":
-            engine.resume(mid)
-        return {"ok": True, "message": f"Budget is now ${new:.2f}."}
+            msg += "; running again" if engine.resume(mid) else f"; still paused: {engine.resume_blocker(mid)}"
+        elif m and m["state"] == "paused_daily":
+            msg += "; still paused by today's overall model budget"
+        return {"ok": True, "message": msg + "."}
     if what == "mission_stop":
         return {"ok": engine.stop(mid, "stopped from the dashboard"), "message": "Stopped; the work so far is kept."}
     if what == "mission_demos":
-        picked = business.build_demos(mid, int(body.get("count") or 3))
-        return {"ok": bool(picked), "message": ("Queued: " + ", ".join(x["name"] for x in picked)) if picked
-                else "Nothing to build (no qualifying business without a demo)."}
+        try:
+            picked, res = business.build_demos(mid, int(body.get("count") or 3))
+        except ValueError as e:  # (engine.MissionClosed: a stopped mission takes no new work)
+            return {"ok": False, "message": f"{e}."}
+        if not picked:
+            return {"ok": False, "message": "Nothing to build (no qualifying business without a demo)."}
+        names = ", ".join(x["name"] for x in picked)
+        return {"ok": True, "message": f"Queued: {names}." if res["running"] else
+                f"Queued but not running: {names}. {res['why_not'].capitalize()}."}
     if what == "mission_preview":
         p = next((x for x in s.projects(mid) if x["id"] == int(body.get("project_id") or 0)), None)
-        if p is None or not preview.start():
+        if p is None:
             return {"ok": False, "message": "That preview isn't available."}
-        return {"ok": True, "message": "Preview ready.", "url": preview.url_for(p["path"])}
+        url = preview.url_for(p["path"])
+        if not url:
+            return {"ok": False, "message": f"This demo is outside the current missions folder; open {p['path']}\\index.html "
+                                            "directly."}
+        if not preview.start():
+            return {"ok": False, "message": "The preview server couldn't start (MISSION_PREVIEW_PORT in use?)."}
+        return {"ok": True, "message": "Preview ready.", "url": url}
     if what in ("approval_approve", "approval_reject", "approval_retry"):
         aid = int(body.get("approval_id") or 0)
         if what == "approval_reject":

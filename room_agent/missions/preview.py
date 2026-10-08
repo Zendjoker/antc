@@ -93,6 +93,10 @@ def start():
 
 
 def url_for(folder):
-    """The preview address of a demo-site folder (inside MISSIONS_DIR)."""
-    rel = Path(folder).resolve().relative_to(Path(config.MISSIONS_DIR).resolve())
+    """The preview address of a demo-site folder, or "" if it isn't inside today's MISSIONS_DIR (the setting changed
+    after the mission was made: the preview server can't serve it; its index.html still opens directly)."""
+    try:
+        rel = Path(folder).resolve().relative_to(Path(config.MISSIONS_DIR).resolve())
+    except ValueError:
+        return ""
     return f"http://127.0.0.1:{config.MISSION_PREVIEW_PORT}/" + "/".join(urllib.parse.quote(p) for p in rel.parts) + "/"

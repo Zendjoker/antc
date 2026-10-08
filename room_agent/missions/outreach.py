@@ -181,8 +181,12 @@ def prepare(lead, mission_id, workspace, has_demo, s=None):
     problems = sender_problems()
     subject, body = email_draft(lead, has_demo)
     subject, body, note = polish(lead, subject, body)
-    recipient = lead.get("email") or ""
-    if not recipient:
+    from room_agent.missions.websites import valid_email
+
+    recipient = valid_email(lead.get("email"))
+    if lead.get("email") and not recipient:
+        problems.append("the email address found isn't one valid address, so it isn't used (call notes only)")
+    elif not recipient:
         problems.append("no public email address was found for this business (call notes only)")
     _write(folder / "email.txt", f"To: {recipient or '[no public email found]'}\nSubject: {subject}\n\n{body}\n")
     _write(folder / "call-notes.md", talking_points(lead, has_demo))
@@ -204,6 +208,22 @@ def prepare(lead, mission_id, workspace, has_demo, s=None):
 
 # Gmail errors that prove no draft was created (it never got that far): the approval can simply be tried again
 _NOT_CREATED = ("NotConfigured", "NotConnected", "AuthCanceled", "AuthExpired", "MissingScope", "RateLimited", "NotFound")
+
+
+def _local_mime_problem(to, subject, body):
+    """Build the message locally first (the same library Gmail drafting uses): a header that can't be written
+    (line breaks...) is a local error, found before anything is claimed or sent. -> problem text or """""
+    from email.message import EmailMessage
+
+    try:
+        msg = EmailMessage()
+        msg["To"] = to
+        msg["Subject"] = subject or "(no subject)"
+        msg.set_content(body or "")
+        msg.as_bytes()
+    except (ValueError, TypeError) as e:
+        return f"{e.__class__.__name__}: {str(e)[:120]}"
+    return ""
 
 
 def approve(aid, via):
@@ -234,8 +254,14 @@ def approve(aid, via):
     blocking = sender_problems()  # (checked now, not when the draft was written: you may have fixed them since)
     if blocking:
         return False, "fix these first (in .env, then restart Jarvis): " + "; ".join(blocking)
-    if not o["recipient"]:
-        return False, "no recipient"
+    from room_agent.missions.websites import valid_email
+
+    rcpt = valid_email(o["recipient"])
+    if not rcpt:  # (checked here, locally: nothing is claimed or sent)
+        return False, "its recipient isn't exactly one valid email address, so nothing was done (reject it)"
+    problem = _local_mime_problem(rcpt, o["subject"], o["body"])
+    if problem:
+        return False, f"the draft can't be built ({problem}), so nothing was done"
     try:
         from room_agent.integrations import provider
 
@@ -250,7 +276,7 @@ def approve(aid, via):
     try:
         from room_agent.integrations.google.gmail import GmailService
 
-        draft = GmailService(g).create_draft(o["recipient"], o["subject"], o["body"])
+        draft = GmailService(g).create_draft(rcpt, o["subject"], o["body"])
     except Exception as e:  # noqa: BLE001
         name = e.__class__.__name__
         if name in _NOT_CREATED:
