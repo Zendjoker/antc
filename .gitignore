@@ -29,3 +29,4 @@ bin/
 recent.json
 traces/
 bench/
+google_auth.env
