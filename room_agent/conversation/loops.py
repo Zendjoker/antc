@@ -122,8 +122,11 @@ def voice_loop():
                     state.go(State.IDLE_CHECK, "answering the wake word")
                     heard, barged = speak_phrase("wake", history)
                     ended = converse(mic_q, history, heard=heard, barged=barged)
-        except Exception:
+        except Exception as e:
             log.exception("conversation crashed, going back to listening")  # never leave it deaf
+            from room_agent import livelog
+
+            livelog.event("error", where="conversation", error=e.__class__.__name__, detail=str(e)[:200])
         if writer and ended != "quiet":
             writer.conversation_ended(started)  # a line or two about it, for next time
         elif writer:
@@ -189,5 +192,8 @@ def text_loop():
             state.go(State.LISTENING)
         except Exception as e:
             log.error("Error: %s", e)
+            from room_agent import livelog
+
+            livelog.event("error", where="text turn", error=e.__class__.__name__, detail=str(e)[:200])
             stop_thinking()
             state.go(State.LISTENING, "after an error")

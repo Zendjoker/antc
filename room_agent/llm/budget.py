@@ -78,6 +78,10 @@ class Budget:
         from room_agent.cognition import metrics
 
         metrics.model_call(provider, model, fresh_in + cached_in + cache_write, out, cached=cached_in)
+        from room_agent import livelog
+
+        livelog.event("model", provider=provider, model=model, input=fresh_in + cached_in + cache_write, cached=cached_in,
+                      output=out, usd=float(round(usd, 6)))
         return usd
 
     def today(self):

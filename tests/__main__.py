@@ -29,10 +29,11 @@ CATEGORIES = {
                     "test_greet", "test_zigbee", "test_smart_home", "test_voice_delivery", "test_turn_taking",
                     "test_timer_correction", "test_diagnostics", "test_browser", "test_screen", "test_research", "test_service", "test_lists", "test_files", "test_music",
                     "test_texts", "test_pcsettings", "test_safety", "test_eval_scoring", "test_cancellation", "test_google_health",
-                    "test_tool_registry", "test_task_engine"],
+                    "test_tool_registry", "test_task_engine", "test_benchmark_scoring"],
     "audio": ["test_listening", "test_speaker", "test_latency"],
     "hardware": ["apps_live", "media_live", "windows_live", "actions_live", ("computer_live", "--act")],
     "live_api": [("test_turn_taking", "--live-api"), "test_ring_ack", "cognition_live", "pending_live"],
+    # (tool_choice_live needs an explicit --provider/--model/--yes: run by hand once approved)
 }
 SAFE = ("unit", "integration", "audio")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

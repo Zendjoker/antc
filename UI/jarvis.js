@@ -207,7 +207,7 @@
     $("#greeting").textContent = greeting();
     const d = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
     $("#home-sub").textContent = [d, live.online && live.location].filter(Boolean).join("  ·  ");
-    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch(); renderLists();
+    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch(); renderLists(); renderTasks();
   }
 
   function renderMedia() {
@@ -329,6 +329,29 @@
               row("Browser", live.online && live.browser ? `${live.browser.name} · ${live.browser.site || live.browser.title}` : "—", "window"),
               row("Google", gOk ? "Connected" : cap(g), "mail", gOk ? "green" : null),
               row("Brain", live.online ? live.brain : "—", "sparkle"));
+  }
+
+  // ---- tasks: every request that did something, step by step (from the task records)
+  const TASK_TONE = { COMPLETED: "green", UNVERIFIED: "amber", PARTIAL: "amber", UNKNOWN: "amber", WAITING: "amber",
+                      INTERRUPTED: "amber", FAILED: "red", CANCELED: "" };
+  function renderTasks() {
+    const items = (live.online && live.tasks) || [], box = $("#tasks"), tag = $("#tasks-tag");
+    const sig = JSON.stringify(items);
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = "";
+    tag.className = "tag push"; tag.textContent = items.length ? `${items.length} recent` : "None yet";
+    if (!items.length) { box.append(emptyState("activity", "No tasks yet", live.online ? "Anything Jarvis does shows up here" : "Waiting for Jarvis")); return; }
+    for (const t of items) {
+      const row = el("div", "task-row");
+      const head = el("div", "task-head");
+      head.append(el("span", `tag ${TASK_TONE[t.state] || ""}`, t.state.toLowerCase()), el("span", "task-goal", t.goal || "(request)"),
+                  el("span", "task-meta", `${t.seconds}s${t.cost_usd ? ` · $${t.cost_usd.toFixed(4)}` : ""}`));
+      const steps = el("div", "task-steps");
+      t.steps.forEach((s, i) => steps.append(el("span", `step ${TASK_TONE[s.state] || ""}`, `${i + 1}. ${s.tool} ${s.state.toLowerCase()}`)));
+      row.append(head, steps);
+      box.append(row);
+    }
   }
 
   // ---- emergency stop

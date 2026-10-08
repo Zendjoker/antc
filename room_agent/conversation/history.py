@@ -56,6 +56,9 @@ def remember_turn(user_text, agent_text, private=False):
     rt.recent.append({"role": "user", "text": user_text, "time": stamp})
     if agent_text:
         rt.recent.append({"role": "assistant", "text": agent_text, "time": stamp})
+    from room_agent import livelog
+
+    livelog.event("reply", text="(private)" if private else agent_text or "", said=user_text if not private else "")
     rt.recent = rt.recent[-60:]
     try:
         rt.memory.save_recent(rt.recent)

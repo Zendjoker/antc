@@ -305,6 +305,7 @@ def _execute(name, args):
             out = str(cap.execute(clean))
         except Exception as e:
             log.error("tool %s failed: %s", name, e)
+            livelog.event("error", where=f"tool {name}", error=e.__class__.__name__, detail=str(e)[:200])
             out = f"FAILED: {name} hit an error ({e.__class__.__name__}: {str(e)[:120]})."
     out = out if _prefix(out) else f"OK: {out}"
     needed = pending.take_needed()

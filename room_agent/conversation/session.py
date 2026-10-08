@@ -262,6 +262,7 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
         except Exception as e:
             result = None
             log.error("Error: %s", e)
+            livelog.event("error", where="turn", error=e.__class__.__name__, detail=str(e)[:200])
             if rt.tts_enabled:
                 rt.speak_q.put(tone(330, 0.25))
                 finish_speaking()

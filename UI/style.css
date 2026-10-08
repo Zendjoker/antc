@@ -524,3 +524,12 @@ body.offline .needs-live { opacity: .45; pointer-events: none; }
 
 .btn.danger { color: #b42318; border-color: #f3c3bd; }
 .btn.danger:hover { background: #fdecea; }
+
+/* tasks card */
+.task-row { padding: 8px 0; border-bottom: 1px solid var(--line, #e3e5ea); }
+.task-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.task-goal { font-weight: 600; overflow-wrap: anywhere; }
+.task-meta { color: var(--muted, #6b7280); font-size: 12px; margin-left: auto; }
+.task-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.task-steps .step { font-size: 12px; padding: 1px 6px; border-radius: 8px; background: var(--soft, #f3f4f6); }
+.task-steps .step.green { color: #157f3d; } .task-steps .step.amber { color: #8a5a00; } .task-steps .step.red { color: #a3261b; }
