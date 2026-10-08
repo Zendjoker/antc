@@ -19,8 +19,14 @@ from room_agent import social  # noqa: E402
 from room_agent.audio import speaker, styles  # noqa: E402
 from room_agent.social import delivery as dv  # noqa: E402
 from room_agent.social import habits, prosody  # noqa: E402
+from room_agent.social import signals  # noqa: E402
 from room_agent.social.signals import Evidence  # noqa: E402
 from room_agent.text import is_quiet_command  # noqa: E402
+
+# The same result at any hour: the examples were written at 23:00, where "late at night" adds a little low-energy evidence
+# (by day, "today was exhausting" alone is too weak a reading to change the voice: that's the intended confidence rule).
+_situation = signals.situation
+signals.situation = lambda now, hour, *a, **k: _situation(now, 23, *a, **k)
 
 t = Checker()
 check = t.check

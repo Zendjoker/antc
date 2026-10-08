@@ -48,6 +48,9 @@ def _context(user_text):
     lines = ["- timers_and_alarms_now (live from code; this overrides anything said earlier in the conversation): "
              + list_timers().removeprefix("OK: ") + ". A request to set one now is a NEW one: call the tool, even if "
              "something similar was set before or is listed here; never say it's already set."]
+    if _just_set():  # (only right after one was set: the only time a correction is possible; saves tokens otherwise)
+        lines.append("- If they're CORRECTING the timer/alarm just set (\"no, I said 3\", \"I meant 7:30\"), call set_timer / "
+                     "set_alarm once with the corrected time: the code replaces the old one, so don't cancel it yourself.")
     if rt.last_ring and time.time() - rt.last_ring["at"] < 300:
         r = rt.last_ring
         how = "rang and was stopped when they spoke" if r.get("stopped") else "rang"
@@ -102,8 +105,49 @@ def _undo(args, before, after):
     return f"OK: cancelled the {', '.join(labels)} {'timer or alarm' if len(labels) == 1 else 'timers and alarms'} I just set."
 
 
-def _grew(args, before, after):
-    return len(after["ids"]) > len(before["ids"])
+def _set(args, before, after):
+    """A new id appeared (a corrected one replaces the old, so the count can stay the same)."""
+    return bool(set(after["ids"]) - set(before["ids"]))
+
+
+# "no, I said 3" / "I meant 7:30" / "make it 10 minutes": they're fixing the one just set, not asking for another
+CORRECTING = re.compile(r"^\s*(?:(?:no|nope|nah|sorry|wait|oops|actually)\b[\s,.!]*)*"
+                        r"(?:i\s+(?:said|meant|asked\s+for)|make\s+(?:it|that)|change\s+(?:it|that)\s+to|it\s+should\s+be)\b"
+                        r"|^\s*(?:no|nope|nah)\b[\s,.!]+(?:it'?s\s+|it\s+was\s+)?\d", re.I)
+CORRECT_WITHIN_S = 180
+
+
+def _just_set():
+    from room_agent.actions.context import env
+
+    last = env.last_successful_action
+    return last is not None and last.capability in ("set_timer", "set_alarm") and time.time() - last.at <= CORRECT_WITHIN_S
+
+
+def _corrected_ids():
+    """The timer/alarm ids the previous request created, when this turn corrects it (a few minutes, a set that worked)."""
+    from room_agent.actions.context import env
+
+    last = env.last_successful_action
+    if (not CORRECTING.search(rt.turn_text or "") or last is None or last.capability not in ("set_timer", "set_alarm")
+            or time.time() - last.at > CORRECT_WITHIN_S or last.at >= rt.turn.started):  # (set earlier in THIS turn: not a fix)
+        return []
+    return sorted(set((last.state_after or {}).get("ids", [])) - set((last.state_before or {}).get("ids", [])))
+
+
+def _replacing(set_it):
+    """Set the corrected one first; only once it's really set, cancel the one it replaces (never left with none)."""
+    def run(args):
+        from room_agent.tools import timers
+
+        old = _corrected_ids()
+        out = set_it(args)
+        if out.startswith("OK") and old:
+            gone = [label for label in (timers.cancel_id(i) for i in old) if label]
+            if gone:
+                out += f" (Replaced the {', '.join(gone)} they just corrected: only the new one is running.)"
+        return out
+    return run
 
 
 def _set_timer(args):
@@ -163,7 +207,8 @@ tool("set_timer", "Anything that should go off after a length of time from now, 
                                                           "e.g. 'Hey, the pasta's ready!' or 'Hey, time to wake up!'"},
              "ring_once": {"type": "boolean", "description": "Only if they want a single ping. By default it keeps ringing "
                                                              "every few seconds until they say something."}}, ["seconds"]),
-     _set_timer, group="timers", claim="timer", event="timer.set", observe=_ids, verify=_grew, undo=_undo, reflex_say=_said_set)
+     _replacing(_set_timer), group="timers", claim="timer", event="timer.set", observe=_ids, verify=_set, undo=_undo,
+     reflex_say=_said_set)
 tool("set_alarm", "Set an alarm or reminder for a clock time, e.g. 'wake me at 7:30' or 'remind me at 5pm to call mom'. For a "
      "length of time from now ('alarm in 10 seconds'), use set_timer instead. Rings at the next time it's that time, unless "
      "a date is given. Survives restarts. When it rings it says your `message`. Use the current time in the runtime context "
@@ -175,7 +220,8 @@ tool("set_alarm", "Set an alarm or reminder for a clock time, e.g. 'wake me at 7
              "ring_once": {"type": "boolean", "description": "Only if they want a single ping. By default it keeps ringing "
                                                              "until they say something"},
              "daily": {"type": "boolean", "description": "True if they want it every day"}}, ["time"]),
-     _set_alarm, group="timers", claim="timer", event="alarm.set", observe=_ids, verify=_grew, undo=_undo, reflex_say=_said_set)
+     _replacing(_set_alarm), group="timers", claim="timer", event="alarm.set", observe=_ids, verify=_set, undo=_undo,
+     reflex_say=_said_set)
 tool("list_timers", "List running timers and set alarms with time remaining.", NO_ARGS, _list, group="timers",
      changes_state=False, claim="timer")
 tool("cancel_timer", "Cancel a running timer or an alarm by its label (or 'all').",

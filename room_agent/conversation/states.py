@@ -32,6 +32,9 @@ class StateMachine:
             big = {State.STARTING, State.WAKE_WORD_ONLY, State.QUIET} & {old, new}
             log.log(logging.INFO if big else logging.DEBUG, "state: %s -> %s%s", old.name, new.name,
                     f" ({why})" if why else "")
+            from room_agent import livelog
+
+            livelog.event("state", frm=old.name, to=new.name, why=why)
 
     @property
     def quiet(self):

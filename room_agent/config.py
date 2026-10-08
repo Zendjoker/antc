@@ -97,6 +97,8 @@ TIMER_MIN_S = 1  # shortest countdown timer (the tool schema, the capability lis
 TIMER_MAX_S = 30 * 86400  # longest countdown timer
 LISTEN_WAIT_S = float(os.getenv("LISTEN_WAIT_S", "6"))  # after an unfinished sentence, how long to wait for the rest
 MISSING_WAIT_S = float(os.getenv("MISSING_WAIT_S", "4"))  # after a request that lacks a required detail, how long before asking for it
+DIAGNOSTICS = os.getenv("DIAGNOSTICS", "0") == "1"  # live diagnostic mode: logs/diagnostics-*.jsonl (livelog.py)
+DIAGNOSTICS_DIR = Path(os.getenv("DIAGNOSTICS_DIR", HERE / "logs"))
 TRACE = os.getenv("TRACE", "0") == "1"  # log one decision trace per turn (INPUT, AUDIO, INTENT, PARAMS, ACTION, RESULT...)
 LISTEN_PATIENCE = {"normal": 1.0, "longer": 1.8, "longest": 3.0}  # x SILENCE_S before it treats you as finished
 MIN_VOICE_MASS = 2.5  # summed voice probability a recording needs before Whisper hears it (a click or echo flicker is ~1, real words 4+)

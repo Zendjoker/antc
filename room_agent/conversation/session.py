@@ -8,7 +8,7 @@ import numpy as np
 
 from room_agent import runtime as rt
 from room_agent import social
-from room_agent import trace
+from room_agent import livelog, trace
 from room_agent.audio import mic as mic_input
 from room_agent.audio import debug
 from room_agent.audio.fillers import filler_if_slow, stop_thinking
@@ -178,6 +178,9 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
                      "ACCEPTED" if label in ("USER", "UNCERTAIN") else "REJECTED", f"{label}: {detail}",
                      f", logprob {conf['logprob']:.2f}, no-speech {conf['no_speech']:.2f}" if "logprob" in conf else "",
                      ", UNCERTAIN (no memory, nothing irreversible)" if rt.stt_uncertain else "")
+            livelog.event("speech", accepted=label in ("USER", "UNCERTAIN"), label=label, why=detail, text=text,
+                          raw=rt.stt_raw or "", uncertain=bool(rt.stt_uncertain), stt_s=float(rt.stt_seconds or 0),
+                          **{k: round(float(v), 3) for k, v in conf.items() if isinstance(v, (int, float))})
             trace.note("INPUT", repr(text))
             trace.note("AUDIO", f"{label} ({detail})")
             debug.event("decision", text=text, label=label, detail=detail, barged=barged, tts_end_in=rt.tts_end - time.time())

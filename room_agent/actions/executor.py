@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from room_agent import runtime as rt
-from room_agent import trace
+from room_agent import livelog, trace
 from room_agent.actions import core, pending
 from room_agent.actions.context import env
 from room_agent.actions.events import events
@@ -159,6 +159,13 @@ def _finish(action, result):
 
 def execute(name, args):
     """Run one capability call -> ActionResult."""
+    t0 = time.time()
+    result = _execute(name, args)
+    livelog.tool(result, time.time() - t0)  # (DIAGNOSTICS=1 only)
+    return result
+
+
+def _execute(name, args):
     from room_agent.tools.timers import as_timer
     from room_agent.tools.validate import validate
 

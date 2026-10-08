@@ -31,6 +31,7 @@ import time
 import numpy as np
 import sounddevice as sd
 
+from room_agent import livelog
 from room_agent.audio import debug
 
 log = logging.getLogger("room-agent")
@@ -135,7 +136,8 @@ class BargeTracker:
                 if self.run_start is None or frame_no - self.last_voice > self.RUN_GAP:
                     self.run_start, self.run_frames = frame_no, 0  # a new run of voice, not a continuation
                 ep = self.episode = {"start": frame_no, "run": self.run_start, "frames": self.run_frames, "quiet": 0,
-                                     "done": False, "pending": False, "tries": 0, "epoch": epoch, "heard_before": heard_before}
+                                     "done": False, "pending": False, "tries": 0, "epoch": epoch, "heard_before": heard_before,
+                                     "t0": time.time()}
                 event = "start"
             ep["frames"] += 1
             ep["quiet"] = 0
@@ -498,6 +500,8 @@ class AudioEngine:
         with self._q_lock:
             episode["done"] = True
             log.info("barge-in confirmed: user speech (%s)", detail)
+            livelog.event("barge", confirmed=True, why=detail,
+                          voice_to_stop_s=float(time.time() - episode.get("t0", time.time())))
             # Your audio from just before the run of voice started goes in first, behind a marker; only then is
             # the interruption flagged, so a reader never sees the flag without the marker.
             kept = [it for n, it in list(self._history) if n >= episode["run"] - 2]
@@ -518,6 +522,7 @@ class AudioEngine:
             return
         episode["done"] = True
         log.info("barge-in rejected: %s", reason)
+        livelog.event("barge", confirmed=False, why=reason, after_s=float(time.time() - episode.get("t0", time.time())))
         debug.event("barge_rejected", reason=reason, episode_frames=episode["frames"])
         if reason.startswith("likely echo"):
             self._rejections.append(time.time())

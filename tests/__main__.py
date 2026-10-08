@@ -21,12 +21,13 @@ import sys
 import time
 
 CATEGORIES = {
-    "unit": ["test_cost", "test_intent", "test_claims", "test_speech", "test_generalization", "test_reliability",
+    "unit": ["test_isolation", "test_cost", "test_intent", "test_claims", "test_speech", "test_generalization", "test_reliability",
              "test_conversation_policy", "test_memory_lifecycle", "test_proactive", "test_learning", "test_location",
              "test_cognition"],
     "integration": ["test_actions", "test_apps", "test_media", "test_windows", "test_integrations", "test_phone",
                     "test_pending", "test_social", "test_fixes", "test_live_fixes", "test_reliability_fixes", "test_tasks",
-                    "test_greet", "test_zigbee", "test_smart_home", "test_voice_delivery", "test_turn_taking"],
+                    "test_greet", "test_zigbee", "test_smart_home", "test_voice_delivery", "test_turn_taking",
+                    "test_timer_correction", "test_diagnostics"],
     "audio": ["test_listening", "test_speaker", "test_latency"],
     "hardware": ["apps_live", "media_live", "windows_live", "actions_live"],
     "live_api": [("test_turn_taking", "--live-api"), "test_ring_ack", "cognition_live", "pending_live"],
@@ -82,8 +83,11 @@ def main(argv):
     for cat, name, args in suites:
         t0 = time.time()
         try:
+            env = {k: v for k, v in os.environ.items() if k != "JARVIS_LIVE_API"}  # (real keys: the live_api group only)
+            if cat == "live_api":
+                env["JARVIS_LIVE_API"] = "1"
             p = subprocess.run([sys.executable, "-u", "-m", f"tests.{name}", *args], cwd=ROOT, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace", timeout=600)
+                               text=True, encoding="utf-8", errors="replace", timeout=600, env=env)
             ok, out, code = p.returncode == 0, p.stdout + p.stderr, p.returncode
         except subprocess.TimeoutExpired:
             ok, out, code = False, "timed out after 600 s", None

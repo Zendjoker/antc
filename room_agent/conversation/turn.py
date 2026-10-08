@@ -4,7 +4,7 @@ import logging
 import time
 
 from room_agent import runtime as rt
-from room_agent import trace
+from room_agent import livelog, trace
 from room_agent import cognition
 from room_agent import social
 from room_agent.actions import pending
@@ -133,6 +133,8 @@ def _take_turn(history, text, raw=None, final=False, output=None):
                  ("first_sound", "first sound after you stopped")]
         log.info("timing: " + ", ".join(f"{label} {tm[k]:.2f}s" for k, label in names if k in tm)
                  + f", whole turn {time.time() - t0:.1f}s")
+    livelog.event("turn", **{k: float(v) for k, v in (tm or {}).items() if isinstance(v, (int, float))},
+                  whole_turn=float(time.time() - t0), interrupted=bool(rt.turn.interrupted))
     try:  # learning: what this turn did or corrected becomes evidence (never breaks the turn)
         from room_agent import learning
 

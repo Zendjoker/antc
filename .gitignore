@@ -35,3 +35,4 @@ memory.db.bak-*
 proactive_state.json
 actions_journal.json
 tests/report.json
+logs/
