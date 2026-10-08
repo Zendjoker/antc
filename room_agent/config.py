@@ -99,6 +99,7 @@ TIMER_MAX_S = 30 * 86400  # longest countdown timer
 LISTEN_WAIT_S = float(os.getenv("LISTEN_WAIT_S", "6"))  # after an unfinished sentence, how long to wait for the rest
 MISSING_WAIT_S = float(os.getenv("MISSING_WAIT_S", "4"))  # after a request that lacks a required detail, how long before asking for it
 # Lists, event reminders and nudges (tools/lists.py, triggers.py)
+TASKS_FILE = Path(os.getenv("TASKS_FILE", HERE / "tasks.json"))  # every request's task record + checkpoints (actions/tasks.py)
 LISTS_FILE = Path(os.getenv("LISTS_FILE", HERE / "lists.json"))  # to-do / shopping / any list, and notes
 EVENT_REMINDERS_FILE = Path(os.getenv("EVENT_REMINDERS_FILE", HERE / "event_reminders.json"))  # "when I get home"...
 DESK_AWAY_MIN = float(os.getenv("DESK_AWAY_MIN", "10"))  # this long without keyboard/mouse = away from the PC

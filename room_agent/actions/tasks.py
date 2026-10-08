@@ -1,0 +1,387 @@
+"""Tasks: a request's steps with dependencies, run by code, checkpointed to disk, resumable after a restart.
+
+A task is either
+    a plan        the model calls run_task once with explicit steps ({tool, args, depends_on, success}); code runs them
+    a turn        an ordinary request whose tools the model called one by one: recorded the same way afterwards
+so every request that did something has one traceable record (TASKS_FILE, the last MAX_TASKS): intent, plan, each step's
+state, tool result, verification evidence, retries, failures, outcome, time and model cost.
+
+Running a plan (each step through executor.execute: every permission, confirmation and verification rule still applies):
+    - in order; a step whose dependency didn't complete is BLOCKED (never run on a broken foundation); independent steps
+      still run (partial recovery)
+    - a step has a timeout; a state-changing step that times out is UNKNOWN (it may have happened) and is never retried
+    - retries (at most MAX_RETRIES, with backoff) only where it's safe: a read that hit a temporary error, or a change the
+      executor proved did NOT happen (its read-back showed no change)
+    - a step that needs a yes pauses the task (WAITING); "resume" continues after the yes
+    - the emergency stop / an interruption: no further step starts (they're CANCELED)
+    - checkpointed before and after every step: after a crash, a step that was RUNNING becomes UNKNOWN (never re-run
+      blindly) and the task INTERRUPTED; resuming re-runs only steps that never started, and a sensitive step needs a
+      fresh yes (confirmations aren't saved, and the resume words don't count as asking for it)
+
+Step states: PENDING RUNNING COMPLETED UNVERIFIED UNKNOWN FAILED BLOCKED WAITING CANCELED
+Task states: RUNNING COMPLETED UNVERIFIED PARTIAL FAILED UNKNOWN WAITING CANCELED INTERRUPTED
+"""
+
+import json
+import logging
+import threading
+import time
+import uuid
+
+from room_agent import config
+from room_agent import runtime as rt
+
+log = logging.getLogger("room-agent")
+MAX_TASKS = 50
+MAX_STEPS = 10
+MAX_RETRIES = 2
+BACKOFF_S = (0.5, 1.5)
+DEFAULT_TIMEOUT_S = 30.0
+SLOW_TOOLS = {"research_web": 90.0, "play_music": 30.0, "open_url": 20.0, "browser_search": 20.0}
+TRANSIENT = ("didn't answer in time", "couldn't connect", "timed out", "timeout", "network", "temporarily", "try again",
+             "http_5", "the site answered 5", "is down")
+DONE = ("COMPLETED", "UNVERIFIED")  # (what a dependent step may build on)
+_lock = threading.Lock()
+_tasks = {}           # id -> task dict (the in-memory copy; TASKS_FILE is the checkpoint)
+_announced = set()    # interrupted tasks already mentioned to the model
+
+
+# ---------------------------------------------------------------- the record
+def _redact(text, limit=300):
+    """Secrets / numbers / emails out (livelog.redact), and the user's home folder shown as ~ (it holds their name)."""
+    import os
+
+    text = str(text or "")
+    home = os.path.expanduser("~")
+    if home and len(home) > 3:
+        text = text.replace(home, "~").replace(home.replace("\\", "/"), "~")
+    try:
+        from room_agent import livelog
+
+        return livelog.redact(text, limit)
+    except Exception:
+        return text[:limit]
+
+
+def _private(tool):
+    from room_agent.actions import core
+
+    cap = core.get(tool)
+    return bool(cap and cap.private)
+
+
+def _shown_args(tool, args):
+    """What the record keeps of a step's arguments: names only for private tools, redacted values otherwise."""
+    if _private(tool):
+        return sorted(args or {})
+    return {k: _redact(v, 160) if isinstance(v, str) else v for k, v in (args or {}).items() if k != "confidence"}
+
+
+def new(goal, steps, kind="plan"):
+    t = {"id": uuid.uuid4().hex[:8], "kind": kind, "goal": _redact(goal, 200), "intent": _redact(rt.turn_text or "", 300),
+         "created": time.time(), "updated": time.time(), "state": "RUNNING", "turn": rt.turn_no, "events": [],
+         "cost_usd": 0.0, "seconds": 0.0,
+         "steps": [{"n": i + 1, "tool": s["tool"], "args": dict(s.get("args") or {}), "shown": _shown_args(s["tool"], s.get("args")),
+                    "depends_on": [int(d) for d in s.get("depends_on") or []], "success": _redact(s.get("success", ""), 200),
+                    "timeout_s": float(s.get("timeout_s") or SLOW_TOOLS.get(s["tool"], DEFAULT_TIMEOUT_S)),
+                    "state": "PENDING", "attempts": 0, "result": "", "evidence": "", "started": 0.0, "ended": 0.0}
+                   for i, s in enumerate(steps)]}
+    with _lock:
+        _tasks[t["id"]] = t
+    _save()
+    return t
+
+
+def event(t, what):
+    t["events"].append({"at": round(time.time(), 3), "what": _redact(what, 240)})
+    t["updated"] = time.time()
+
+
+def _save():
+    """Checkpoint: every task's state, without the full arguments of private steps (atomic write)."""
+    with _lock:
+        items = sorted(_tasks.values(), key=lambda t: t["created"])[-MAX_TASKS:]
+        data = [{**t, "steps": [{k: v for k, v in s.items() if k != "args" or not _private(s["tool"])} for s in t["steps"]]}
+                for t in items]
+    try:
+        tmp = config.TASKS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1, default=str), encoding="utf-8")
+        tmp.replace(config.TASKS_FILE)
+    except OSError as e:
+        log.warning("tasks: checkpoint not written (%s)", e)
+
+
+def load():
+    """At startup: read the checkpoints; a step that was RUNNING when Jarvis stopped is UNKNOWN, its task INTERRUPTED."""
+    try:
+        data = json.loads(config.TASKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    cut = []
+    with _lock:
+        for t in data if isinstance(data, list) else []:
+            if t.get("state") in ("RUNNING",):
+                for s in t["steps"]:
+                    if s["state"] == "RUNNING":
+                        s.update(state="UNKNOWN", result="interrupted by a restart: whether it happened isn't known")
+                t["state"] = "INTERRUPTED"
+                t["events"].append({"at": time.time(), "what": "Jarvis stopped while this task was running"})
+                cut.append(t)
+            _tasks[t["id"]] = t
+    if cut:
+        _save()
+        log.warning("tasks: %d task(s) were interrupted by the last shutdown: %s", len(cut), ", ".join(t["goal"][:50] for t in cut))
+    return cut
+
+
+def get(task_id=None):
+    with _lock:
+        if task_id:
+            return _tasks.get(task_id)
+        live = [t for t in _tasks.values() if t["kind"] == "plan"]
+    return max(live, key=lambda t: t["updated"]) if live else None
+
+
+def recent(n=10):
+    with _lock:
+        return sorted(_tasks.values(), key=lambda t: t["updated"])[-n:]
+
+
+# ---------------------------------------------------------------- running a plan
+def _cancelled():
+    from room_agent import cancel
+
+    return cancel.requested()
+
+
+def _run_with_timeout(plan, tool, args, timeout):
+    """-> (ActionResult or None if it timed out)."""
+    out = {}
+    turn = rt.turn
+
+    def go():
+        try:
+            out["r"] = plan.run(tool, args)
+        except Exception as e:  # noqa: BLE001 (reported as a failure)
+            from room_agent.actions.executor import ActionResult
+
+            out["r"] = ActionResult(False, tool, args, f"FAILED: {tool} hit an error ({e.__class__.__name__}).")
+    th = threading.Thread(target=go, name=f"task-step-{tool}", daemon=True)
+    th.start()
+    deadline = time.time() + timeout
+    while th.is_alive() and time.time() < deadline:
+        th.join(0.1)
+        if _cancelled():  # (the step itself checks too; give it a moment to stop cleanly)
+            th.join(2.0)
+            break
+    if rt.turn is not turn:
+        rt.turn = turn
+    return out.get("r")
+
+
+def _retry_safe(cap, result):
+    if result.outcome == "unknown":
+        return False  # (it may have happened)
+    msg = result.message.lower()
+    if not cap.changes_state:
+        return any(w in msg for w in TRANSIENT)
+    return result.error_code == "not_as_expected" or "checking afterwards it didn't actually happen" in msg
+
+
+def _step_state(result):
+    return {"verified": "COMPLETED", "unverified": "UNVERIFIED", "unknown": "UNKNOWN", "waiting": "WAITING",
+            "canceled": "CANCELED"}.get(result.outcome, "FAILED")
+
+
+def run(t, only_pending=False):
+    """Run (or continue) a plan's steps. -> the task, its state final unless WAITING."""
+    from room_agent.actions import core
+    from room_agent.actions.executor import Plan
+    from room_agent.llm.budget import budget
+
+    t0, cost0 = time.time(), budget.total()
+    t["state"] = "RUNNING"
+    plan = rt.current_plan if isinstance(rt.current_plan, Plan) else Plan()
+    steps = {s["n"]: s for s in t["steps"]}
+    for s in t["steps"]:
+        if s["state"] in DONE or s["state"] in ("UNKNOWN", "FAILED", "CANCELED") and only_pending:
+            continue
+        if s["state"] not in ("PENDING", "BLOCKED", "WAITING", "CANCELED"):
+            continue
+        if _cancelled():
+            for rest in t["steps"]:
+                if rest["state"] in ("PENDING", "BLOCKED", "WAITING"):
+                    rest.update(state="CANCELED", result="not run: stopped")
+            event(t, "stopped: the remaining steps were not run")
+            break
+        bad = [d for d in s["depends_on"] if steps.get(d, {}).get("state") not in DONE]
+        if bad:
+            s.update(state="BLOCKED", result=f"not run: step {', '.join(map(str, bad))} didn't complete")
+            event(t, f"step {s['n']} ({s['tool']}) blocked by step {bad}")
+            _save()
+            continue
+        cap = core.get(s["tool"])
+        if cap is None:
+            s.update(state="FAILED", result=f"there's no tool called {s['tool']}")
+            continue
+        while True:
+            s.update(state="RUNNING", started=time.time(), attempts=s["attempts"] + 1)
+            _save()  # (a crash from here on leaves this step UNKNOWN, never re-run blindly)
+            result = _run_with_timeout(plan, s["tool"], s["args"], s["timeout_s"])
+            s["ended"] = time.time()
+            if result is None:
+                if cap.changes_state:
+                    s.update(state="UNKNOWN", result=f"no answer within {s['timeout_s']:.0f}s: it may still have happened")
+                else:
+                    s.update(state="FAILED", result=f"no answer within {s['timeout_s']:.0f}s")
+                event(t, f"step {s['n']} ({s['tool']}) timed out after {s['timeout_s']:.0f}s")
+                break
+            s.update(state=_step_state(result), result=_redact(result.message, 300), evidence=result.evidence or "")
+            if s["state"] == "FAILED" and s["attempts"] <= MAX_RETRIES and _retry_safe(cap, result) and not _cancelled():
+                wait = BACKOFF_S[min(s["attempts"] - 1, len(BACKOFF_S) - 1)]
+                event(t, f"step {s['n']} ({s['tool']}) failed ({result.message[:80]}); retry {s['attempts']} in {wait}s")
+                if plan.steps and plan.steps[-1] is result:
+                    plan.steps.pop()  # (the retry replaces this attempt: it isn't "an earlier step that failed")
+                deadline = time.time() + wait
+                while time.time() < deadline and not _cancelled():
+                    time.sleep(0.05)
+                continue
+            break
+        if s["state"] == "FAILED":
+            event(t, f"step {s['n']} ({s['tool']}) failed: {s['result'][:120]}")
+        _save()
+        if s["state"] == "WAITING":
+            event(t, f"step {s['n']} ({s['tool']}) is waiting for their answer: the task pauses here")
+            break
+        if s["state"] == "CANCELED":
+            for rest in t["steps"]:
+                if rest["state"] == "PENDING":
+                    rest.update(state="CANCELED", result="not run: stopped")
+            break
+    t["seconds"] = round(t["seconds"] + time.time() - t0, 2)
+    t["cost_usd"] = round(t["cost_usd"] + max(0.0, budget.total() - cost0), 5)
+    t["state"] = final_state(t)
+    t["updated"] = time.time()
+    _save()
+    _observe(t)
+    return t
+
+
+def final_state(t):
+    states = [s["state"] for s in t["steps"]]
+    if "WAITING" in states:
+        return "WAITING"
+    if "RUNNING" in states:
+        return "RUNNING"
+    if "CANCELED" in states:
+        return "CANCELED"
+    ok = [x for x in states if x in DONE]
+    if len(ok) == len(states):
+        return "COMPLETED" if all(x == "COMPLETED" for x in states) else "UNVERIFIED"
+    if "UNKNOWN" in states and not any(x in ("FAILED", "BLOCKED") for x in states):
+        return "UNKNOWN"
+    return "PARTIAL" if ok else "FAILED"
+
+
+def resume(t):
+    """Continue an INTERRUPTED / WAITING / PARTIAL task: only steps that never ran (or waited for a yes, or were blocked
+    by something that has since completed). UNKNOWN and FAILED steps are left for them to decide."""
+    if t["state"] not in ("INTERRUPTED", "WAITING", "PARTIAL", "CANCELED"):
+        return t
+    event(t, "resumed")
+    for s in t["steps"]:
+        if s["state"] in ("BLOCKED", "CANCELED"):
+            s["state"] = "PENDING"
+    return run(t, only_pending=True)
+
+
+def cancel_task(t):
+    for s in t["steps"]:
+        if s["state"] in ("PENDING", "BLOCKED", "WAITING"):
+            s.update(state="CANCELED", result="cancelled by them")
+    t["state"] = final_state(t) if t["state"] != "RUNNING" else "CANCELED"
+    event(t, "cancelled by them")
+    t["updated"] = time.time()
+    _save()
+    return t
+
+
+# ---------------------------------------------------------------- ordinary turns get a record too
+def record_turn(plan, seconds, cost):
+    """After a request whose tools the model called one by one: the same kind of record (no record if nothing ran)."""
+    steps = [s for s in getattr(plan, "steps", []) or [] if s.capability != "run_task"]
+    if not steps:
+        return None
+    t = new(rt.turn_text or "", [{"tool": s.capability, "args": s.parameters} for s in steps], kind="turn")
+    for rec, r in zip(t["steps"], steps):
+        rec.update(state=_step_state(r), result=_redact(r.message, 300), evidence=r.evidence or "", attempts=1,
+                   started=r.at, ended=r.at)
+    t.update(seconds=round(seconds, 2), cost_usd=round(cost, 5), state=final_state(t), updated=time.time())
+    _save()
+    _observe(t)
+    return t
+
+
+def _observe(t):
+    try:
+        from room_agent import livelog
+
+        livelog.event("task", id=t["id"], kind_=t["kind"], state=t["state"], steps=len(t["steps"]),
+                      done=sum(s["state"] in DONE for s in t["steps"]), seconds=float(t["seconds"]), cost_usd=float(t["cost_usd"]),
+                      outcomes=[f"{s['tool']}:{s['state']}" for s in t["steps"]])
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- what the model is told
+def step_results(task_id=None):
+    """[(tool, result)] of a plan task's steps that ran: for the claim check (what each step really did)."""
+    t = get(task_id)
+    if t is None:
+        return []
+    return [(s["tool"], s["result"]) for s in t["steps"] if s["result"] and s["state"] not in ("PENDING", "BLOCKED")]
+
+
+def report(t):
+    lines = [f"Task {t['id']} ({t['goal'][:80]}): {t['state']}."]
+    for s in t["steps"]:
+        lines.append(f"  {s['n']}. {s['tool']}: {s['state']}" + (f" - {s['result'][:160]}" if s["result"] else "")
+                     + (f" [checked: {s['evidence']}]" if s["evidence"] and s["state"] == "COMPLETED" else ""))
+    rules = {"COMPLETED": "Everything was done and checked.",
+             "UNVERIFIED": "Everything ran; some steps couldn't be checked: say so for those.",
+             "PARTIAL": "Some steps worked, some didn't: say exactly which, don't claim the rest.",
+             "FAILED": "It didn't work: say so plainly.",
+             "UNKNOWN": "Some steps may or may not have happened: say that, don't claim them, don't redo them blindly.",
+             "WAITING": "It's paused for their answer to the question in the waiting step: ask it; if they agree, call "
+                        "resume_task.",
+             "CANCELED": "It was stopped: say what ran before it stopped."}
+    lines.append(rules.get(t["state"], ""))
+    prefix = "OK" if t["state"] in ("COMPLETED", "UNVERIFIED") else "NEEDS_CONFIRMATION" if t["state"] == "WAITING" else \
+        "UNKNOWN" if t["state"] == "UNKNOWN" else "FAILED"
+    return f"{prefix}: " + "\n".join(lines)
+
+
+def context_lines(user_text):
+    """Once: a task cut off by a restart, or waiting for an answer."""
+    out = []
+    for t in recent(MAX_TASKS):
+        if t["kind"] != "plan":
+            continue
+        if t["state"] == "INTERRUPTED" and t["id"] not in _announced:
+            _announced.add(t["id"])
+            unknown = [s["tool"] for s in t["steps"] if s["state"] == "UNKNOWN"]
+            out.append(f"- task {t['id']} (\"{t['goal'][:70]}\") was INTERRUPTED by a restart"
+                       + (f"; these steps may or may not have happened: {', '.join(unknown)}" if unknown else "")
+                       + ". Tell them once; offer to resume (only steps that never started run again; anything sensitive "
+                         "asks again).")
+        elif t["state"] == "WAITING" and time.time() - t["updated"] < 1800:
+            out.append(f"- task {t['id']} (\"{t['goal'][:70]}\") is paused waiting for their yes/no; if they agree, call "
+                       "resume_task.")
+    return out
+
+
+def snapshot(n=6):
+    """For the dashboard: the latest tasks, short."""
+    return [{"id": t["id"], "kind": t["kind"], "goal": t["goal"][:90], "state": t["state"], "seconds": t["seconds"],
+             "cost_usd": t["cost_usd"], "steps": [{"tool": s["tool"], "state": s["state"]} for s in t["steps"]],
+             "updated": t["updated"]} for t in reversed(recent(n))]

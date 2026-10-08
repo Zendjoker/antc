@@ -146,6 +146,9 @@ def main():
     from room_agent.actions import journal
 
     journal.load()  # (actions cut off by the last shutdown: reported once, never claimed)
+    from room_agent.actions import tasks
+
+    tasks.load()  # (multi-step tasks cut off by the last shutdown: their running step is UNKNOWN, resumable on a yes)
     if config.PHONE_MODE:
         from room_agent.phone import server
 

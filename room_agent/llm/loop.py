@@ -147,6 +147,11 @@ def run_model(history, make_call):
                 log.info("tool result: %s", f"{out.split(':')[0]} ({len(out)} chars of personal data, not logged)"
                          if private else out[:160])
                 guard.tool_result(u.name, out)
+                if u.name in ("run_task", "resume_task"):  # (what each step really did backs what's said about it)
+                    from room_agent.actions import tasks
+
+                    for step_tool, step_out in tasks.step_results():
+                        guard.tool_result(step_tool, step_out)
                 results.append({"type": "tool_result", "tool_use_id": u.id, "content": out})
             history.append({"role": "user", "content": results})
             release_checked(guard, spoken)  # e.g. "Timer's set." said before the tool ran, now confirmed

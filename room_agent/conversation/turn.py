@@ -135,6 +135,16 @@ def _take_turn(history, text, raw=None, final=False, output=None):
                  + f", whole turn {time.time() - t0:.1f}s")
     livelog.event("turn", **{k: float(v) for k, v in (tm or {}).items() if isinstance(v, (int, float))},
                   whole_turn=float(time.time() - t0), interrupted=bool(rt.turn.interrupted))
+    try:  # every request that did something gets a task record (a plan run by run_task records itself)
+        from room_agent.actions import tasks
+        from room_agent.llm.budget import budget
+
+        plan = rt.current_plan
+        names = {s.capability for s in getattr(plan, "steps", []) or []}
+        if plan is not None and not names & {"run_task", "resume_task", "cancel_task"}:
+            tasks.record_turn(plan, time.time() - t0, sum(budget.turn.values()))
+    except Exception as e:
+        log.debug("task record not written: %s", e)
     try:  # learning: what this turn did or corrected becomes evidence (never breaks the turn)
         from room_agent import learning
 

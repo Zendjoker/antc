@@ -161,6 +161,15 @@ def _lists():
         return None
 
 
+def _tasks():
+    try:
+        from room_agent.actions import tasks
+
+        return tasks.snapshot()
+    except Exception:
+        return []
+
+
 def _browser():
     try:
         from room_agent.computer.browsers import KNOWN, host
@@ -214,6 +223,7 @@ def snapshot():
         "home": _home(),
         "research": _research(),
         "lists": _lists(),
+        "tasks": _tasks(),
         "browser": _browser(),
     }
 
