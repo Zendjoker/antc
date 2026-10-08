@@ -79,7 +79,9 @@ def fixed_prompt(tool_names=None, tools=None):
         signal = [STYLE_RULES.strip()] if STYLE_RULES else []
     else:
         signal = [f"{SIGNAL_RULES}{STYLE_RULES}"]
-    parts = [persona(), "\n".join(CONVERSATION + signal + core.rules(tool_names)), TRUTH]
+    # The parts that never change come first and the ones that depend on this request (which tools, whether an answer
+    # is due) last: the provider reuses (caches) the identical opening of the prompt, so it should be as long as possible.
+    parts = [persona(), "\n".join(CONVERSATION), TRUTH, "\n".join(signal + core.rules(tool_names))]
     tools = active_tools() if tools is None else tools
     return "\n".join(parts) + ("\n\nTOOL CONTRACTS (authoritative; never claim stricter limits; referred to as "
                                "tool_contracts): " + contracts(tools))

@@ -17,6 +17,7 @@ from room_agent.audio.speaker import say
 from room_agent.llm.guard import (correction_note, interrupted_now, new_guard, release_checked, speak_checked,
                                   stop_for_interruption)
 from room_agent.prompt import system_parts
+from room_agent.speech import chunking
 from room_agent.actions import core, pending
 from room_agent.actions.executor import Plan
 from room_agent.tools.registry import active_tools, run_tool
@@ -93,11 +94,9 @@ def run_model(history, make_call):
                     cut = True
                     break  # leaving the block closes the stream: no more generation, no tools
                 buf += text
-                parts = re.split(r"(?<=[.!?])\s+", buf)
-                for sentence in parts[:-1]:
-                    if sentence.strip():
-                        speak_checked(guard, sentence.strip(), spoken)
-                buf = parts[-1]
+                ready, buf = chunking.ready(buf, first=not spoken)  # (natural boundaries; a long first sentence at a clause)
+                for sentence in ready:
+                    speak_checked(guard, sentence, spoken)
             reply = None if cut else call.finish()
             metrics.last_call_latency(time.time() - t_call)
         if cut or interrupted_now():
