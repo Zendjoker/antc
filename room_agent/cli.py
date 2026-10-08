@@ -122,6 +122,9 @@ def main():
     from room_agent.conversation import greet
 
     greet.start()  # (a friendly hello when you walk in: conversation/greet.py)
+    from room_agent.actions import journal
+
+    journal.load()  # (actions cut off by the last shutdown: reported once, never claimed)
     if config.PHONE_MODE:
         from room_agent.phone import server
 

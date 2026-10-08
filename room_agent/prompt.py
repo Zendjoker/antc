@@ -176,6 +176,9 @@ def _register_core_context():
     from room_agent.conversation import policy
 
     policy.register()
+    from room_agent.actions import journal
+
+    journal.register()
     core.register_context(_environment, order=60)
 
 

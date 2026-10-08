@@ -184,7 +184,9 @@ class ClaimGuard:
     def _done_confirmed(self):
         """"Done" / "all set" only when every action tried this turn worked (one failed means it isn't all done)."""
         tried = self.tools_called & ACTION_TOOLS
-        return bool(tried) and tried <= self.ok_tools
+        # (by tool name: "set_light" can have worked once and failed once in the same turn; a failure that nothing
+        # fixed afterwards means it isn't all done)
+        return bool(tried) and tried <= self.ok_tools and not (self.failed_actions & tried)
 
     def unverified(self, sentence):
         """The kinds of claims in this sentence that nothing confirms. [] = fine to say."""

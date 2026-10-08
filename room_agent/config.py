@@ -161,6 +161,7 @@ ZIGBEE2MQTT_DIR = os.getenv("ZIGBEE2MQTT_DIR", "").strip()  # folder with start.
 ZIGBEE_EVENTS_FILE = Path(os.getenv("ZIGBEE_EVENTS_FILE", HERE / "zigbee_events.json"))  # door/bed events, kept 48 h
 MEMORY_SENSITIVE = os.getenv("MEMORY_SENSITIVE", "explicit").strip().lower()  # explicit: health, money, IDs... only
                                                                              # when you ask; allow: learned like the rest
+ACTIONS_JOURNAL_FILE = Path(os.getenv("ACTIONS_JOURNAL_FILE", HERE / "actions_journal.json"))  # action lifecycles
 QUIET_HOURS = os.getenv("QUIET_HOURS", "").strip()  # e.g. 23-7: nothing proactive is spoken then (alarms still ring)
 PROACTIVE_STATE_FILE = Path(os.getenv("PROACTIVE_STATE_FILE", HERE / "proactive_state.json"))  # cooldowns across restarts
 # Greeting you when you come home (conversation/greet.py): the door opens after the room was quiet this long

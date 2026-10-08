@@ -149,6 +149,9 @@ def _remember_state(cap, result, subject):
 
 
 def _finish(action, result):
+    from room_agent.actions import journal
+
+    journal.finish(result)  # (the lifecycle's last state: COMPLETED only when verified)
     trace.note("ACTION", action)
     trace.note("RESULT", "verified" if result.success else (_prefix(result.message) or "failed").lower())
     return result
@@ -175,6 +178,9 @@ def execute(name, args):
     trace.note("INTENT", name.upper() + (f" (confidence {args['confidence']})" if "confidence" in args else ""))
     trace.note("PARAMS", ", ".join(f"{k}={v!r}" for k, v in args.items() if k != "confidence") or "none")
 
+    from room_agent.actions import journal
+
+    journal.requested(name, args, private=getattr(core.get(name), "private", False))  # REQUESTED
     cap = core.get(name)  # 1. resolve
     if cap is None:
         return _finish("REFUSED", _result(name, args, f"UNAVAILABLE: there's no tool called {name}."))
@@ -232,6 +238,7 @@ def execute(name, args):
                                                        f"easily ({what}), so ask one short yes/no question first; if they "
                                                        "agree, call it again."))
 
+    journal.state(journal.PLANNED)
     for hook in BEFORE_HOOKS:
         try:
             clean = hook(cap, clean) or clean
@@ -261,6 +268,7 @@ def execute(name, args):
     if already:  # 5a. it's already so: nothing to do (no action just in case)
         out = f"OK: nothing needed: it's already so ({_fmt(expected)})."
     else:
+        journal.state(journal.EXECUTING)
         try:  # 5. execute (the existing implementation)
             out = str(cap.execute(clean))
         except Exception as e:
@@ -277,6 +285,7 @@ def execute(name, args):
         result.state_before = result.state_after = before
         result.verified, result.expected, result.observed = True, expected, {k: _get(before, k) for k in expected}
     elif result.success and cap.changes_state:  # 6. verify independently
+        journal.state(journal.VERIFYING)
         result.state_before, result.state_after = before, _observe(cap, clean, before)
         result.verified = True
         if cap.verify and before is not None and result.state_after is not None:
@@ -368,7 +377,12 @@ class Plan:
         cap = core.get(name)
         args = args if isinstance(args, dict) else {}
         blocker = self._blocked_by(cap, args)
-        if blocker:
+        twice = self._already_done(cap, name, args)
+        if twice is not None:  # (a retry after a timeout / a later round asking again: done once, not twice)
+            result = ActionResult(True, name, args, f"OK: already done earlier in this request ({twice.message[4:80]}); "
+                                  "not run a second time.", verified=True, subject=twice.subject, kind="duplicate")
+            log.info("plan: %s not repeated (already completed in round %s)", name, getattr(twice, "round", 0))
+        elif blocker:
             result = ActionResult(False, name, args, f"FAILED: not done, because {blocker.capability} for "
                                   f"{blocker.subject} didn't work first.", error="an earlier step failed",
                                   error_code="dependency_failed", recoverable=True, subject=blocker.subject)
@@ -380,6 +394,18 @@ class Plan:
         result.round = self.round
         self.steps.append(result)
         return result
+
+    ADDITIVE = {"timer.set", "alarm.set", "email.sent", "email.drafted", "calendar.created", "app.opened"}
+
+    def _already_done(self, cap, name, args):
+        """An action that adds something (a timer, an email, an event) asked for again with the same arguments in a LATER
+        round of the same request was already done: running it again would make two. (Several in the same round are
+        deliberate, e.g. two timers.)"""
+        if not cap or cap.event not in self.ADDITIVE:
+            return None
+        key = {k: v for k, v in args.items() if k != "confidence"}
+        return next((s for s in self.steps if s.success and s.capability == name and getattr(s, "round", 0) < self.round
+                     and {k: v for k, v in (s.parameters or {}).items() if k != "confidence"} == key), None)
 
     def _blocked_by(self, cap, args):
         """A step on something whose earlier step failed IN THE SAME ROUND isn't run ("open X and move it": no move if X
