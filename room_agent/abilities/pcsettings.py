@@ -79,12 +79,14 @@ def _undo_radio(which):
 
 tool("set_bluetooth", "Turn Bluetooth on or off.", params({"on": {"type": "boolean"}}, ["on"]), _radio("bluetooth"),
      group="pc", claim="pc_settings", observe=_radio_state, undo=_undo_radio("bluetooth"), undo_if=lambda b, af: b != af,
+     intent=re.compile(r"blue ?tooth", re.I),
      reflex=[(r"(?:turn|switch)\s+(?P<on>on|off)\s+(?:the\s+)?bluetooth", {}),
              (r"(?:turn|switch)\s+(?:the\s+)?bluetooth\s+(?P<on>on|off)", {})],
      reflex_say=lambda r: "Done." if r.success else None)
 tool("set_wifi", "Turn Wi-Fi on or off. Turning it off also cuts Jarvis's internet (cloud voice and AI), so only when "
      "they clearly ask.", params({"on": {"type": "boolean"}, "confidence": CONFIDENCE}, ["on"]), _radio("wifi"),
      group="pc", claim="pc_settings", observe=_radio_state, undo=_undo_radio("wifi"), undo_if=lambda b, af: b != af,
+     intent=re.compile(r"wi-?fi|wireless|internet|network", re.I),
      risk=Risk.CONFIRM, min_confidence=0.85, describe=lambda a: f"turn Wi-Fi {'on' if a.get('on') else 'off'}")
 tool("lock_pc", "Lock the PC now (Windows lock screen).", params({"confidence": CONFIDENCE}), lambda a: _s().lock(),
      group="pc", claim="pc_settings", risk=Risk.CONFIRM, min_confidence=0.8,

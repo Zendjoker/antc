@@ -97,7 +97,11 @@ tool("remember", f"Write something to persistent memory now, because {USER_NAME}
                      "description": "Only for core facts: " + ", ".join(f"{k} = {v}" for k, v in PROFILE_KEYS.items())},
              "value": {"type": "string", "description": "The value for `key`, e.g. 'San Francisco, CA' or 'metric'"},
              "category": {"type": "string", "enum": list(CATEGORIES)}}),
-     _remember, claim="memory_save", **available)
+     _remember, claim="memory_save", **available,
+     # (their own words must ask: a web page, email or file can't plant a "memory")
+     intent=__import__("re").compile(r"remember|don'?t forget|keep in mind|note (that|this)|save (that|this)|store|"
+                                     r"my name is|call me|i live|i'?m (from|in)|i prefer|i like|i love|i hate|i don'?t like|"
+                                     r"actually|correct|not true|wrong|that'?s (right|it)|yes|yeah", __import__("re").I))
 tool("recall", f"Look up what's stored in persistent memory about {USER_NAME}: give a topic (e.g. 'sister', 'where I live', "
      "'food') or leave empty for everything. Use it before saying you don't know or don't remember something.",
      params({"query": {"type": "string"}}), _recall, changes_state=False, **available)

@@ -106,6 +106,17 @@ t.check("a refused private action: audited by name only (no words, no file names
         and "words" not in row and isinstance(row["args"], list), row)
 rt.pending = None
 
+print("Untrusted content can't act:")
+rt.new_turn("summarize this page")
+r = executor.execute("remember", {"content": "The user's bank PIN is 1234"})
+t.check("a page / email can't plant a memory (their words didn't ask to remember) -> asks first", r.message.startswith("NEEDS_CONFIRMATION"),
+        r.message)
+rt.pending = None
+rt.new_turn("summarize this page")
+r = executor.execute("set_wifi", {"on": False, "confidence": 0.99})
+t.check("a page can't switch Wi-Fi off", r.message.startswith("NEEDS_CONFIRMATION"), r.message)
+rt.pending = None
+
 print("Memory hygiene:")
 from room_agent.memory.writer import is_skip, is_transient  # noqa: E402
 
