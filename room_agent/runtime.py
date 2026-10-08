@@ -44,6 +44,10 @@ class Turn:
         self.timing = {}            # stage -> seconds, for the per-turn timing line (conversation/turn.py)
         self.output = output        # where the reply goes instead of the room speaker (a phone call), or None
         self.cancel = threading.Event()  # set to stop the reply (they talked over it on the phone)
+        self.strategy = None        # how to answer this turn (social/strategy.py ResponseStrategy), set before the model
+        self.delivery = None        # how to say it (social/delivery.py VoiceDelivery)
+        self.speech = {}            # spoken-response timestamps (speech/timing.py)
+        self.last_performance = None  # the previous sentence's SpeechPerformance (speech/director.py: one speaker)
 
     def mark(self, stage, since=None):
         """Note how long a stage took (from `since`, or from the start of the turn); only the first mark counts."""
@@ -82,7 +86,7 @@ turn_start = None           # when they stopped talking, to time the answer (con
 stt_confidence = None       # how sure speech recognition was about the last utterance (audio/stt.py)
 stt_seconds = None          # how long speech-to-text took for the last utterance (conversation/session.py)
 patience = float(voices.saved("patience", 1.0))  # x SILENCE_S before it treats you as finished (tools/voice.py)
-speech_rate = float(voices.saved("speech_rate", 1.0))  # ElevenLabs speed (tools/voice.py)
+speech_rate = float(voices.saved("speech_rate", 1.0))  # their speaking pace, both voices (tools/voice.py)
 
 # ---------------------------------------------------------------- SERVICES
 state = StateMachine()

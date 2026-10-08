@@ -6,15 +6,18 @@ switching models can never weaken the truth rules."""
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
+from room_agent import cognition
 from room_agent import runtime as rt
+from room_agent.cognition import metrics
 from room_agent.audio.fillers import LOOP, filler
 from room_agent.audio.speaker import say
 from room_agent.llm.guard import (correction_note, interrupted_now, new_guard, release_checked, speak_checked,
                                   stop_for_interruption)
 from room_agent.prompt import system_parts
-from room_agent.actions import core
+from room_agent.actions import core, pending
 from room_agent.actions.executor import Plan
 from room_agent.tools.registry import active_tools, run_tool
 from room_agent.tools.validate import current_pending, missing_required
@@ -46,8 +49,10 @@ def run_model(history, make_call):
     guard, corrected = new_guard(), False
     plan = Plan()  # this turn's actions, in order: a step on something that failed earlier isn't run
     rt.current_plan = plan
+    stopped = False  # (the step limit was reached once: the next round must be words, not tools)
     while True:
         buf, spoken, cut = "", [], False
+        t_call = time.time()
         with make_call(history, fixed, changing, tools) as call:
             for text in call.deltas():
                 rt.turn.mark("first_words")
@@ -61,6 +66,7 @@ def run_model(history, make_call):
                         speak_checked(guard, sentence.strip(), spoken)
                 buf = parts[-1]
             reply = None if cut else call.finish()
+            metrics.last_call_latency(time.time() - t_call)
         if cut or interrupted_now():
             return stop_for_interruption(history, spoken)
         if buf.strip():
@@ -70,7 +76,8 @@ def run_model(history, make_call):
             history.append({"role": "assistant", "content": reply.content})
             uses = reply.uses
             if (not rt.must_answer and not spoken and not current_pending()
-                    and any(missing_required(u.name, u.input) for u in uses)):
+                    and any(missing_required(u.name, u.input)
+                            and not pending.collectable(u.name, missing_required(u.name, u.input)) for u in uses)):
                 rt.turn_signal, rt.control["hold"] = "listen", True  # still forming the request: wait before asking
                 return
             if any(u.name == "go_quiet" for u in uses):  # handled by code right now: no filler, no 2nd model call
@@ -81,6 +88,15 @@ def run_model(history, make_call):
                 if rt.control.get("request") == "quiet":
                     return
                 continue  # not clear enough to go quiet: the model asks the user to confirm
+            gate = cognition.round_gate(plan, len(uses))  # (limits: rounds, calls, time; REPLAN after a failure)
+            if gate:
+                history.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": u.id, "content": gate}
+                                                            for u in uses]})
+                if stopped:  # it asked for tools again after being told to stop: end the turn here, honestly
+                    say(rt.phrases.pick("unsure"))
+                    return
+                stopped = True
+                continue
             if not spoken:
                 filler("wait")
             if rt.tts_enabled and not rt.turn.output:

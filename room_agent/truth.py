@@ -73,6 +73,9 @@ CLAIMS = [
     ("memory_empty", r"\b(don'?t|do not)\s+(have|know)\s+(anything|much|any(thing)? (saved|stored))\b.{0,30}\b(about you|on you|yet|saved|stored)\b"
                      r"|\bnothing (saved|stored)\b|\bno (memories|saved memories)\b|\bmy memory is empty\b"),
     ("no_location", r"\b(don'?t|do not)\s+(know|have)\s+(where you live|your (location|city|address|home))\b"),
+    # "it's running / it's ready / works now": only checked when an action failed this turn and nothing made it good
+    ("outcome", r"\b(?:it|that|this|everything|the \w+|your \w+)(?:'s| is| are)\s+(?:now\s+)?(?:up and running|running|up|working|"
+                r"ready|fixed|started|set up|good to go|done)\b|\bworks now\b|\b(?:fixed|started|got) it\b(?! to)|^(?:fixed|started)\b"),
 ]
 CLAIMS = [(kind, re.compile(rx, re.I)) for kind, rx in CLAIMS]
 # nothing can confirm these (no tool does them), so such a claim is always false; "done" is checked specially
@@ -95,6 +98,19 @@ def _claim_part(sentence):
     return s[:cut].strip() if cut > 0 else ""
 
 
+OFFER = re.compile(r"\b(can|could|would|might|if|want me to|should i|shall i|happy to|able to|offer to|ready to|let me know)\b",
+                   re.I)
+NOT_OFFERS = {"access", "timer_limit", "memory_empty", "no_location", "future_action"}  # (here "I can..." IS the claim)
+
+
+def _offered(s, m):
+    """'If you tell me how long, I can set a timer' offers to do it: it doesn't claim it was done."""
+    start = max(0, m.start() - 40)
+    before = s[start:m.start()]
+    clause_start = max(before.rfind(sep) for sep in (";", ".", "!", " - ", " but "))
+    return bool(OFFER.search(before[clause_start + 1:] + s[m.start():m.end()]))
+
+
 def _negated(s, m):
     """'I couldn't turn it off' is honest. Only a negation in the same clause, right before or inside the claim counts:
     in "Not a problem, I've saved it" the "not" belongs to another clause."""
@@ -112,12 +128,16 @@ class ClaimGuard:
         self.home_known = home_known
         self.ok_tools = set()
         self.tools_called = set()
+        self.failed_actions = set()  # actions that failed this turn and haven't succeeded since
         self.held = []
 
     def tool_result(self, name, result):
         self.tools_called.add(name)
         if str(result).startswith("OK") and not NO_CHANGE.match(str(result)):
             self.ok_tools.add(name)
+            self.failed_actions.discard(name)
+        elif name in ACTION_TOOLS and str(result).startswith("FAILED") and "they said" not in str(result):
+            self.failed_actions.add(name)  # (a refusal because they said not to isn't a failure)
 
     def _done_confirmed(self):
         """"Done" / "all set" only when every action tried this turn worked (one failed means it isn't all done)."""
@@ -145,7 +165,11 @@ class ClaimGuard:
             if kind == "timer_limit":
                 out.append(kind)  # no tool result can make a made-up limit true
                 continue
-            if _negated(s, m):
+            if kind == "outcome":
+                if self.failed_actions and not _negated(s, m):
+                    out.append(kind)  # something failed and nothing fixed it: "it's running" can't be true
+                continue
+            if _negated(s, m) or (kind not in NOT_OFFERS and _offered(s, m)):
                 continue
             if kind == "done":
                 if not self._done_confirmed():

@@ -83,6 +83,9 @@ def main():
                                 barge_ms=config.BARGE_MIN_SPEECH_MS, barge_vad=config.BARGE_VAD,
                                 duck_gain=config.BARGE_DUCK_GAIN if config.BARGE_DUCK else 1.0)
         rt.engine.start(capture=not a.text)
+        from room_agent.audio.devices import follow_defaults
+
+        follow_defaults(rt.engine)  # (headphones connected later, or the default changed in Windows: switch to it)
     if rt.tts_enabled:
         from room_agent.audio.fillers import thinking_loop_worker
         from room_agent.audio.speaker import speaker_worker

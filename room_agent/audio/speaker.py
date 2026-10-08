@@ -10,8 +10,12 @@ from room_agent import runtime as rt
 from room_agent.audio import tts, voices
 from room_agent.audio.fillers import LOOP, speaker_busy, start_thinking, stop_thinking
 from room_agent.audio.sounds import load_sound, tone
-from room_agent.audio.styles import Spoken, delivery_text
-from room_agent.config import EL_KEY, EL_MODEL, OUT_SR, WAKE_SOUND
+from room_agent import speech
+from room_agent.audio.styles import Spoken
+from room_agent.social.delivery import VoiceDelivery
+from room_agent.speech import elevenlabs, normalize
+from room_agent.config import EL_FALLBACK_MODEL, EL_KEY, EL_MODEL, EL_TEXT_NORMALIZATION, EL_SEED, OUT_SR, WAKE_SOUND
+from room_agent.speech import timing
 from room_agent.conversation.states import State
 from room_agent.text import strip_stage_directions
 
@@ -44,6 +48,7 @@ def beep():
 
 def say(sentence):
     """Queue a sentence of the model's reply for speaking (and remember it, so its echo isn't mistaken for you)."""
+    timing.mark("first_text")
     sentence = re.sub(r"\s*[\u2014\u2013]\s*", ", ", strip_stage_directions(sentence))  # (dashes read badly aloud)
     if not re.search(r"\w", sentence):
         return
@@ -57,11 +62,17 @@ def say(sentence):
         rt.turn_speech.append(sentence)
         rt.spoken_count += 1
         item = Spoken(sentence)
-        item.style = rt.turn_style
+        delivery = getattr(rt.turn, "delivery", None)
+        item.style = rt.turn_style or (delivery.style if delivery else "")  # (the model's own tag wins for its sentence)
+        item.delivery = delivery
+        item.performance = speech.perform(sentence)  # (HOW to say it; the words stay `sentence`: speech/)
         rt.speak_q.put(item)
 
 
-def mark_first_audio():
+def mark_first_audio(out=None):
+    timing.mark("tts_first_byte")
+    timing.mark("first_audio")
+    timing.mark("first_audible", time.time() + (out.queued_seconds() if out is not None else 0.0))  # (heard after what's queued)
     if rt.turn_start is not None:
         log.info("answer started %.2fs after you stopped talking", time.time() - rt.turn_start)
         rt.turn.timing.setdefault("first_sound", time.time() - rt.turn_start)
@@ -74,32 +85,74 @@ def _play(out, pcm):
     rt.tts_end = time.time() + out.queued_seconds()
 
 
-def _payload(item):
-    body = {"text": delivery_text(item), "model_id": EL_MODEL}
-    if rt.speech_rate != 1.0:
-        body["voice_settings"] = {"speed": rt.speech_rate}
-    return body
+class InvalidAudio(Exception):
+    pass
 
 
-def stream_elevenlabs(item, out):
-    """Stream one sentence from ElevenLabs straight into the speaker as it arrives."""
+_model = {"name": None}  # the ElevenLabs model in use (EL_MODEL, or EL_FALLBACK_MODEL after it was refused)
+
+
+def _payload(item, model):
+    text, p = speech.provider_text(item, "elevenlabs", model)
+    previous = " ".join(list(rt.turn_speech)[:-1])[-500:]  # (this reply so far, for prosody continuity)
+    profiles = voices.saved("speech_profiles", {}) or {}
+    return elevenlabs.request_body(text, p, model, rt.speech_rate, previous_text=previous, language=p.language,
+                                   normalization=EL_TEXT_NORMALIZATION, seed=EL_SEED or None,
+                                   profile=profiles.get(p.purpose) or profiles.get("default"))
+
+
+def stream_elevenlabs(item, out, model=None):
+    """Stream one sentence from ElevenLabs straight into the speaker as it arrives. -> bytes played."""
+    model = model or _model["name"] or EL_MODEL
+    played = 0
     with tts.el.post(
         f"https://api.elevenlabs.io/v1/text-to-speech/{voices.current.eleven}/stream?output_format=pcm_{OUT_SR}",
         headers={"xi-api-key": EL_KEY},
-        json=_payload(item),
+        json=_payload(item, model),
         stream=True,
-        timeout=30,
+        timeout=(5, 15),
     ) as r:
         r.raise_for_status()
         leftover = b""
         for chunk in r.iter_content(4096):
             if out.interrupted.is_set():
                 break
-            mark_first_audio()
+            mark_first_audio(out)
             data = leftover + chunk
             n = len(data) // 2 * 2  # keep 16-bit samples aligned
             _play(out, data[:n])
+            played += n
             leftover = data[n:]
+    if not played and not out.interrupted.is_set():
+        raise InvalidAudio("no audio came back")
+    return played
+
+
+def _speak_elevenlabs(item, out):
+    """-> True if ElevenLabs spoke it (or it was interrupted); False: say it with the local voice instead. Any
+    ElevenLabs problem costs at most expressiveness, never the sentence."""
+    try:
+        stream_elevenlabs(item, out)
+        return True
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if tts.elevenlabs_refused(e):
+            voices.fall_back_to_piper(f"status {code}, probably out of credits")
+            return False
+        model = _model["name"] or EL_MODEL
+        if code in (400, 404, 422) and EL_FALLBACK_MODEL and model != EL_FALLBACK_MODEL:
+            log.warning("ElevenLabs refused %s (status %d): switching to %s", model, code, EL_FALLBACK_MODEL)
+            _model["name"] = EL_FALLBACK_MODEL
+            try:
+                stream_elevenlabs(item, out)
+                return True
+            except Exception as e2:
+                log.warning("ElevenLabs fallback model failed too (%s): local voice for this sentence", e2.__class__.__name__)
+                return False
+        log.warning("ElevenLabs error (status %d): local voice for this sentence", code)
+    except (requests.Timeout, requests.ConnectionError, InvalidAudio) as e:
+        log.warning("ElevenLabs unavailable (%s): local voice for this sentence", e.__class__.__name__)
+    return False
 
 
 def speaker_worker():
@@ -119,21 +172,24 @@ def speaker_worker():
             if isinstance(item, bytes):
                 _play(out, item)
                 continue
-            if voices.provider() != "piper":
-                try:
-                    stream_elevenlabs(item, out)
-                    continue
-                except requests.HTTPError as e:
-                    if not tts.elevenlabs_refused(e):
-                        raise
-                    voices.fall_back_to_piper(f"status {e.response.status_code}, probably out of credits")
-            for pcm in tts.piper_pcm(item):
+            timing.mark("tts_start")
+            if voices.provider() != "piper" and _speak_elevenlabs(item, out):
+                continue
+            text, p = speech.provider_text(item, "piper", None)
+            for part in normalize.clauses(text):  # (a long sentence starts sounding after its first clause)
+                spoken = Spoken(part)
+                spoken.delivery = VoiceDelivery(pace=p.pace * rt.speech_rate, energy=p.energy)  # (their pace x this moment's)
+                for pcm in tts.piper_pcm(spoken):
+                    if out.interrupted.is_set():
+                        break
+                    mark_first_audio(out)
+                    _play(out, pcm)
                 if out.interrupted.is_set():
                     break
-                mark_first_audio()
-                _play(out, pcm)
         except Exception as e:
             log.error("TTS error: %s", e)
         finally:
+            if isinstance(item, str) and item is not LOOP:
+                timing.mark("generation_done", overwrite=True)
             speaker_busy.clear()
             rt.speak_q.task_done()

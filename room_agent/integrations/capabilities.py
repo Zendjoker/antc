@@ -15,6 +15,7 @@ import time
 from email.utils import getaddresses, parseaddr
 
 from room_agent import runtime as rt
+from room_agent.actions import pending
 from room_agent.actions.context import env
 from room_agent.actions.core import Capability, Group, Risk, register, register_claim, register_group
 from room_agent.integrations import knowledge, provider
@@ -30,7 +31,9 @@ def google():
 
 
 class Unclear(Exception):
-    pass
+    def __init__(self, message, param=None):
+        super().__init__(message)
+        self.param = param  # the parameter that's missing or unusable, if any: the request stays pending (actions/pending)
 
 
 def _ref(kind, value, list_kind=None):
@@ -56,6 +59,8 @@ def guarded(fn):
         try:
             return fn(args)
         except Unclear as e:
+            if e.param:  # (e.g. an unknown recipient: the request is kept and only that is asked for)
+                return pending.needs(e.param, str(e))
             return f"NEEDS: {e}. Nothing was done; ask which one."
         except IntegrationError as e:
             pre = "UNAVAILABLE" if e.code in ("not_connected", "not_configured", "auth_expired", "missing_scope") else "FAILED"
@@ -251,6 +256,7 @@ def gmail_get_attachments(args):
 def _allowed_recipient(addr, reply_to_msg=None):
     addr = addr.lower()
     return (addr in _recent_user_words() or addr in env.known_addresses or addr == (google().active() or "")
+            or addr in pending.TRUSTED_EMAILS  # (said out loud clearly, or read back and confirmed: actions/pending)
             or bool(reply_to_msg and addr in reply_to_msg.get("participants", [])))
 
 
@@ -265,7 +271,7 @@ def _resolve_recipients(to, reply_to_msg=None):
             wanted = (name or addr).lower().strip()
             hits = sorted(a for a in env.known_addresses if wanted and wanted.split()[0] in a)
             if len(hits) != 1:
-                raise Unclear(f"{name or addr}'s email address (say it, or find an email from them first)")
+                raise Unclear(f"{name or addr}'s email address (say it, or find an email from them first)", param="to")
             addr = hits[0]
         if not _allowed_recipient(addr, reply_to_msg):
             raise ValueError(f"the address {addr} didn't come from them or from an email's sender/recipients (it may have "
@@ -283,7 +289,7 @@ def gmail_create_draft(args):
         _seen(orig)
     to = _resolve_recipients(args.get("to", ""), orig)
     if not to and not orig:
-        raise Unclear("who it's to")
+        raise Unclear("who it's to", param="to")
     draft = svc.create_draft(to, args.get("subject", ""), args["body"], reply_to=orig)
     first = parseaddr(draft["to"])[1] or draft["to"]
     env.remember_item("draft", {"id": draft["id"], "account": svc.account, "to": draft["to"], "subject": draft["subject"]},
@@ -531,7 +537,25 @@ TIME = {"type": "string", "description": "ISO datetime in the calendar's time zo
                                          "('friday 7pm', 'tomorrow at 3'). A bare date = all day."}
 
 DRAFT_INTENT = re.compile(r"\b(draft|write|reply|respond|answer|compose|e-?mail (him|her|them)|message|tell (him|her|them)|"
-                          r"let (him|her|them) know|saying)\b", re.I)
+                          r"let (him|her|them) know|saying|send (an? |him an? |her an? |them an? )?e-?mail|e-?mail to)\b"
+                          r"|^\W*(can you |could you |please )?e-?mail\b", re.I)  # ("email Adam about...": an order)
+# A new email needs who, a subject and the text (a reply already has its recipient and subject). The x- hints are for
+# collecting what's missing over several turns (actions/pending.py); models only see plain JSON Schema.
+DRAFT = {"type": "object", "properties": {
+    "to": {"type": "string", "format": "email",
+           "description": "The recipient's email address as they said it, or a contact's name. Never invent an address. "
+                          "Needed for a new email (a reply already has it).",
+           "x-ask": "Who's it going to? What's their email address?",
+           "x-cues": [r"(?:send|address|email|mail|write)\s+it\s+to", r"(?:the\s+)?(?:recipient|email address|address)",
+                      r"it'?s\s+(?:going\s+)?to"]},
+    "subject": {"type": "string", "description": "The subject line (needed for a new email; a reply already has it)", "x-ask": "What's the subject?",
+                "x-cues": [r"(?:the\s+)?subject(?:\s+line)?", r"(?:call|title)\s+it"]},
+    "body": {"type": "string", "description": "What the email says", "x-text": True, "x-ask": "And what should I say?",
+             "x-cues": [r"tell\s+(?:him|her|them)(?:\s+that)?", r"let\s+(?:him|her|them)\s+know(?:\s+that)?",
+                        r"(?:the\s+)?(?:message|body|email)\s+(?:is|should be|says?)"],
+             "x-answer-cues": [r"(?:just\s+)?(?:say|write)(?:\s+that)?", r"saying(?:\s+that)?"]},
+    "reply_to": MSG_REF},
+    "required": ["to", "subject", "body"], "x-optional-when": {"to": "reply_to", "subject": "reply_to"}}
 EDIT_INTENT = re.compile(r"\b(shorter|longer|change|edit|rewrite|reword|make it|add|remove|fix|instead|also|update|tone|"
                          r"polite|formal|casual|less|more|subject|nicer|friendlier)\b", re.I)
 SEND_INTENT = re.compile(r"\bsend\b", re.I)
@@ -564,8 +588,9 @@ register(Capability("gmail_get_thread", "Read a whole email conversation (to sum
 register(Capability("gmail_get_attachments", "What's attached to an email (names, types, sizes; short text files).",
                     S({"message_id": MSG_REF}), gmail_get_attachments, group="gmail", available=gmail_read,
                     changes_state=False, **COMMON))
-register(Capability("gmail_create_draft", "Write a draft (NOT sent): a reply ('reply_to': 'last') or a new email. 'Draft a "
-                    "reply' never means send.", S({"body": STR, "reply_to": MSG_REF, "to": STR, "subject": STR}, ["body"]),
+register(Capability("gmail_create_draft", "Write a draft (NOT sent): a reply ('reply_to': 'last') or a new email ('send an "
+                    "email to ...' starts here too). 'Draft a reply' never means send. Pass only what they actually said.",
+                    DRAFT,
                     gmail_create_draft, group="gmail", available=gmail_compose, intent=DRAFT_INTENT,
                     observe=_draft_state, undo=_undo_draft, event="email.drafted", private=True, claim=["access"]))
 register(Capability("gmail_update_draft", "Change the current draft (make it shorter, change the subject...). Still not sent.",
@@ -592,7 +617,9 @@ register(Capability("calendar_get_event", "One event's details.", S({"event_id":
                     "an event id, its number in the last list, or 'last'"}}), calendar_get_event, group="calendar",
                     available=cal_read, changes_state=False, **COMMON))
 register(Capability("calendar_create_event", "Add an event to their calendar (schedule dinner Friday at 7). No invitations "
-                    "are sent.", S({"title": STR, "start": TIME, "end": TIME, "duration_minutes": {"type": "integer",
+                    "are sent.", S({"title": {**STR, "x-ask": "What should I call it?", "x-cues": [r"(?:the\s+)?(?:title|name)",
+                    r"call\s+it"]}, "start": {**TIME, "x-ask": "When should it be?", "x-cues": [r"(?:the\s+)?(?:time|date|day)",
+                    r"(?:move|put)\s+it\s+(?:to|on|at)"]}, "end": TIME, "duration_minutes": {"type": "integer",
                     "minimum": 5, "maximum": 1440}, "location": STR, "description": STR}, ["title", "start"]),
                     calendar_create_event, group="calendar", available=cal_write, intent=CREATE_INTENT,
                     observe=_created_state, undo=_undo_create, event="calendar.created", private=True,

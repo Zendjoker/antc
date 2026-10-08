@@ -89,17 +89,33 @@ def _call(fn_name, *keys):
     return run
 
 
+def known_app(args):
+    """A reflex only fires for an app that's really in the (cached) app list, or "it" with an app in conversation."""
+    from room_agent.tools import apps
+
+    said = str(app_arg(args)).strip()
+    if said.lower() in apps.PRONOUNS:
+        return bool(env.active_app)
+    entry, _ = apps.find(said)
+    return entry is not None
+
+
+APP_WORDS = r"(?P<app_name>[\w][\w .+&'-]{1,40}?)"
 common = dict(group="apps", claim="app", available=lambda: IS_WINDOWS)
 tool("open_app", "Open (launch) an app on this Windows PC, e.g. 'open Spotify', 'launch Discord', 'start Chrome'. Finds "
      "installed apps by name; if it's already open it's brought to the front.", params({"app_name": APP_NAME}, ["app_name"]),
      _call("open_app", "app_name"), subject=app_arg, event="app.opened", observe=_state,
-     verify=lambda a, b, c: c["running"], undo=_undo_open, undo_if=lambda b, c: not b["running"], **common)
+     verify=lambda a, b, c: c["running"], undo=_undo_open, undo_if=lambda b, c: not b["running"],
+     reflex=[(r"(?:open|launch|start|fire up|pull up|bring up)\s+(?:up\s+)?" + APP_WORDS, {})], reflex_check=known_app,
+     **common)
 tool("close_app", "Close (quit) an app on this PC, e.g. 'close Spotify', 'quit Discord', 'close it'.",
      params({"app_name": APP_NAME, "confidence": CONFIDENCE}, ["app_name"]), _call("close_app", "app_name"),
      subject=app_arg, event="app.closed", observe=_state, verify=lambda a, b, c: not c["running"],
-     risk=Risk.CONFIRM, min_confidence=0.7, **common)  # (closing can't be undone)
+     expect=lambda a, b: {"running": False}, risk=Risk.CONFIRM, min_confidence=0.7,
+     reflex=[(r"(?:close|quit|exit)\s+" + APP_WORDS, {"confidence": 0.95})], reflex_check=known_app,
+     **common)  # (closing can't be undone)
 tool("focus_app", "Switch to an app that's already open (bring its window to the front), e.g. 'switch to Chrome', 'go back "
      "to Spotify'.", params({"app_name": APP_NAME}, ["app_name"]), _call("focus_app", "app_name"), subject=app_arg,
-     event="app.focused", **common)
+     event="app.focused", reflex=[(r"(?:switch to|go back to)\s+" + APP_WORDS, {})], reflex_check=known_app, **common)
 tool("list_running_apps", "List the apps that have a window open on this PC right now.", NO_ARGS,
      _call("list_running_apps"), changes_state=False, **common)

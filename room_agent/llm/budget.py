@@ -71,6 +71,9 @@ class Budget:
                 log.warning("couldn't save today's spend: %s", e)
         log.debug("call %s: %d fresh + %d cached + %d cache-write in, %d out = $%.5f", model, fresh_in, cached_in,
                   cache_write, out, usd)
+        from room_agent.cognition import metrics
+
+        metrics.model_call(provider, model, fresh_in + cached_in + cache_write, out, cached=cached_in)
         return usd
 
     def today(self):

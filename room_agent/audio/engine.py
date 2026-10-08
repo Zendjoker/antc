@@ -149,6 +149,7 @@ class AudioEngine:
         self._history = collections.deque(maxlen=40)  # last 3.2 s of (frame number, item) while playing
         self._rejections = collections.deque(maxlen=10)  # times of "likely echo" rejections
         self._streams = []
+        self._reopen_lock = threading.Lock()
 
         self.apm = None
         if aec or noise_suppression:
@@ -182,24 +183,44 @@ class AudioEngine:
 
     # ---------- playback ----------
     def start(self, capture=True):
-        out_block = self.out_sr // 100  # 10 ms
         self.full_duplex = self.full_duplex and capture
         self.capturing = capture
+        self._open_streams()
+        if capture:
+            threading.Thread(target=self._process_loop, daemon=True).start()
+        log.info("audio: %s, noise suppression %s",
+                 "echo cancellation on (you can interrupt)" if self.full_duplex else "half duplex",
+                 "on" if self.apm else "off")
+
+    def _open_streams(self):
+        """Open and start the speaker (and mic) on the current sd.default devices."""
         self._streams = [
-            sd.OutputStream(samplerate=self.out_sr, channels=1, dtype="int16", blocksize=out_block,
+            sd.OutputStream(samplerate=self.out_sr, channels=1, dtype="int16", blocksize=self.out_sr // 100,
                             callback=self._on_play, latency="low"),
         ]
-        if capture:
+        if self.capturing:
             self._streams.append(
                 sd.InputStream(samplerate=MIC_SR, channels=1, dtype="int16", blocksize=FRAME,
                                callback=self._on_mic, latency="low")
             )
-            threading.Thread(target=self._process_loop, daemon=True).start()
         for s in self._streams:
             s.start()
-        log.info("audio: %s, noise suppression %s",
-                 "echo cancellation on (you can interrupt)" if self.full_duplex else "half duplex",
-                 "on" if self.apm else "off")
+
+    def reopen(self, choose_devices):
+        """Switch to other devices while running (the Windows default changed). `choose_devices()` runs between
+        closing the old streams and opening the new ones (PortAudio can only rescan devices with no stream open)."""
+        with self._reopen_lock:
+            for s in self._streams:
+                try:
+                    s.stop()
+                    s.close()
+                except Exception as e:
+                    log.debug("closing an audio stream: %s", e)
+            self._streams = []
+            choose_devices()
+            self._render_left = np.zeros(0, dtype=np.int16)
+            self.delay.measured = False  # (a new speaker has a different echo delay: measure it again)
+            self._open_streams()
 
     def play(self, pcm: bytes):
         with self._lock:

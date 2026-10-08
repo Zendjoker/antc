@@ -71,7 +71,14 @@ def piper_pcm(text):
     """Synthesize locally and resample to the output stream rate."""
     from scipy.signal import resample_poly
 
-    for chunk in load_piper().synthesize(text):
+    from room_agent.social.delivery import piper_config
+
+    cfg = piper_config(getattr(text, "delivery", None))  # (this reply's pace and energy, kept subtle)
+    if cfg:
+        from piper import SynthesisConfig
+
+        cfg = SynthesisConfig(**cfg)
+    for chunk in load_piper().synthesize(str(text), syn_config=cfg):
         audio = chunk.audio_int16_array.astype(np.float32)
         if chunk.sample_rate != OUT_SR:
             g = np.gcd(OUT_SR, chunk.sample_rate)

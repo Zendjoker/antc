@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 from room_agent import runtime as rt
 from room_agent import trace
-from room_agent.actions import core
+from room_agent.actions import core, pending
 from room_agent.actions.context import env
 from room_agent.actions.events import events
 
@@ -54,6 +54,8 @@ class ActionResult:
     undo_fn: Optional[Callable[[], str]] = None
     flip: Any = None               # (capability, args, state undo restores, state it leaves): makes the undo undoable
     undo_hint: str = ""
+    expected: Any = None           # what the capability's `expect` said should be observed afterwards (cognition)
+    observed: Any = None           # what was actually observed for those same fields
 
     @property
     def can_undo(self):
@@ -106,6 +108,46 @@ def _observe(cap, args, before=None):
         return None
 
 
+def _get(state, path):
+    """'monitor.num' -> state["monitor"]["num"] (None if any part is missing)."""
+    for part in path.split("."):
+        state = state.get(part) if isinstance(state, dict) else None
+    return state
+
+
+def _expected(cap, args, before):
+    if not cap.expect or before is None:
+        return None
+    try:
+        return cap.expect(args, before) or None
+    except Exception as e:
+        log.debug("couldn't work out what %s should change: %s", cap.name, e)
+        return None
+
+
+def _fmt(d):
+    return ", ".join(f"{k}={v}" for k, v in d.items())
+
+
+def _remember_state(cap, result, subject):
+    """What this call showed about the world becomes beliefs (cognition: VERIFIED while fresh, then STALE)."""
+    if cap.private or not result.success:
+        return
+    from room_agent.cognition import _call_key
+
+    if not cap.changes_state:
+        env.believe("read:" + _call_key(cap.name, result.parameters), result.message.split(":", 1)[-1].strip(), cap.name,
+                    "observed", stale_after=cap.fresh_for)
+        return
+    env.forget_beliefs("read:")  # (an action may have changed what earlier checks showed: check again next time)
+    state = result.state_after if isinstance(result.state_after, dict) else None
+    for k, v in (state or {}).items():
+        if k in ("hwnd", "rect", "session", "app") or callable(v):
+            continue
+        key = ".".join(x for x in (cap.group or "state", str(subject or ""), k) if x)
+        env.believe(key, v, cap.name, "action-verified" if result.verified else "observed", stale_after=max(cap.fresh_for, 60))
+
+
 def _finish(action, result):
     trace.note("ACTION", action)
     trace.note("RESULT", "verified" if result.success else (_prefix(result.message) or "failed").lower())
@@ -129,6 +171,7 @@ def execute(name, args):
         if rt.pending and rt.pending["tool"] == name:
             rt.pending["tool"] = "set_timer"  # (so it's cleared once the timer is set)
         name, args = "set_timer", as_countdown
+    args = pending.prepare(name, args)  # (what was already collected for this request; spoken addresses checked)
     trace.note("INTENT", name.upper() + (f" (confidence {args['confidence']})" if "confidence" in args else ""))
     trace.note("PARAMS", ", ".join(f"{k}={v!r}" for k, v in args.items() if k != "confidence") or "none")
 
@@ -140,7 +183,24 @@ def execute(name, args):
     if not available:
         return _finish("REFUSED", _result(name, args, f"UNAVAILABLE: {name} isn't available right now (that feature is off, "
                                                       "not connected or not built)."))
+    p = rt.pending
+    awaiting_yes = bool(p is not None and p.get("confirm") and p["tool"] == name)
+    if (cap.intent is not None and not awaiting_yes and not cap.intent.search(rt.turn_text or "")
+            and not pending.source_matches(name, cap.intent)):
+        # 2b. the user's own words never asked for this (it may come from an email, or a guess): ask first. Checked
+        # before anything is collected, so such a call never starts a request to fill in.
+        pending.confirming(name, args)
+        return _finish("CLARIFY", _result(name, args, "NEEDS_CONFIRMATION: nothing was done: they didn't ask for this "
+                                                      f"in their own words ({name}). Ask them first, in one short "
+                                                      "question; only if they say yes, call it again."))
+    rejected = pending.take_rejected()
+    if rejected:  # 2c. an address that didn't come from the user: refused by name; the request waits for a real one
+        p = pending.collecting(name, args, pending.missing_of(name, args))
+        return _finish("REFUSED", _result(name, args, f"FAILED: the address {', '.join(rejected)} didn't come from them (it "
+                                                      "may have come from inside an email, or been guessed), so it wasn't "
+                                                      f"used and nothing was done. Ask them to say the address themselves."))
     clean, problem = validate(name, args)  # 3. parameters (+ the confidence rule for CONFIRM capabilities)
+    pending.take_needed()  # (only a tool's own NEEDS below counts)
     if problem:
         trace.note("MISSING", ", ".join(rt.pending["missing"]) if problem.startswith("NEEDS:") and rt.pending else "none")
         return _finish("CLARIFY" if problem.startswith("NEEDS") else "REFUSED", _result(name, args, problem))
@@ -153,14 +213,15 @@ def execute(name, args):
             return _finish("REFUSED", _result(name, clean, f"FAILED: {say() if say else e}"))
     confirmed = _confirmed(name, clean, cap)
     what = cap.describe(clean) if cap.describe else name
-    if cap.intent is not None and not confirmed and not cap.intent.search(rt.turn_text or ""):
+    if (cap.intent is not None and not confirmed and not cap.intent.search(rt.turn_text or "")
+            and not pending.source_matches(name, cap.intent)):  # (a request being filled in: its first words count)
         # 4a. the user's own words this turn didn't ask for this (it may come from an email, or a guess): ask first
-        rt.pending = {"tool": name, "args": clean, "confirm": True, "turn": rt.turn_no, "at": time.time()}
+        pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: they didn't ask for this "
                                                        f"in their own words ({what}). Ask them first, in one short "
                                                        "question; only if they say yes, call it again."))
     if cap.risk == core.Risk.SENSITIVE and not confirmed:  # 4b. risk: always asked first
-        rt.pending = {"tool": name, "args": clean, "confirm": True, "turn": rt.turn_no, "at": time.time()}
+        pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done. This can't be taken back "
                                                        f"easily ({what}), so ask one short yes/no question first; if they "
                                                        "agree, call it again."))
@@ -171,16 +232,45 @@ def execute(name, args):
         except Exception as e:
             log.warning("before-hook failed for %s: %s", name, e)
     subject = subject_of(cap, clean)
+    from room_agent import cognition
+
+    refusal = cognition.check_call(cap, clean, subject)  # 4c. the user's constraints, and no endless retrying
+    if refusal:
+        result = _result(name, clean, refusal, subject=subject, kind=name)
+        result.error_code = "constraint" if "they said" in refusal else "retry_limit"
+        cognition.after_call(cap, clean, result)
+        return _finish("REFUSED", result)
+    if not cap.changes_state and not cap.private and cap.name != "update_goal":
+        seen = env.belief("read:" + cognition._call_key(name, clean))  # 4d. checked already in this request: reuse it
+        if (seen is not None and seen.source == name and seen.status() == "VERIFIED"
+                and seen.observed_at >= rt.turn.started):
+            result = _result(name, clean, f"OK: {seen.value} (checked {int(time.time() - seen.observed_at)}s ago)",
+                             subject=subject, kind="cached", verified=True)
+            cognition.after_call(cap, clean, result)
+            return _finish(name, result)
     app_before = env.active_app
     before = _observe(cap, clean) if cap.changes_state else None
-    try:  # 5. execute (the existing implementation)
-        out = str(cap.execute(clean))
-    except Exception as e:
-        log.error("tool %s failed: %s", name, e)
-        out = f"FAILED: {name} hit an error ({e.__class__.__name__}: {str(e)[:120]})."
+    expected = _expected(cap, clean, before)
+    already = bool(expected and cap.skip_if_satisfied and all(_get(before, k) == v for k, v in expected.items()))
+    if already:  # 5a. it's already so: nothing to do (no action just in case)
+        out = f"OK: nothing needed: it's already so ({_fmt(expected)})."
+    else:
+        try:  # 5. execute (the existing implementation)
+            out = str(cap.execute(clean))
+        except Exception as e:
+            log.error("tool %s failed: %s", name, e)
+            out = f"FAILED: {name} hit an error ({e.__class__.__name__}: {str(e)[:120]})."
     out = out if _prefix(out) else f"OK: {out}"
-    result = _result(name, clean, out, subject=subject, kind=name)
-    if result.success and cap.changes_state:  # 6. verify independently
+    needed = pending.take_needed()
+    if needed and out.startswith("NEEDS:"):  # the tool found a parameter unusable (an unknown recipient): keep it pending
+        kept = {k: v for k, v in clean.items() if k != needed}
+        p = pending.collecting(name, kept, [needed] + [k for k in pending.missing_of(name, kept) if k != needed])
+        out = pending.needs_message(p, out.split(":", 1)[1].strip().rstrip("."))
+    result = _result(name, clean, out, subject=subject, kind="already" if already else name)
+    if already:
+        result.state_before = result.state_after = before
+        result.verified, result.expected, result.observed = True, expected, {k: _get(before, k) for k in expected}
+    elif result.success and cap.changes_state:  # 6. verify independently
         result.state_before, result.state_after = before, _observe(cap, clean, before)
         result.verified = True
         if cap.verify and before is not None and result.state_after is not None:
@@ -193,10 +283,20 @@ def execute(name, args):
                 result = _result(name, clean, f"FAILED: {name} reported success, but checking afterwards it didn't "
                                               "actually happen.", subject=subject, kind=name,
                                  state_before=before, state_after=result.state_after)
+        if result.success and expected and result.state_after is not None:  # 6b. EXPECTED vs OBSERVED
+            observed = {k: _get(result.state_after, k) for k in expected}
+            result.expected, result.observed = expected, observed
+            if observed != expected:
+                log.warning("%s: expected %s, observed %s", name, _fmt(expected), _fmt(observed))
+                after = result.state_after
+                result = _result(name, clean, f"FAILED: {name} didn't have the expected result: expected {_fmt(expected)}, "
+                                              f"but it's {_fmt(observed)}. Don't say it worked.", subject=subject,
+                                 kind=name, state_before=before, state_after=after)
+                result.expected, result.observed, result.error_code = expected, observed, "not_as_expected"
     elif result.success:
         result.verified = True
-    if result.success and rt.pending and rt.pending["tool"] == name:
-        rt.pending = None  # the unfinished request is done
+    if result.success:
+        pending.finished(name)  # the unfinished request is done
     if result.success and cap.undo and result.state_before is not None and result.state_after is not None and (
             cap.undo_if is None or cap.undo_if(result.state_before, result.state_after)):  # 7. context, undo, events
         b, a = result.state_before, result.state_after
@@ -207,6 +307,8 @@ def execute(name, args):
         env.previous_app = app_before
     _update_context(cap, result)
     env.record(result)
+    _remember_state(cap, result, subject)
+    cognition.after_call(cap, clean, result)
     if result.success and cap.event:
         events.emit(cap.event, capability=name, app=subject, args=clean, before=result.state_before,
                     after=result.state_after)
@@ -254,6 +356,7 @@ class Plan:
 
     def __init__(self):
         self.steps = []  # ActionResults
+        self.round = 0   # the model's current round of tool calls (a later round has seen earlier failures: a replan)
 
     def run(self, name, args):
         cap = core.get(name)
@@ -268,18 +371,24 @@ class Plan:
             t0 = time.time()
             result = execute(name, args)
             rt.turn.timing["tools"] = rt.turn.timing.get("tools", 0.0) + time.time() - t0
+        result.round = self.round
         self.steps.append(result)
         return result
 
     def _blocked_by(self, cap, args):
+        """A step on something whose earlier step failed IN THE SAME ROUND isn't run ("open X and move it": no move if X
+        never opened). In a later round the model has seen the failure, so a different way (open after focus failed) runs."""
         if not cap or not cap.subject or not self.steps:
+            return None
+        steps = [s for s in self.steps if getattr(s, "round", 0) == self.round]
+        if not steps:
             return None
         raw = str(cap.subject(args) or "").strip().lower()
         if raw in PRONOUNS:  # "it" in a plan means the thing the plan is working on
-            last = next((s for s in reversed(self.steps) if s.subject), None)
+            last = next((s for s in reversed(steps) if s.subject), None)
             return last if last and not last.success else None
         name = subject_of(cap, args)
-        return next((s for s in self.steps if not s.success and s.subject and name
+        return next((s for s in steps if not s.success and s.subject and name
                      and s.subject.lower() == name.lower()), None)
 
     def summary(self):

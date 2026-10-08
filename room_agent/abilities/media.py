@@ -82,29 +82,52 @@ def _call(fn_name, convert=None):
 
 
 common = dict(group="media", claim="media", available=lambda: IS_WINDOWS)
+def _say_level(result):
+    """Spoken after a reflex volume change: the level actually read back."""
+    level = (result.state_after or {}).get("volume")
+    return None if level is None else f"Okay, it's at {level}."
+
+
 volume = dict(observe=_volume_state, undo=_put_volume, undo_is_symmetric=True, **common)
+level_said = dict(reflex_say=_say_level)
 tool("set_volume", "Set the PC's volume to an exact level: 'volume 40%' = 40, 'half volume' = 50, 'max volume' = 100.",
      params({"percent": {"type": "integer", "minimum": 0, "maximum": 100}}, ["percent"]),
-     _call("set_volume", lambda a, m: [int(a["percent"])]), event="volume.changed", verify=VOLUME_OK["set_volume"], **volume)
+     _call("set_volume", lambda a, m: [int(a["percent"])]), event="volume.changed", verify=VOLUME_OK["set_volume"],
+     expect=lambda a, b: {"volume": max(0, min(100, int(a["percent"]))), **({"muted": False} if int(a["percent"]) else {})},
+     skip_if_satisfied=True, **level_said,
+     reflex=[(r"(?:set\s+(?:the\s+)?)?volume\s+(?:to\s+|at\s+)?(?P<percent>\d{1,3})\s*(?:%|percent)?", {})], **volume)
 tool("volume_up", "Turn the PC's volume up: 'louder', 'a little louder', 'turn it up'. Act right away.",
      params({"amount": AMOUNT}), _call("volume_up", lambda a, m: [int(a.get("amount") or m.STEP)]), event="volume.changed",
-     verify=VOLUME_OK["volume_up"], **volume)
+     verify=VOLUME_OK["volume_up"], **level_said,
+     reflex=[(r"(?:turn\s+(?:it|the volume|the music|the sound|that)\s+up|volume\s+up|louder|make it louder)", {}),
+             (r"(?:a\s+(?:little|bit|tad)\s+louder|turn\s+it\s+up\s+a\s+(?:little|bit))", {"amount": 5})], **volume)
 tool("volume_down", "Turn the PC's volume down: 'quieter', 'turn it down', 'a bit lower'. Act right away.",
      params({"amount": AMOUNT}), _call("volume_down", lambda a, m: [int(a.get("amount") or m.STEP)]), event="volume.changed",
-     verify=VOLUME_OK["volume_down"], **volume)
-tool("mute", "Mute the PC's sound.", NO_ARGS, _call("mute"), event="volume.muted", verify=VOLUME_OK["mute"], **volume)
-tool("unmute", "Unmute the PC's sound.", NO_ARGS, _call("unmute"), event="volume.unmuted", verify=VOLUME_OK["unmute"], **volume)
+     verify=VOLUME_OK["volume_down"], **level_said,
+     reflex=[(r"(?:turn\s+(?:it|the volume|the music|the sound|that)\s+down|volume\s+down|quieter|softer|make it quieter)", {}),
+             (r"(?:a\s+(?:little|bit|tad)\s+(?:quieter|softer)|turn\s+it\s+down\s+a\s+(?:little|bit))", {"amount": 5})],
+     **volume)
+tool("mute", "Mute the PC's sound.", NO_ARGS, _call("mute"), event="volume.muted", verify=VOLUME_OK["mute"],
+     expect=lambda a, b: {"muted": True},
+     reflex=[(r"mute(?:\s+(?:it|the sound|the volume|everything|the pc|the music))?", {})], **volume)
+tool("unmute", "Unmute the PC's sound.", NO_ARGS, _call("unmute"), event="volume.unmuted", verify=VOLUME_OK["unmute"],
+     expect=lambda a, b: {"muted": False},
+     reflex=[(r"unmute(?:\s+(?:it|the sound|the volume|everything|the pc|the music))?", {})], **volume)
 tool("get_volume", "The PC's current volume and whether it's muted.", NO_ARGS, _call("get_volume"), changes_state=False,
      **common)
 tool("play_pause", "Play or pause whatever is playing on the PC (Spotify, a browser, a video...). 'Pause the music' / 'stop "
      "the music' = pause; 'play', 'resume', 'keep playing' = play.",
      params({"action": {"type": "string", "enum": ["play", "pause", "toggle"]}}),
      _call("play_pause", lambda a, m: [a.get("action", "toggle")]), event="media.changed", observe=_media_state,
-     undo=_put_playback, undo_is_symmetric=True, **common)
+     undo=_put_playback, undo_is_symmetric=True,
+     reflex=[(r"(?:pause|stop)\s+(?:the\s+|my\s+)?(?:music|song|track|playback|video)|pause(?:\s+it)?", {"action": "pause"}),
+             (r"(?:resume|unpause|keep playing|play\s+(?:the\s+)?music|play it|resume (?:the\s+)?music)", {"action": "play"})],
+     **common)
 tool("next_track", "Skip to the next song or track: 'next song', 'skip this'.", NO_ARGS, _call("next_track"),
-     event="media.changed", observe=_media_state, undo=_undo_next, **common)
+     event="media.changed", observe=_media_state, undo=_undo_next,
+     reflex=[(r"(?:next|skip)(?:\s+(?:song|track|this|it|this song|this track))?", {})], **common)
 tool("previous_track", "Go to the previous song or track: 'previous song', 'go back', 'play the last one again'. (Partway "
      "into a song, players restart it instead.)", NO_ARGS, _call("previous_track"), event="media.changed",
-     observe=_media_state, **common)
+     observe=_media_state, reflex=[(r"(?:previous|last)\s+(?:song|track)|go back a (?:song|track)", {})], **common)
 tool("get_current_media", "What's playing on the PC right now: song, artist, app, playing or paused.", NO_ARGS,
      _call("get_current_media"), changes_state=False, **common)

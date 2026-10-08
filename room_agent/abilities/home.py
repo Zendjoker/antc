@@ -13,7 +13,10 @@ def _status():
 register_group(Group("home", title="smart home control (Home Assistant)", summary=lambda: _status()[1],
                      available=lambda: _status()[0], rules=[
     "- For smart home requests, look up entity ids with home_assistant_states if you don't already know them."]))
-register_claim("home", r"\b(turned|switched|shut|flipped|set)\b.{0,40}\b(on|off)\b(?!\s+(monitor|screen|display|your|my|the|a|this|that)\b)"
+# ("all set, your meeting is on Friday" is not a device being set on: no "all set", and no "on <a day or date>")
+register_claim("home", r"(?<!\ball )\b(turned|switched|shut|flipped|set)\b.{0,40}\b(on|off)\b(?!\s+(monitor|screen|display|your|"
+                       r"my|the|a|this|that|monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|"
+                       r"january|february|march|april|may|june|july|august|september|october|november|december|\d)\b)"
                        r"|\b(lights?|lamps?|fan|heater|tv|plug|switch|thermostat|ac|heat(ing)?)\b.{0,30}\b(are|is)\s+(now\s+)?(on|off)\b"
                        r"|\b(dimmed|brightened)\b.{0,30}\b(lights?|lamps?)\b"
                        r"|\b(locked|unlocked)\b.{0,25}\b(door|doors|lock|garage|gate)\b|\b(door|doors|garage|gate)\b.{0,25}\b(locked|unlocked)\b")

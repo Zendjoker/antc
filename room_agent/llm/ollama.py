@@ -3,10 +3,13 @@
 import json
 import logging
 import re
+import time
 
 import requests
 
+from room_agent import cognition
 from room_agent import runtime as rt
+from room_agent.cognition import metrics
 from room_agent.audio.fillers import LOOP, filler
 from room_agent.audio.speaker import say
 from room_agent.config import OLLAMA_KEEP_ALIVE, OLLAMA_MODEL, OLLAMA_URL
@@ -18,17 +21,24 @@ from room_agent.tools.registry import active_tools, run_tool
 log = logging.getLogger("room-agent")
 
 
-def ask_ollama(history):
+def ask_ollama(history, model=None):
+    """`model`: another Ollama model for this request (cognition's DEEP level), else OLLAMA_MODEL."""
+    model = model or OLLAMA_MODEL
     tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
              for t in active_tools()]
     messages = [{"role": "system", "content": system_prompt()}]
     guard, corrected = new_guard(), False
+    from room_agent.actions.executor import Plan
+
+    plan, stopped = Plan(), False
+    rt.current_plan = plan
     while True:
         buf, spoken, content, calls = "", [], "", []
+        t_call, usage = time.time(), {}
         with requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={
-                "model": OLLAMA_MODEL,
+                "model": model,
                 "messages": messages + history,
                 "tools": tools,
                 "stream": True,
@@ -48,6 +58,8 @@ def ask_ollama(history):
                 part = json.loads(line)
                 if "error" in part:
                     raise RuntimeError(f"Ollama: {part['error']}")
+                if part.get("done"):
+                    usage = part
                 msg = part.get("message", {})
                 calls += msg.get("tool_calls") or []
                 text = msg.get("content", "")
@@ -60,6 +72,8 @@ def ask_ollama(history):
                     if sentence.strip():
                         speak_checked(guard, sentence.strip(), spoken)
                 buf = parts[-1]
+        metrics.model_call("ollama", model, usage.get("prompt_eval_count", 0), usage.get("eval_count", 0),
+                           latency_s=time.time() - t_call)
         if interrupted_now():
             return stop_for_interruption(history, spoken)
         if buf.strip():
@@ -99,6 +113,15 @@ def ask_ollama(history):
                 print("Agent:", " ".join(spoken), flush=True)
             return
         history.append({"role": "assistant", "content": content, "tool_calls": calls})
+        gate = cognition.round_gate(plan, len(calls))  # (limits: rounds, calls, time; REPLAN after a failure)
+        if gate:
+            for c in calls:
+                history.append({"role": "tool", "tool_name": c["function"]["name"], "content": gate})
+            if stopped:
+                say(rt.phrases.pick("unsure"))
+                return
+            stopped = True
+            continue
         if not spoken:
             filler("wait")
         if rt.tts_enabled:
@@ -109,7 +132,12 @@ def ask_ollama(history):
             if isinstance(args, str):
                 args = json.loads(args or "{}")
             log.info("tool %s %s", fn["name"], json.dumps(args))
-            out = run_tool(fn["name"], args)
+            if interrupted_now():  # (they countermanded it: the remaining actions don't run)
+                out = "FAILED: not run, they interrupted."
+            else:
+                t0 = time.time()
+                out = plan.run(fn["name"], args).to_model()  # (a plan: a step on something that failed earlier isn't run)
+                rt.turn.timing["tools"] = rt.turn.timing.get("tools", 0.0) + time.time() - t0
             log.info("tool result: %s", out[:160])
             guard.tool_result(fn["name"], out)
             history.append({"role": "tool", "tool_name": fn["name"], "content": out})

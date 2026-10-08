@@ -24,6 +24,31 @@ from types import SimpleNamespace as NS
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+INTERNAL_GROUPS = ("timers", "memory", "quiet", "voice", "learning", "undo")  # Jarvis's own state (temp files in tests)
+
+
+def simulate_actions(keep=(), keep_groups=()):
+    """For scripts that run the REAL model: every capability that changes the machine or the outside world (apps,
+    windows, volume and media, smart home, calls, email, calendar, and any new group by default) reports success
+    without running, so whatever the model decides, nothing on this PC or in your accounts changes. Reads stay real;
+    Jarvis's own state (timers, memory, settings: temp files in tests) stays real. Left alone: capabilities the script
+    simulates itself, `keep` (tests/sim_pc.SIMULATED) and `keep_groups` (backed by tests/fake_google.py).
+    -> the names that were stubbed."""
+    from room_agent.actions import core
+
+    core.ensure_loaded()
+    stubbed = []
+    for cap in core.REGISTRY.values():
+        if (not cap.changes_state or cap.group in INTERNAL_GROUPS or cap.name in keep or cap.group in keep_groups
+                or not getattr(cap.execute, "__module__", "").startswith("room_agent")):
+            continue
+        cap.execute = lambda args, _n=cap.name: f"OK: {_n} done."
+        cap.observe = cap.verify = cap.expect = cap.undo = None
+        cap.skip_if_satisfied = False
+        stubbed.append(cap.name)
+    return stubbed
+
+
 def setup_env(**extra):
     """Temp files for everything that persists, fake keys, no tracing. Call before importing room_agent."""
     tmp = tempfile.mkdtemp()
@@ -34,8 +59,10 @@ def setup_env(**extra):
         REMINDERS_FILE=os.path.join(tmp, "r.json"), SPEND_FILE=os.path.join(tmp, "s.json"),
         SETTINGS_FILE=os.path.join(tmp, "set.json"), LEARNING_DB=os.path.join(tmp, "learning.db"),
         CONNECTIONS_FILE=os.path.join(tmp, "connections.json"), APPS_CACHE=os.path.join(tmp, "apps.json"),
+        EXPERIENCE_DB=os.path.join(tmp, "experience.db"),
         HA_URL="", HA_TOKEN="", TRACE="0", AUDIO_DEBUG="0", PYTHONIOENCODING="utf-8",
-        PHONE_TUNNEL="")  # (never a real public tunnel from a test, whatever .env says)
+        PHONE_TUNNEL="",  # (never a real public tunnel from a test, whatever .env says)
+        SOCIAL_MEANING="0")  # (the meaning reader loads in the background: a test that wants it opts in and waits for it)
     env.update({k: str(v) for k, v in extra.items()})
     os.environ.update(env)
     if ROOT not in sys.path:

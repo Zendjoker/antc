@@ -86,7 +86,10 @@ requests and chit-chat have nothing to save: then call update_memory with empty 
 
 SUMMARY_SYSTEM = """Summarize this conversation between {user} and their room assistant in one or two short \
 sentences, for the assistant's own memory: what was discussed, anything decided or promised, open threads to \
-follow up on. Refer to {user} by name, don't assume pronouns. Plain text, no preamble. If it was trivial \
+follow up on. Refer to {user} by name, don't assume pronouns. Leave out passing moods and how {user} felt in the \
+moment (tired, annoyed, frustrated, excited): those aren't memories, unless {user} asked you to remember them. \
+Write "tried to open an app that isn't installed", not "got frustrated trying to open an app". \
+Plain text, no preamble. If it was trivial \
 (a greeting, a time check), reply with just: SKIP"""
 
 

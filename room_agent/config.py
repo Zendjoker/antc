@@ -47,12 +47,22 @@ DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "1.00"))  # total for all
 BUDGET_FALLBACK = os.getenv("BUDGET_FALLBACK", "ollama").lower()  # past the budget: ollama (free local model) | stop
 MEMORY_BATCH = os.getenv("MEMORY_BATCH", "1") == "1"  # learn facts once per conversation instead of after every exchange
 
+# ---------- cognition (room_agent/cognition/): how much reasoning a request gets, and the limits of one request ----------
+REFLEX = os.getenv("REFLEX", "1") == "1"  # simple fully specified commands ("open Spotify") run without a model call
+LEVEL_DEEP = os.getenv("LEVEL_DEEP", "smart").lower()  # who handles DEEP requests: smart (LLM_SMART) | default
+OLLAMA_MODEL_DEEP = os.getenv("OLLAMA_MODEL_DEEP", "").strip()  # local/Ollama setups: a stronger model for DEEP (blank = same)
+COG_MAX_TOOL_ROUNDS = int(os.getenv("COG_MAX_TOOL_ROUNDS", "6"))  # tool rounds per request before it must stop and report
+COG_MAX_TOOL_CALLS = int(os.getenv("COG_MAX_TOOL_CALLS", "14"))   # tool calls per request
+COG_MAX_TURN_S = float(os.getenv("COG_MAX_TURN_S", "90"))         # seconds of tool work per request
+COG_MAX_RETRIES = int(os.getenv("COG_MAX_RETRIES", "2"))          # the same failing action, at most this many times per goal
+
 # ---------- audio devices and rates ----------
 SR = 16000  # mic / wake word / STT rate
 OUT_SR = int(os.getenv("OUTPUT_SAMPLE_RATE", "24000"))  # speaker rate. 16000 sounds like a phone call
 FRAME = 1280  # 80 ms, what openWakeWord expects
 MIC_DEVICE = os.getenv("MIC_DEVICE", "")  # name fragment or index, blank = system default
 SPEAKER_DEVICE = os.getenv("SPEAKER_DEVICE", "")
+FOLLOW_DEFAULT_DEVICE = os.getenv("FOLLOW_DEFAULT_DEVICE", "1") == "1"  # blank MIC/SPEAKER_DEVICE: follow Windows' default live
 AEC = os.getenv("ECHO_CANCELLATION", "1") == "1"  # subtract the agent's own voice from the mic
 NOISE_SUPPRESSION = os.getenv("NOISE_SUPPRESSION", "1") == "1"
 
@@ -134,6 +144,10 @@ EL_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
 # Voices from .env. The voice in use right now (it can be changed by voice) is audio.voices.current.
 EL_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "nPczCjzI2devNBz1zQrb")
 PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-ryan-high")  # browse: huggingface.co/rhasspy/piper-voices
+EL_FALLBACK_MODEL = os.getenv("ELEVENLABS_FALLBACK_MODEL", "eleven_flash_v2_5").strip()  # if the main model is refused
+EL_TEXT_NORMALIZATION = os.getenv("ELEVENLABS_TEXT_NORMALIZATION", "auto").strip().lower()  # auto | on | off
+EL_SEED = os.getenv("ELEVENLABS_SEED", "").strip()  # a fixed seed: repeatable audio for A/B tests (blank = natural variation)
+SPEECH_DEBUG = os.getenv("SPEECH_DEBUG", "0") == "1"  # log SEMANTIC / STRATEGY / PERFORMANCE / MODEL per sentence
 
 # ---------- integrations ----------
 HA_URL = os.getenv("HA_URL", "").rstrip("/")
@@ -176,5 +190,6 @@ PERSONA_FILE = Path(os.getenv("PERSONA_FILE", HERE / "room_agent" / "persona.md"
 LEARNING_DB = Path(os.getenv("LEARNING_DB", HERE / "learning.db"))  # learned preferences + interaction records (local only)
 LEARNING_TELEMETRY = os.getenv("LEARNING_TELEMETRY", "1") != "0"  # 0: learn preferences but keep no interaction records
 USER_PROFILE = os.getenv("USER_PROFILE", "").strip()  # whose preferences (default: USER_NAME)
-APPS_CACHE = Path(os.getenv("APPS_CACHE", HERE / "apps_cache.json"))  # installed Windows apps, found once and reused
+APPS_CACHE = Path(os.getenv("APPS_CACHE", HERE / "apps_cache.json"))
+EXPERIENCE_DB = Path(os.getenv("EXPERIENCE_DB", HERE / "experience.db"))  # goal outcomes + turn metrics (cognition/)  # installed Windows apps, found once and reused
 RECENT_HOURS = float(os.getenv("RECENT_HOURS", "12"))  # after a restart, pick up conversations this recent

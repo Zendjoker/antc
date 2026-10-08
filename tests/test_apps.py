@@ -178,6 +178,9 @@ r = tool("close_app", app_name="Chrome", confidence=0.4)
 check("unclear 'close' (low confidence) -> asks first", r.startswith("NEEDS_CONFIRMATION") and "Google Chrome" in PC, r)
 
 print("through the conversation (fake model):")
+from room_agent import config  # noqa: E402
+
+config.REFLEX = False  # (this part tests the model's path: tool offering and the claim check. Reflexes: test_cognition)
 PC.clear()
 history = []
 res = turn(history, "Open Discord", [{"tool": ("open_app", {"app_name": "Discord"})}, {"text": "Discord's open."}])

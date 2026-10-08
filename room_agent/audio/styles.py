@@ -28,6 +28,7 @@ class Spoken(str):
     """A sentence queued for speaking, with the style it should be delivered in."""
 
     style = ""
+    delivery = None  # social/delivery.py VoiceDelivery for this reply (pace, energy), or None
 
 
 def supported():

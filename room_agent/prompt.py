@@ -14,7 +14,7 @@ from room_agent import config
 from room_agent import runtime as rt
 from room_agent.audio import styles
 from room_agent.config import USER_NAME
-from room_agent.tools.validate import contracts, current_pending
+from room_agent.tools.validate import contracts
 from room_agent.truth import capabilities, render_registry  # noqa: F401 (capabilities: re-exported for the CLI)
 
 STYLE_RULES = (
@@ -41,8 +41,9 @@ CONVERSATION = [
     "timer (or similar). If one message asks for several things (\"set it and motivate me\"), do all of them in this reply: "
     "call the tools, then answer the rest.",
     "- What you need to run a tool comes from the tool_contracts in the runtime context, not from your own caution. If every "
-    "REQUIRED parameter is known, call the tool now. If one is missing, ask only for that, in a few words. Never ask about "
-    "optional parameters. If a tool returns NEEDS, ask exactly what it says is missing; if NEEDS_CONFIRMATION, ask the yes/no "
+    "REQUIRED parameter is known, call the tool now. If some are missing, STILL call the tool with exactly what they did say "
+    "(never invent the rest): code keeps the request, collects the missing details over the next turns and tells you the one "
+    "question to ask. Never ask about optional parameters. If a tool returns NEEDS, ask exactly what it says is missing; if NEEDS_CONFIRMATION, ask the yes/no "
     "question. When the runtime context shows pending_request or assistant_just_asked, their message is probably the answer: "
     "combine it with what was already said and carry on.",
     "- Different requests change different things. go_quiet (stay quiet, go to sleep) only when they clearly mean it. \"Let me "
@@ -104,12 +105,11 @@ def runtime_context(user_text):
              f"- assistant_state: {rt.state.state.name.lower()} ({rt.state.state.value})",
              render_registry(capabilities())]
     lines += core.context_lines(user_text)  # (each area's live facts: memory, timers, the app in conversation, ...)
-    pending = current_pending()
-    if pending:
-        waiting = "a yes/no confirmation" if pending.get("confirm") else "missing: " + ", ".join(pending["missing"])
-        lines.append(f"- pending_request: {pending['tool']} with {pending['args'] or 'nothing yet'}, waiting for {waiting}. "
-                     "If their next message answers it, merge it and call the tool (it may fit a different timer or alarm tool); "
-                     "if it's about something else, forget this.")
+    from room_agent.actions import pending
+
+    line = pending.context_line()  # (a request still being filled in, or waiting for a yes: actions/pending.py)
+    if line:
+        lines.append(line)
     if rt.last_reply.rstrip().endswith("?"):
         lines.append(f"- assistant_just_asked: {rt.last_reply[-160:]!r}. Their next message is most likely the answer to that, "
                      "so read it that way (never as unfinished or unrelated).")

@@ -11,6 +11,7 @@ from room_agent.config import (EXPLAIN_PATIENCE, FRAME, MIN_VOICE_MASS, SILENCE_
                                WAKE_GUARD_S, WAKE_THRESHOLD)
 
 last_speech_start = None  # when the latest utterance's speech began (epoch seconds), for judging echo by timing
+last_speech_end = None    # when its last speech frame was heard (speech/timing.py: the user's endpoint)
 
 
 def next_frame(mic_q):
@@ -86,6 +87,8 @@ def record_utterance(mic_q, silence_s=None, max_s=15, start_timeout=5, prefix=()
                     return None
                 continue
             if silent >= silence_s or talked > max_s:  # max length counts from your first word
+                global last_speech_end
+                last_speech_end = time.time() - silent
                 break
         else:
             waited += step

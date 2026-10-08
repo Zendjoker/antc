@@ -43,13 +43,41 @@ class Capability:
     confirm_keys: Any = None                       # args that a "yes" must match (default: all of them)
     prepare: Optional[Callable[[dict], dict]] = None   # resolve references ("current draft" -> its id) before checks
     describe: Optional[Callable[[dict], str]] = None   # what it will do, for the confirmation question
+    # (cognition/) all optional:
+    expect: Optional[Callable[[dict, Any], dict]] = None  # (args, state before) -> what observe() must show afterwards,
+                                                   # e.g. {"monitor.num": 2}: checked as EXPECTED vs OBSERVED
+    skip_if_satisfied: bool = False                # with expect: if it's already so, don't act at all ("already muted")
+    fresh_for: float = 15.0                        # read-only results / observed state count as VERIFIED this long (s)
+    reflex: list = field(default_factory=list)     # [(regex with named groups = arguments, default args)]: run without
+                                                   # a model call when a request matches exactly (cognition/reflex.py)
+    reflex_check: Optional[Callable[[dict], bool]] = None  # a reflex only fires if this agrees (e.g. the app exists)
+    reflex_say: Optional[Callable[[Any], str]] = None  # (verified ActionResult) -> the short spoken confirmation
 
     def schema(self):
         """The tool definition the model sees."""
         description = self.description
         if self.examples:
             description += " E.g. " + "; ".join(f"'{e}'" for e in self.examples[:4]) + "."
-        return {"name": self.name, "description": description, "input_schema": self.parameters}
+        if not self.changes_state and self.name != "update_goal":
+            description = "Read-only (changes nothing): " + description
+        props = (self.parameters or {}).get("properties", {})
+        if any(isinstance(s, dict) and s.get("x-ask") for s in props.values()):  # (actions/pending.py collects the rest)
+            description += (" Call it as soon as they ask, even with details missing (pass only what they said): it keeps "
+                            "the request and tells you what to ask; don't ask for the details yourself first.")
+        return {"name": self.name, "description": description, "input_schema": _public(self.parameters)}
+
+
+def _public(schema):
+    """The schema without Jarvis's own "x-..." hints (questions, cues: see actions/pending.py): models get plain JSON
+    Schema."""
+    if not isinstance(schema, dict):
+        return schema
+    out = {k: v for k, v in schema.items() if not k.startswith("x-")}
+    if schema.get("x-optional-when") and "required" in out:  # (required only sometimes: the description says when)
+        out["required"] = [k for k in out["required"] if k not in schema["x-optional-when"]]
+    if isinstance(out.get("properties"), dict):
+        out["properties"] = {k: _public(v) for k, v in out["properties"].items()}
+    return out
 
 
 @dataclass
@@ -94,7 +122,7 @@ def register_group(group: Group):
 MODULES = ["room_agent.abilities.info", "room_agent.abilities.location", "room_agent.abilities.timers", "room_agent.abilities.apps",
            "room_agent.abilities.windows", "room_agent.abilities.media", "room_agent.abilities.memory",
            "room_agent.abilities.presence", "room_agent.abilities.voice", "room_agent.abilities.home",
-           "room_agent.abilities.undo", "room_agent.abilities.phone", "room_agent.learning.capabilities", "room_agent.integrations.capabilities"]
+           "room_agent.abilities.undo", "room_agent.abilities.phone", "room_agent.abilities.system", "room_agent.learning.capabilities", "room_agent.integrations.capabilities"]
 LINES = []    # extra "what I can do" lines that aren't a tool area: (title, available(), detail or detail())
 CONTEXT = []  # (order, provider): provider(user_text) -> lines for the runtime context
 

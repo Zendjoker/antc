@@ -4,6 +4,8 @@ import logging
 import re
 
 from room_agent import runtime as rt
+from room_agent import social
+from room_agent.actions import pending
 from room_agent.audio.speaker import say
 from room_agent.audio.styles import split_style
 from room_agent.config import USER_NAME
@@ -43,13 +45,19 @@ def speak_checked(guard, sentence, spoken):
         sentence = _NEED.sub("", sentence)
         if (SCHEMAS.get(need.group(1), {}).get("required") and not rt.must_answer and not spoken
                 and not current_pending()):
-            rt.turn_signal, rt.control["hold"] = "listen", True
+            if pending.collectable(need.group(1)):
+                rt.turn_signal = "listen"  # (no hold: a finished request is asked again at once and collected turn by turn)
+            else:
+                rt.turn_signal, rt.control["hold"] = "listen", True
     if signal:  # the model decided no spoken reply is needed (<silent>) or they're mid-sentence (<listen>)
         rt.turn_signal = signal.group(1).lower()
         sentence = _SIGNAL.sub("", sentence)
     sentence, style = split_style(sentence)  # a leading [soft]-style tag sets the delivery, and is never spoken
     if style:
         rt.turn_style = style
+    sentence = social.scrub(sentence) if sentence.strip() else sentence  # (no "Certainly!", no "Let me know if...")
+    if sentence.strip() and social.over_cap(spoken):
+        return  # a tiny-reply turn ("whatever" -> "Alright.") has said enough
     if sentence.strip() and guard.admit(sentence):
         spoken.append(sentence)
         say(sentence)

@@ -5,13 +5,52 @@ monitor last acted on, what's playing, the last action, what can be undone. "Mov
 Fields that existing systems already keep (runtime.py) are read and written there, so nothing had to be migrated:
 active_app <-> rt.last_active_app, pending_intent <-> rt.pending, ringing_event <-> rt.ringing / rt.last_ring.
 Features fill in only what they know; the rest stays None.
+
+Beliefs: facts about the world with how much they can be trusted right now. The executor records them (what an
+observation or a verified action showed); nothing else has to. Each one knows its source, method, confidence and age:
+    VERIFIED     observed (or read back after an action) recently
+    BELIEVED     reported or inferred, never observed
+    STALE        it was true when observed, but that's too long ago to rely on
+    CONFLICTING  two recent sources disagree
+    UNKNOWN      no belief at all (Jarvis may say "I don't know" and should observe, ask, never invent)
 """
 
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from room_agent import runtime as rt
 
 UNDO_KEEP, UNDO_FRESH_S = 10, 1800  # undo remembers the last 10 changes, for half an hour
+VERIFIED, BELIEVED, UNKNOWN, STALE, CONFLICTING = "VERIFIED", "BELIEVED", "UNKNOWN", "STALE", "CONFLICTING"
+OBSERVED_METHODS = ("observed", "action-verified")
+MAX_BELIEFS = 300
+
+
+@dataclass
+class Belief:
+    key: str                  # "media.volume", "apps.Spotify.running", "inspect_ports(port=8000)"...
+    value: Any
+    source: str               # the capability (or other component) it came from
+    method: str = "observed"  # observed | action-verified | reported | inferred
+    confidence: float = 1.0
+    observed_at: float = 0.0
+    stale_after: float = 60.0  # seconds after which it's STALE
+    conflict: Any = None       # {"value", "source", "at"} when another recent source disagreed
+
+    def status(self, now=None):
+        now = now or time.time()
+        if self.conflict and now - self.conflict["at"] < self.stale_after:
+            return CONFLICTING
+        if now - self.observed_at > self.stale_after:
+            return STALE
+        return VERIFIED if self.method in OBSERVED_METHODS else BELIEVED
+
+    def describe(self, now=None):
+        now = now or time.time()
+        age = int(now - self.observed_at)
+        value = self.value if not isinstance(self.value, str) or len(self.value) <= 140 else self.value[:140] + "..."
+        return f"{self.key} = {value} ({self.status(now).lower()}, {age}s ago, from {self.source})"
 
 
 class EnvironmentContext:
@@ -29,6 +68,47 @@ class EnvironmentContext:
         # {"id", "label", "account", "at", ...}. "It", "that thread", "he", "send it" resolve against these.
         self.items = {}
         self.known_addresses = set()  # email addresses seen in real message headers this session (not in bodies)
+        self.beliefs = {}             # key -> Belief (see the module doc)
+
+    # ----- beliefs about the world
+    def believe(self, key, value, source, method="observed", confidence=1.0, stale_after=60.0, at=None):
+        """Record what a source says is true. A fresh observation replaces older or weaker beliefs; a weaker claim that
+        disagrees with a fresh observation doesn't replace it but marks the belief CONFLICTING."""
+        now = at or time.time()
+        old = self.beliefs.get(key)
+        new = Belief(key, value, source, method, confidence, now, stale_after)
+        if old and old.value != value and old.status(now) in (VERIFIED, BELIEVED):
+            if method not in OBSERVED_METHODS and old.method in OBSERVED_METHODS:
+                old.conflict = {"value": value, "source": source, "at": now}  # (the observation is kept)
+                return old
+            if method not in OBSERVED_METHODS and old.method not in OBSERVED_METHODS and old.source != source:
+                new.conflict = {"value": old.value, "source": old.source, "at": now}
+        self.beliefs[key] = new
+        if len(self.beliefs) > MAX_BELIEFS:
+            for k in sorted(self.beliefs, key=lambda k: self.beliefs[k].observed_at)[: len(self.beliefs) - MAX_BELIEFS]:
+                self.beliefs.pop(k, None)
+        return new
+
+    def belief(self, key):
+        """The Belief for `key`, or None (UNKNOWN)."""
+        return self.beliefs.get(key)
+
+    def status_of(self, key):
+        b = self.beliefs.get(key)
+        return b.status() if b else UNKNOWN
+
+    def relevant_beliefs(self, words=(), limit=6, sources=()):
+        """Beliefs whose key or value mentions any of `words`, or that came from one of `sources` (capabilities about
+        the same thing), newest first. Nothing to go on: the most recent ones."""
+        words = [w.lower() for w in words if len(w) >= 3]
+        found = [b for b in self.beliefs.values()
+                 if (not words and not sources) or b.source in sources
+                 or any(w in f"{b.key} {b.value}".lower() for w in words)]
+        return sorted(found, key=lambda b: -b.observed_at)[:limit]
+
+    def forget_beliefs(self, prefix=""):
+        for k in [k for k in self.beliefs if k.startswith(prefix)]:
+            self.beliefs.pop(k, None)
 
     def remember_item(self, kind, item, label=""):
         self.items[kind] = {**item, "label": label or item.get("label", ""), "at": time.time()}

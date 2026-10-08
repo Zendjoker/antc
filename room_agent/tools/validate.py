@@ -2,19 +2,19 @@
 schema and the tables below, never from the model's say-so. The model understands the request; this decides
 whether it may run."""
 
-import time
 
 from room_agent import runtime as rt
 
 SCHEMAS = {}  # name -> parameter schema, filled in as capabilities register (actions/core.register)
 HIGH_IMPACT = {"go_quiet": 0.8, "forget": 0.8, "cancel_timer": 0.7, "close_app": 0.7}  # minimum intent confidence before these run
-PENDING_TURNS, PENDING_SECONDS = 3, 180  # how long an unfinished request is remembered
 
 
 def _coerce(value, spec):
     kind = spec.get("type")
     try:
         if kind == "integer":
+            if isinstance(value, str):
+                value = value.strip().rstrip("%").strip()  # ("50%" from a model is still 50)
             if isinstance(value, bool) or float(value) != int(float(value)):
                 raise ValueError
             return int(float(value))
@@ -50,8 +50,10 @@ def validate(name, args):
     schema = SCHEMAS.get(name)
     if schema is None:
         return args, None
-    props, required = schema.get("properties", {}), schema.get("required", [])
+    from room_agent.actions import pending
+
     args = dict(args or {})
+    props, required = schema.get("properties", {}), pending.required(schema, args)
     clean, missing = {}, []
     for key, spec in props.items():
         value = args.get(key)
@@ -70,15 +72,12 @@ def validate(name, args):
             return None, f"FAILED: '{key}' must be between {low} and {high}. Nothing was done."
         clean[key] = value
     if missing:
-        rt.pending = {"tool": name, "args": {k: v for k, v in clean.items() if k != "confidence"},
-                      "missing": missing, "turn": rt.turn_no, "at": time.time()}
-        what = "; ".join(f"{k} ({props[k].get('description', k)})" for k in missing)
-        return None, (f"NEEDS: {what}. Nothing was done yet. Ask the user for only that, in one short question; "
-                      "what they already told you is remembered.")
+        p = pending.collecting(name, clean, missing)  # (kept and filled in over the next turns: actions/pending.py)
+        what = "; ".join(f"{k} ({props[k].get('description', k)})" for k in p.missing)
+        return None, pending.needs_message(p, what)
     need = HIGH_IMPACT.get(name)
     if need is not None and clean.get("confidence", 0.5) < need:
-        rt.pending = {"tool": name, "args": {k: v for k, v in clean.items() if k != "confidence"}, "confirm": True,
-                      "turn": rt.turn_no, "at": time.time()}
+        pending.confirming(name, clean)
         return None, ("NEEDS_CONFIRMATION: nothing was done. This changes something important and the request wasn't "
                       "clearly explicit. Ask one short yes/no question to confirm; if they agree, call it again with "
                       "confidence 1.")
@@ -90,9 +89,14 @@ def missing_required(name, args):
     """Required parameters the model left out of a call (checked before anything is said or run)."""
     from room_agent.tools.timers import as_timer
 
+    from room_agent.actions import pending
+
     _loaded()
-    required = (SCHEMAS.get(name) or {}).get("required", [])
     args = args if isinstance(args, dict) else {}
+    p = pending.current()
+    if p is not None and p["tool"] == name and not p.get("confirm"):
+        args = {**p["args"], **args}  # (what was already collected counts)
+    required = pending.required(SCHEMAS.get(name) or {}, args)
     if as_timer(name, args, rt.turn_text):
         return []  # an alarm "in 10 seconds": it runs as a timer, nothing is missing
     return [k for k in required if args.get(k) is None or (isinstance(args[k], str) and not args[k].strip())]
@@ -100,10 +104,9 @@ def missing_required(name, args):
 
 def current_pending():
     """The unfinished request that the user's next message may be answering, or None."""
-    p = rt.pending
-    if p and (rt.turn_no - p["turn"] > PENDING_TURNS or time.time() - p["at"] > PENDING_SECONDS):
-        rt.pending = None
-    return rt.pending
+    from room_agent.actions import pending
+
+    return pending.current()
 
 
 def contracts(tools):

@@ -11,6 +11,8 @@ import threading
 
 tmp = pathlib.Path(tempfile.mkdtemp())
 os.environ.update(REMINDERS_FILE=str(tmp / "rem.json"), MEMORY_DB=str(tmp / "mem.db"), SETTINGS_FILE=str(tmp / "set.json"),
+                  LEARNING_DB=str(tmp / "learning.db"), EXPERIENCE_DB=str(tmp / "experience.db"),
+                  CONNECTIONS_FILE=str(tmp / "connections.json"), SOCIAL_MEANING="0",
                   WEATHER_LOCATION="San Francisco", TRACE="1" if "trace" in sys.argv else "0", PYTHONIOENCODING="utf-8")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -26,6 +28,9 @@ from room_agent.audio.fillers import LOOP  # noqa: E402
 from room_agent.conversation.turn import take_turn  # noqa: E402
 from room_agent.llm import claude  # noqa: E402
 from room_agent.tools import registry, timers  # noqa: E402
+from tests.harness import simulate_actions  # noqa: E402
+
+simulate_actions()  # (the real model decides; the PC, apps, volume, email and calendar are never really touched)
 
 rt.tts_enabled = True
 tts.record_in_background = lambda texts: None  # don't re-record stock phrases on a voice change

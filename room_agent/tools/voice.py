@@ -23,8 +23,6 @@ def set_listening_patience(level):
 def set_speaking_rate(rate):
     if not rt.tts_enabled:
         return "UNAVAILABLE: there's no voice output in this mode."
-    if voices.provider() == "piper":
-        return "UNAVAILABLE: the free local voice can't change its speed (ElevenLabs can)."
     rt.speech_rate = SPEECH_RATES[rate]
     voices.save_setting("speech_rate", rt.speech_rate)
     return f"OK: speaking pace is now '{rate}'. It's used from the next sentence on and kept."

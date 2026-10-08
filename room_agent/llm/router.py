@@ -14,8 +14,9 @@ import requests
 from room_agent import runtime as rt
 from room_agent import trace
 from room_agent.audio.speaker import finish_speaking, say
-from room_agent.config import (BUDGET_FALLBACK, LLM_COMPLEX_TOPICS, LLM_COMPLEX_WORDS, LLM_DEFAULT,
-                               LLM_PROVIDER, LLM_SMART, LLM_SMART_TRIGGERS, MODEL, OLLAMA_URL, OPENAI_KEY, OPENAI_MODEL)
+from room_agent.config import (BUDGET_FALLBACK, LEVEL_DEEP, LLM_COMPLEX_TOPICS, LLM_COMPLEX_WORDS, LLM_DEFAULT,
+                               LLM_PROVIDER, LLM_SMART, LLM_SMART_TRIGGERS, MODEL, OLLAMA_MODEL_DEEP, OLLAMA_URL, OPENAI_KEY,
+                               OPENAI_MODEL)
 from room_agent.llm.budget import budget
 from room_agent.llm.claude import ask_claude
 from room_agent.llm.ollama import ask_ollama
@@ -43,11 +44,14 @@ def choose(text):
 def ask(history):
     """Answer the last message in `history`: speaks the reply and appends it (and any tool calls) to `history`."""
     budget.start_turn()
+    level = getattr(rt.turn, "level", None)  # (cognition/levels.py: how much reasoning this request deserves)
     if LLM_PROVIDER == "ollama":
-        return ask_ollama(history)
+        return ask_ollama(history, model=OLLAMA_MODEL_DEEP if level == "DEEP" and OLLAMA_MODEL_DEEP else None)
     if budget.exceeded():
         return over_budget(history)
     provider, why = choose(rt.turn_text)
+    if level == "DEEP" and LEVEL_DEEP == "smart" and provider != LLM_SMART:
+        provider, why = LLM_SMART, "deep reasoning"
     log.info("model: %s (%s)", NAMES.get(provider, provider), why)
     trace.note("MODEL", f"{NAMES.get(provider, provider)} ({why})")
     if provider != "openai":

@@ -57,13 +57,15 @@ def normalized(pcm, target=3000.0, max_gain=30.0):
     return np.clip(x * min(target / float(np.sqrt(np.mean(x[x != 0] ** 2))), max_gain), -32768, 32767)
 
 
-def whisper_text(pcm):
+def whisper_text(pcm, prompt=None):
+    """`prompt`: what the speech is expected to be (Whisper's initial prompt), e.g. while Jarvis waits for an address."""
     with _whisper_lock:
         # beam 5 and a fixed temperature: the default fallback re-decodes doubtful audio with random sampling,
         # which is where completely unrelated phrases came from. No carry-over text between segments either.
         t0, sent = time.time(), normalized(pcm)
         segments, _ = load_whisper().transcribe(
-            sent / 32768.0, language="en", beam_size=5, temperature=0.0, condition_on_previous_text=False
+            sent / 32768.0, language="en", beam_size=5, temperature=0.0, condition_on_previous_text=False,
+            initial_prompt=prompt or None,
         )
         kept, seen = [], []
         for s in segments:
@@ -110,8 +112,16 @@ def verify_barge(pcm, check_speaker=True):
 
 
 def transcribe(pcm):
+    from room_agent.actions.pending import stt_hint
+
+    hint = stt_hint()  # (Jarvis is waiting for an email address: say so to the recognizer)
+    if hint:
+        log.info("speech recognition hint: expecting an email address")
     if STT_PROVIDER == "whisper":
-        return whisper_text(pcm)
+        text = whisper_text(pcm, prompt=hint)
+        if hint:
+            log.info("email: RAW TRANSCRIPT %r (heard while an address was expected)", text)
+        return text
     r = requests.post(
         "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true",
         headers={"Authorization": f"Token {DG_KEY}", "Content-Type": "audio/wav"},

@@ -21,7 +21,7 @@ def _detail():
 
 
 register_group(Group("voice", re.compile(r"voice|speak|talk|slow|fast|pace|soft|loud|whisper|serious|tone|sound|patien|wait|"
-                                         r"interrupt|cut me|rush|accent|calm|excit|normal", re.I)))
+                                         r"pronounc|say (?:it|\w+) like|interrupt|cut me|rush|accent|calm|excit|normal", re.I)))
 register_line("changing its voice, speaking pace and listening patience", _detail, available=tts_on)
 register_claim("voice", r"\b(switched|changed|swapped)\b.{0,30}\bvoices?\b|\bnew voice\b|\bthis is .{0,15}\bvoice now\b")
 register_claim("style", r"\b(talking|speaking|going|getting|sounding)\s+(more\s+)?(softly|softer|quieter|gentler|serious(ly)?|warmer)\b"
@@ -44,7 +44,7 @@ tool("set_listening_patience", "Wait longer after they pause before treating the
      _call("set_listening_patience", "level"), group="voice")
 tool("set_speaking_rate", "Change how fast you talk and keep it: 'talk slower', 'much slower', 'speed up', or 'normal'.",
      params({"rate": {"type": "string", "enum": list(SPEECH_RATES)}}, ["rate"]), _call("set_speaking_rate", "rate"),
-     group="voice", available=lambda: tts_on() and voices.provider() != "piper")
+     group="voice", available=tts_on)
 tool("set_speaking_style", "Change how you sound from now on and keep it: softer, whispering, warmer, more engaged, more "
      "excited, more serious, playful, or back to normal. Use when they say things like 'talk softer', 'be more serious', "
      "'more energy' or 'talk normal again'.",
@@ -56,3 +56,20 @@ tool("set_voice", "Change your speaking voice. Give a voice name from list_voice
      "'woman'. The new voice is used from your next sentence on and kept.",
      params({"name": {"type": "string"}}, ["name"]), _call("set_voice", "name"), group="voice", claim="voice",
      available=tts_on)
+
+
+def _pron(fn_name):
+    def run(args):
+        from room_agent.speech import pronounce
+
+        return getattr(pronounce, fn_name)(args)
+    return run
+
+
+tool("set_pronunciation", "Remember how to SAY a word (a name, project, brand): 'say AimChart like aim chart', 'it's "
+     "pronounced Shiv-awn'. Only changes how it's spoken; the spelling stays the same everywhere.",
+     params({"term": {"type": "string", "description": "The word as it's written, e.g. 'AimChart'"},
+             "say_as": {"type": "string", "description": "How it should sound, in plain letters, e.g. 'aim chart'"}},
+            ["term", "say_as"]), _pron("set_pronunciation"), group="voice", available=tts_on)
+tool("forget_pronunciation", "Go back to saying a word the normal way.", params({"term": {"type": "string"}}, ["term"]),
+     _pron("forget_pronunciation"), group="voice", available=tts_on)

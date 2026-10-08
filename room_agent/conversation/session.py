@@ -7,6 +7,7 @@ import time
 import numpy as np
 
 from room_agent import runtime as rt
+from room_agent import social
 from room_agent import trace
 from room_agent.audio import mic as mic_input
 from room_agent.audio import debug
@@ -152,6 +153,7 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
             filler_if_slow(rt.turn_start)
             text = transcribe(pcm)
             rt.stt_seconds = time.time() - rt.turn_start
+            social.heard(pcm, text)  # (how it was said: supporting evidence for the social layer, a few ms)
             label, detail = classify_audio(text, mic_input.last_speech_start)  # who is this? before what does it mean?
             trace.note("INPUT", repr(text))
             trace.note("AUDIO", f"{label} ({detail})")

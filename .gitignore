@@ -28,3 +28,4 @@ bin/
 *.npz
 recent.json
 traces/
+bench/

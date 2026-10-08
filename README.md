@@ -112,6 +112,20 @@ With `ELEVENLABS_MODEL=eleven_v4_turbo` (or `eleven_v3_conversational`) the agen
 - It also picks a style for a reply by itself when the moment calls for it (good news sounds excited, bad news soft). The tag is never spoken or saved in the conversation.
 - Other models (`eleven_flash_v2_5`, Piper) can't do this; they sound the same whatever the style. Code is in `room_agent/audio/styles.py`.
 
+How a sentence is performed is decided separately from what it says (`room_agent/speech/`):
+- What Jarvis says (the SEMANTIC text) is what's stored, remembered and shown. The PERFORMANCE script (`[quiet, warm] Yeah...
+  what happened?`) exists only inside the request to ElevenLabs.
+- `social/meaning.py` reads what you MEAN (tired, urgent, heavy news, good news, frustrated) with a small local model, so
+  wording nobody wrote a rule for still lands; `speech/director.py` turns that plus the sentence's own purpose (an
+  apology, a surprise, a warning...) into a few delivery words, a pace and at most one emphasized word. Most sentences get
+  none: plain is the default.
+- `speech/elevenlabs.py` renders it per model (tags only for v3/v4, never SSML there; plain words for other models) and
+  validates it (same words, at most 2 tags, no laughing at bad news); anything doubtful goes out plain.
+- If ElevenLabs times out, disconnects, returns no audio or refuses the model, that sentence is said by the local voice
+  (or the fallback model): expressiveness can be lost, the sentence never is.
+- Say "say AimChart like aim chart" to fix a pronunciation (spoken only; the spelling stays).
+- `SPEECH_DEBUG=1` logs every sentence's semantic text, strategy, performance script and model.
+
 ## Presence: waking, check-ins, going to sleep
 - **"Hey Jarvis" on its own** gets a quick reply ("Yeah?", "I'm here.", "What's up?"...), then Jarvis listens.
 - **"Hey Jarvis, what's the weather?"** in one go gets answered directly, with no "yeah?" first.
@@ -188,6 +202,11 @@ One file in `room_agent/abilities/` (copy a small one like `presence.py`), plus 
 - Optional: `observe` / `verify` / `undo` (checks and undo), `risk=Risk.CONFIRM/SENSITIVE`, `register_claim(...)` for
   what it can confirm, `register_context(...)` for live facts it adds to each request.
 Nothing else (router, prompt, claim check) needs editing.
+- Optional, for the cognition layer (`room_agent/cognition/`): `expect` (what `observe` must show afterwards: checked as
+  expected vs observed), `skip_if_satisfied`, `fresh_for`, and `reflex` patterns (simple phrasings that run with no model
+  call). Read-only capabilities (`changes_state=False`) are automatically offered as checks before acting.
+- `python -m tests.cognition_live` runs goal scenarios with the real model against a simulated PC (nothing on the PC
+  changes); every turn's level, model calls, tokens, actions and observations are kept in `experience.db`.
 
 ## Debugging and tests
 - `TRACE=1` in `.env` logs one block per turn: `INPUT`, `AUDIO` (USER / AGENT_ECHO / NOISE / UNCERTAIN), `INTENT`, `CAPABILITY`, `PARAMS`, `MISSING`, `ACTION`, `RESULT`, `RESPONSE`.
@@ -196,6 +215,11 @@ Nothing else (router, prompt, claim check) needs editing.
 - `python -m tests --live` adds the PC tests (really opens/moves apps, changes the volume, plays music briefly, then puts
   everything back). `python -m tests apps media` runs only the suites with those words in the name.
 - `python tests/scenarios.py` runs about 50 natural-language requests against the real model (costs a little).
+- Voice: `python -m tests.voice_audition` makes A/B clips (previous vs new delivery; ElevenLabs too when a key is set),
+  `... serve` opens a blind listening page on http://127.0.0.1:8770, `... score` unblinds your ratings.
+  `python -m tests.tts_bench` measures ElevenLabs models, HTTP vs WebSocket, normalization and seeds (`--selftest`: no key).
+  `python -m tests.speech_latency <label>` measures time to first sound with the real model (actions are simulated).
+  None of these change anything on the PC.
 
 ## Upgrade path
 1. Custom wake word ("hey adam"): train it with openWakeWord's Colab notebook, put the `.onnx` file next to `main.py`, and set `WAKE_WORD=hey_adam.onnx`.

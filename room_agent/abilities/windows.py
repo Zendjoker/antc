@@ -4,7 +4,7 @@ import ctypes
 import os
 
 from room_agent.abilities._kit import NO_ARGS, params, tool
-from room_agent.abilities.apps import APP_HINTS, app_arg, app_live, resolve_app_name
+from room_agent.abilities.apps import APP_HINTS, app_arg, app_live, known_app, resolve_app_name
 from room_agent.actions.core import Group, register_group
 
 IS_WINDOWS = os.name == "nt"
@@ -87,15 +87,30 @@ def _call(fn_name, *keys):
     return run
 
 
+def _expect_monitor(args, before):
+    """Where "move it to <monitor>" must end up, worked out from where it was (the same rules as the tool)."""
+    from room_agent.tools import window_control as wc
+
+    if not before or not before.get("monitor"):
+        return None
+    mons = wc.monitors()
+    current = next((m for m in mons if m["num"] == before["monitor"]["num"]), None)
+    dest, problem = wc.pick_monitor(args.get("monitor", ""), mons, current, None)
+    return {"monitor.num": dest["num"]} if dest else None
+
+
+WIN = r"(?P<app>[\w][\w .+&'-]{1,40}?)"
 common = dict(group="window", claim="app", available=lambda: IS_WINDOWS)
 resize = dict(subject=app_arg, observe=_state, undo=lambda a, b, c: put_window(b, keep_state=False), undo_is_symmetric=True,
               **common)
 tool("minimize_window", "Minimize an app's window: 'minimize Spotify', 'minimize this', 'hide it'.",
      params({"app": WINDOW}, ["app"]), _call("minimize_window", "app"), event="window.minimized",
-     verify=VERIFY["minimize_window"], **resize)
+     verify=VERIFY["minimize_window"], expect=lambda a, b: {"state": "minimized"},
+     reflex=[(r"minimi[sz]e\s+" + WIN, {})], reflex_check=lambda a: known_app({"app_name": a["app"]}), **resize)
 tool("maximize_window", "Maximize an app's window (full size on its monitor): 'maximize Spotify', 'make it full screen'.",
      params({"app": WINDOW}, ["app"]), _call("maximize_window", "app"), event="window.maximized",
-     verify=VERIFY["maximize_window"], **resize)
+     verify=VERIFY["maximize_window"], expect=lambda a, b: {"state": "maximized"},
+     reflex=[(r"maximi[sz]e\s+" + WIN, {})], reflex_check=lambda a: known_app({"app_name": a["app"]}), **resize)
 tool("restore_window", "Restore an app's window to normal size (un-minimize or un-maximize) and bring it up.",
      params({"app": WINDOW}, ["app"]), _call("restore_window", "app"), event="window.restored",
      verify=VERIFY["restore_window"], **resize)
@@ -108,7 +123,10 @@ tool("move_window_to_monitor", "Move an app's window to another monitor: 'put Ch
                                                                          "'here'."}}, ["app", "monitor"]),
      _call("move_window_to_monitor", "app", "monitor"), subject=app_arg, event="window.moved", observe=_state,
      verify=VERIFY["move_window_to_monitor"], undo=lambda a, b, c: put_window(b, keep_state=True), undo_is_symmetric=True,
-     **common)
+     expect=_expect_monitor,
+     reflex=[(r"(?:move|put|send)\s+" + WIN + r"\s+(?:to|on|onto)\s+(?:the\s+|my\s+)?(?P<monitor>other|next|left|right|"
+              r"middle|primary|main|first|second|third|\d)(?:\s+one)?\s*(?:monitor|screen|display)?", {})],
+     reflex_check=lambda a: known_app({"app_name": a["app"]}), **common)
 tool("get_active_window", "Which window is in front right now (app, title, monitor, size).", NO_ARGS,
      _call("get_active_window"), changes_state=False, **common)
 tool("list_monitors", "The monitors on this PC: numbers, which is primary, left/right, size.", NO_ARGS,
