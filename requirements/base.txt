@@ -20,3 +20,5 @@ tzdata
 winrt-Windows.Devices.Geolocation
 aiohttp
 paho-mqtt>=2.0
+pypdf==5.1.0             # reading PDF files (room_agent/computer/files.py)
+winrt-Windows.Devices.Radios   # Wi-Fi / Bluetooth on and off (tools/pcsettings.py)

@@ -95,6 +95,9 @@ def voice_loop():
         if heard_wake is None and not greeting:
             continue  # (a greeting that went stale: back to waiting for the wake word)
         state.go(State.LISTENING, "wake word")  # this also ends quiet mode
+        from room_agent import triggers
+
+        triggers.on_voice()  # (the first sign of you in the morning: morning reminders, today's plans)
         engine.interrupted.clear()
         if writer and unsummarized is not None:
             writer.conversation_ended(unsummarized)
@@ -129,7 +132,10 @@ def voice_loop():
                  "you asked me to be quiet" if ended == "quiet" else "long silence")
         from room_agent import proactive
 
-        proactive.on_idle()  # (anything that waited for this conversation to end is decided again; stale ones drop)
+        from room_agent import triggers
+
+        triggers.after_conversation(proactive.on_idle())  # (what waited for this conversation is said now, or dropped
+        #                                                    when stale; reminders kept for later are tried again)
         oww.reset()
         engine.drain_mic()
 

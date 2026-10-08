@@ -34,6 +34,9 @@ KINDS = {
     "device_offline": dict(priority=LOW, dedupe_s=6 * 3600, cooldown_s=lambda: 0, wait_s=0),
     "task_attention": dict(priority=NORMAL, dedupe_s=300, cooldown_s=lambda: 120, wait_s=600),
     "security": dict(priority=URGENT, dedupe_s=60, cooldown_s=lambda: 0, wait_s=0),
+    "reminder": dict(priority=NORMAL, dedupe_s=60, cooldown_s=lambda: 0, wait_s=3600),     # (they asked for it)
+    "meeting": dict(priority=NORMAL, dedupe_s=600, cooldown_s=lambda: 0, wait_s=300),
+    "nudge": dict(priority=NORMAL, dedupe_s=3600, cooldown_s=lambda: 1800, wait_s=0),      # (unasked: easily skipped)
 }
 
 

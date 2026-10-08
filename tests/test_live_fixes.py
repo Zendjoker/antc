@@ -87,7 +87,7 @@ for s in ("I can't call you on request, sorry.", "I can't call you on request; I
     t.check(f"allowed (honest / the real feature): {s!r}", g.unverified(s) == [], g.unverified(s))
 rt.new_turn("can you call me")
 t.check("the capability list says calling/texting their phone on request is NOT available",
-        "calling, texting or notifying their phone on request" in runtime_context("can you call me").split("NOT available")[-1])
+        "texting or calling their own phone" in runtime_context("can you call me").split("NOT available")[-1])
 convo = Conversation()
 convo.say("can you call me when my alarm goes off?",
           scripts=[{"text": "I can't call your phone. Want me to ring your phone with a reminder instead?"},

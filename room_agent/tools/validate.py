@@ -23,9 +23,9 @@ def _coerce(value, spec):
         if kind == "boolean":
             if isinstance(value, str):
                 word = value.strip().lower()
-                if word in ("true", "yes", "1"):
+                if word in ("true", "yes", "1", "on"):
                     return True
-                if word in ("false", "no", "0"):
+                if word in ("false", "no", "0", "off"):
                     return False
                 raise ValueError
             return bool(value)

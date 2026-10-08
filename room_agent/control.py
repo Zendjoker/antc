@@ -12,6 +12,7 @@ the same checks, the same verification, and they can be undone the same way.
 
 import asyncio
 import logging
+import os
 import threading
 import time
 
@@ -148,6 +149,18 @@ def _research():
             "failed": [f"{u.split('/')[2] if '//' in u else u}: {w}" for u, w in r["failed"][:6]]}
 
 
+def _lists():
+    """Open list items and reminders waiting for a moment, for the dashboard."""
+    try:
+        from room_agent import triggers
+        from room_agent.tools import lists
+
+        return {"lists": lists.snapshot(),
+                "moments": [{"when": triggers.EVENTS[i["event"]], "text": i["text"]} for i in triggers._load()]}
+    except Exception:
+        return None
+
+
 def _browser():
     try:
         from room_agent.computer.browsers import KNOWN, host
@@ -178,6 +191,9 @@ def snapshot():
     ringing, phone = rt.ringing, _phone()
     return {
         "online": True,
+        "health": {"pid": os.getpid(), "uptime_s": round(time.time() - rt.started_at) if rt.started_at else None,
+                   "heartbeat_age_s": round(time.time() - rt.heartbeat, 1) if rt.heartbeat else None,
+                   "state": rt.state.state.name.lower()},
         "state": {"name": rt.state.state.name.lower(), "label": rt.state.state.value},
         "conversation": [{"role": m["role"], "text": m["text"], "time": m.get("time", "")} for m in list(rt.recent)[-40:]],
         "timers": _timers(),
@@ -197,6 +213,7 @@ def snapshot():
         "connections": {"google": google, "phone": "on" if config.PHONE_MODE else "off"},
         "home": _home(),
         "research": _research(),
+        "lists": _lists(),
         "browser": _browser(),
     }
 

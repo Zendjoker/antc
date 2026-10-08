@@ -120,7 +120,7 @@ def register_group(group: Group):
 # Modules that register capabilities when loaded: one per area (room_agent/abilities/), then the bigger layers.
 # A new feature = one module that registers its capabilities (+ group, rules, claims, context) and a line here.
 MODULES = ["room_agent.abilities.info", "room_agent.abilities.location", "room_agent.abilities.timers", "room_agent.abilities.apps",
-           "room_agent.abilities.windows", "room_agent.abilities.computer", "room_agent.abilities.media", "room_agent.abilities.memory",
+           "room_agent.abilities.windows", "room_agent.abilities.computer", "room_agent.abilities.lists", "room_agent.abilities.files", "room_agent.abilities.pcsettings", "room_agent.abilities.media", "room_agent.abilities.memory",
            "room_agent.abilities.presence", "room_agent.abilities.voice", "room_agent.abilities.home",
            "room_agent.abilities.undo", "room_agent.abilities.phone", "room_agent.abilities.zigbee", "room_agent.abilities.system", "room_agent.learning.capabilities", "room_agent.integrations.capabilities"]
 LINES = []    # extra "what I can do" lines that aren't a tool area: (title, available(), detail or detail())
@@ -161,11 +161,21 @@ def offered():
     return out
 
 
-def summaries(capability_type):
-    """One line per area for the model's "what I can do" list (built from the registry, not written by hand)."""
+def summaries(capability_type, user_text=None):
+    """One line per area for the model's "what I can do" list (built from the registry, not written by hand).
+    With `user_text` (a request), an area's details are given only when it's relevant to it (its words, or in use right
+    now); the others are listed by name, so every area is known but the list stays short as areas are added."""
     ensure_loaded()
     out = []
-    for title, available, detail in [(g.title, g.available, g.summary) for g in GROUPS.values() if g.title] + LINES:
+    for g in [g for g in GROUPS.values() if g.title]:
+        try:
+            ok = bool(g.available())
+            relevant = (user_text is None or not ok or g.hints is None or g.hints.search(user_text)
+                        or bool(g.live()))  # (an area without trigger words is always described)
+            out.append(capability_type(g.title, ok, (g.summary() if callable(g.summary) else g.summary) if relevant else ""))
+        except Exception:
+            out.append(capability_type(g.title, False, "couldn't check right now"))
+    for title, available, detail in LINES:
         try:
             out.append(capability_type(title, bool(available()), detail() if callable(detail) else detail))
         except Exception:

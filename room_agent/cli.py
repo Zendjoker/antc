@@ -65,6 +65,16 @@ def main():
     if a.check:
         sys.exit(0 if check() else 1)
 
+    if not _single_instance():
+        raise SystemExit("Jarvis is already running (only one can use the mic and the dashboard port). "
+                         "Close the other one first.")
+    import time as _time
+
+    rt.started_at = _time.time()
+    if not a.text and STT_PROVIDER == "whisper":
+        from room_agent.audio.stt import preload
+
+        preload()  # (loads while the audio devices, voices and wake word model start: faster to the first "Listening")
     missing = [] if LLM_PROVIDER == "ollama" or os.getenv("ANTHROPIC_API_KEY") else ["ANTHROPIC_API_KEY"]
     if LLM_PROVIDER != "ollama" and config.LLM_DEFAULT == "openai" and not config.OPENAI_KEY:
         missing.append("OPENAI_API_KEY")
@@ -122,6 +132,9 @@ def main():
     from room_agent.conversation import greet
 
     greet.start()  # (a friendly hello when you walk in: conversation/greet.py)
+    from room_agent import triggers
+
+    triggers.start()  # (reminders for "when I get home / go to bed / am back at the PC", break / rain / meeting heads-ups)
     from room_agent.actions import journal
 
     journal.load()  # (actions cut off by the last shutdown: reported once, never claimed)
@@ -136,6 +149,34 @@ def main():
         print("\nBye.")
     finally:
         shutdown()
+
+
+_lock_file = None
+
+
+def _single_instance():
+    """Hold a lock on jarvis.lock while running. -> False if another Jarvis holds it (the lock goes away with the process,
+    even after a crash, so a stale file never blocks a restart)."""
+    global _lock_file
+    path = config.HERE / "jarvis.lock"
+    try:
+        _lock_file = open(path, "a+")
+        if os.name == "nt":
+            import msvcrt
+
+            _lock_file.seek(0)
+            msvcrt.locking(_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_file.seek(0)
+        _lock_file.truncate()
+        _lock_file.write(str(os.getpid()))
+        _lock_file.flush()
+        return True
+    except OSError:
+        return False
 
 
 _shutting_down = threading.Event()

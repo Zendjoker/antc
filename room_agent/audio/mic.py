@@ -19,6 +19,7 @@ def next_frame(mic_q):
     while True:
         item = mic_q.get()
         if isinstance(item, tuple):
+            rt.heartbeat = time.time()  # (the listening loop is alive: the supervisor watches this, service.py)
             return item
 
 

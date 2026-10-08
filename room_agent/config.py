@@ -98,6 +98,16 @@ TIMER_MIN_S = 1  # shortest countdown timer (the tool schema, the capability lis
 TIMER_MAX_S = 30 * 86400  # longest countdown timer
 LISTEN_WAIT_S = float(os.getenv("LISTEN_WAIT_S", "6"))  # after an unfinished sentence, how long to wait for the rest
 MISSING_WAIT_S = float(os.getenv("MISSING_WAIT_S", "4"))  # after a request that lacks a required detail, how long before asking for it
+# Lists, event reminders and nudges (tools/lists.py, triggers.py)
+LISTS_FILE = Path(os.getenv("LISTS_FILE", HERE / "lists.json"))  # to-do / shopping / any list, and notes
+EVENT_REMINDERS_FILE = Path(os.getenv("EVENT_REMINDERS_FILE", HERE / "event_reminders.json"))  # "when I get home"...
+DESK_AWAY_MIN = float(os.getenv("DESK_AWAY_MIN", "10"))  # this long without keyboard/mouse = away from the PC
+BREAK_REMINDER_MIN = float(os.getenv("BREAK_REMINDER_MIN", "180"))  # nonstop PC use before suggesting a break (0 = off)
+RAIN_ALERT = os.getenv("RAIN_ALERT", "1") == "1"  # mention rain when you leave, if it's likely today
+RAIN_ALERT_PCT = int(os.getenv("RAIN_ALERT_PCT", "60"))
+MEETING_ALERT_MIN = float(os.getenv("MEETING_ALERT_MIN", "10"))  # heads-up before calendar events (0 = off)
+PLAN_FOLLOWUPS = os.getenv("PLAN_FOLLOWUPS", "1") == "1"  # mention a remembered plan the morning it's due
+
 # Computer interaction (room_agent/computer/): browsers, page reading, clicking / typing, screen vision, web research
 BROWSER_CONTROL = os.getenv("BROWSER_CONTROL", "1") == "1"  # open sites / search / click / type / read pages in your browsers
 SCREEN_VISION = os.getenv("SCREEN_VISION", "ask").lower()  # off | ask (asks once before the first screenshot) | allow
@@ -208,6 +218,7 @@ MY_PHONE = os.getenv("MY_PHONE", "").strip()  # your number, +1... (the only num
 PHONE_TTS_PROVIDER = os.getenv("PHONE_TTS_PROVIDER", "").strip()  # optional: Google / Amazon / ElevenLabs (Twilio's)
 PHONE_VOICE = os.getenv("PHONE_VOICE", "").strip()  # optional voice id for that provider
 VIP_SENDERS = [s.strip().lower() for s in os.getenv("VIP_SENDERS", "").split(",") if s.strip()]  # emails worth a call
+SMS_DAILY_LIMIT = int(os.getenv("SMS_DAILY_LIMIT", "20"))  # texts to your phone per day (each one costs a little)
 CALL_COOLDOWN_MIN = float(os.getenv("CALL_COOLDOWN_MIN", "10"))  # at least this long between calls
 DRIVE_CHECK_S = float(os.getenv("DRIVE_CHECK_S", "180"))  # while driving: how often to look for important things
 MEETING_SOON_MIN = float(os.getenv("MEETING_SOON_MIN", "15"))  # a meeting this close is worth a call

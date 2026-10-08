@@ -95,7 +95,9 @@ class Watcher:
             return []
         out = []
         for m in found:
-            vip = any(v and (v in m["from_email"] or v in m["from_name"].lower()) for v in config.VIP_SENDERS)
+            from room_agent.phone.texts import vips
+
+            vip = any(v and (v in m["from_email"].lower() or v in m["from_name"].lower()) for v in vips())
             if vip or m["important"]:
                 out.append((f"email:{m['id']}",
                             f"Hey, it's Jarvis. You got an email from {m['from_name']} about {m['subject']}. Want me to read it?",

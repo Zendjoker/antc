@@ -16,9 +16,7 @@ register_group(Group(
                         r"music|song|track|skip|next|previous|go back|listening|spotify|youtube|percent|%", re.I),
     lambda: recently(rt.last_media_at), "volume and media playback",
     "PC volume (exact or up/down), mute, play/pause, next/previous track and what's playing, in whatever app is playing "
-    "(Spotify, a browser...)", lambda: IS_WINDOWS))
-register_line("choosing what to play (searching for a song, artist or playlist)",
-              "not built; it can only control what's already playing", available=lambda: False)
+    "(Spotify, a browser...); choosing what to play (Spotify playlists / search, YouTube)", lambda: IS_WINDOWS))
 register_claim("media", r"^(paused|resumed|skipped|muted|unmuted)\b|\b(i'?ve|i have|i)\s+(just\s+)?(paused|resumed|skipped|muted|unmuted)\b"
                         r"|\b(it'?s|that'?s|music'?s|sound'?s|song'?s|everything'?s|you'?re)\s+(now\s+)?(paused|muted|unmuted|resumed)\b"
                         r"|\b(turned|turning|cranked|bumped) (it |that |the volume |the music |the sound )?(up|down)\b"
@@ -131,3 +129,32 @@ tool("previous_track", "Go to the previous song or track: 'previous song', 'go b
      observe=_media_state, reflex=[(r"(?:previous|last)\s+(?:song|track)|go back a (?:song|track)", {})], **common)
 tool("get_current_media", "What's playing on the PC right now: song, artist, app, playing or paused.", NO_ARGS,
      _call("get_current_media"), changes_state=False, **common)
+
+
+# ---------------------------------------------------------------- choosing what to play
+def _play(args):
+    from room_agent.tools import music
+
+    out = music.play(args.get("query", ""), args.get("service", ""), args.get("kind", "any"), args.get("browser", ""))
+    if out.startswith("OK"):
+        rt.last_media_at = __import__("time").time()
+    return out
+
+
+def _said_play(result):
+    m = re.search(r"playing (?:on Spotify: |on YouTube: |your playlist )?(.+?)(?: on Spotify| \(|$)", result.message)
+    return f"Playing {m.group(1).strip(' .').replace(chr(34), '')}." if m else None
+
+
+tool("play_music", "Choose and start music: one of their Spotify playlists, or anything Spotify can find (song, artist, "
+     "album, a mood like 'lo-fi' or 'chill'), or a YouTube video. Spotify first when it's installed.",
+     params({"query": {"type": "string", "description": "What to play, as they said it ('Drake', 'my gym playlist' -> "
+                                                       "'gym', 'some lo-fi' -> 'lo-fi')"},
+             "service": {"type": "string", "enum": ["spotify", "youtube"], "description": "Only if they named one"},
+             "kind": {"type": "string", "enum": ["any", "playlist", "song", "artist", "album"]}}, ["query"]),
+     _play, group="media", claim="media", event="media.chosen",
+     examples=["play my gym playlist", "play Drake", "play some lo-fi", "play the Interstellar soundtrack on YouTube"],
+     reflex=[(r"play\s+(?:my\s+)?(?P<query>[\w' &-]{2,40}?)\s+playlist", {"kind": "playlist"}),
+             (r"play\s+(?P<query>.{2,50}?)\s+on\s+(?P<service>spotify|youtube)", {}),
+             (r"play\s+some\s+(?P<query>[\w' &-]{2,40})", {})],
+     reflex_say=_said_play)

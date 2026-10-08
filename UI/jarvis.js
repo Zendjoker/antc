@@ -207,7 +207,7 @@
     $("#greeting").textContent = greeting();
     const d = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
     $("#home-sub").textContent = [d, live.online && live.location].filter(Boolean).join("  ·  ");
-    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch();
+    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch(); renderLists();
   }
 
   function renderMedia() {
@@ -329,6 +329,40 @@
               row("Browser", live.online && live.browser ? `${live.browser.name} · ${live.browser.site || live.browser.title}` : "—", "window"),
               row("Google", gOk ? "Connected" : cap(g), "mail", gOk ? "green" : null),
               row("Brain", live.online ? live.brain : "—", "sparkle"));
+  }
+
+  // ---- lists and reminders waiting for a moment
+  function renderLists() {
+    const d = live.online && live.lists, box = $("#lists"), tag = $("#lists-tag");
+    const sig = JSON.stringify(d || null);
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = "";
+    const names = d ? Object.keys(d.lists || {}) : [];
+    const moments = (d && d.moments) || [];
+    const total = names.reduce((n, k) => n + d.lists[k].length, 0);
+    tag.className = `tag push ${total ? "green" : ""}`;
+    tag.textContent = total ? `${total} item${total === 1 ? "" : "s"}` : "Empty";
+    if (!names.length && !moments.length) {
+      box.append(emptyState("check", "No lists yet", live.online ? 'Say "add milk to my shopping list"' : "Waiting for Jarvis"));
+      return;
+    }
+    for (const k of names) {
+      const col = el("div", "list-col");
+      col.append(el("div", "list-name", cap(k)));
+      const ul = el("ul", "list-items");
+      for (const item of d.lists[k].slice(0, 12)) ul.append(el("li", null, item));
+      col.append(ul);
+      box.append(col);
+    }
+    if (moments.length) {
+      const col = el("div", "list-col");
+      col.append(el("div", "list-name", "Reminders for a moment"));
+      const ul = el("ul", "list-items");
+      for (const m of moments) ul.append(el("li", null, `${cap(m.when)}: ${m.text}`));
+      col.append(ul);
+      box.append(col);
+    }
   }
 
   // ---- research (the last report: sources come from the pages Jarvis really read)

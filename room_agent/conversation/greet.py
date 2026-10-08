@@ -169,6 +169,20 @@ def on_door(event):
     threading.Thread(target=work, daemon=True, name="greeting").start()
 
 
+def say_soon(text):
+    """Something to say on Jarvis's own initiative (a reminder, a heads-up): the voice loop says it and then listens,
+    like a greeting. Two at once are said together."""
+    with _say_lock:
+        if pending["text"] and time.time() - pending["at"] < 30:
+            pending.update(text=pending["text"] + " " + text, at=time.time())
+        else:
+            pending.update(text=text, at=time.time())
+    request.set()
+
+
+_say_lock = threading.Lock()
+
+
 def take():
     """The greeting to say now, if one is waiting (and still fresh)."""
     request.clear()

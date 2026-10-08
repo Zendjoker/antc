@@ -31,4 +31,10 @@ t.check("Zigbee off (no real lights or sensors)", config.ZIGBEE is False or str(
 t.check("Home Assistant off", not config.HA_URL)
 t.check("no public phone tunnel", not os.environ.get("PHONE_TUNNEL"))
 t.check("tracing and audio dumps off", os.environ.get("TRACE") == "0" and os.environ.get("AUDIO_DEBUG") == "0")
+
+print("Source files:")
+root_dir = Path(__file__).resolve().parents[1]
+bad = [str(p.relative_to(root_dir)) for d in ("room_agent", "tests", "UI") for p in (root_dir / d).rglob("*")
+       if p.suffix in (".py", ".js", ".html", ".css") and chr(8) in p.read_text(encoding="utf-8", errors="ignore")]
+t.check("no source file contains a stray backspace character (a mangled regex word boundary)", not bad, bad)
 t.done("ISOLATION")

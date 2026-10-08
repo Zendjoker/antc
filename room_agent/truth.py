@@ -31,19 +31,20 @@ class Capability:
 NOT_BUILT = [Capability("texting or calling other people", False, "not built"), Capability("seeing (camera)", False, "not built")]
 
 
-def capabilities():
-    """Everything the agent might be asked about, available or not, from the registry (never the model's opinion)."""
+def capabilities(user_text=None):
+    """Everything the agent might be asked about, available or not, from the registry (never the model's opinion).
+    With `user_text`, details only for the areas that request is about (core.summaries)."""
     from room_agent.actions import core
 
-    return core.summaries(Capability) + NOT_BUILT
+    return core.summaries(Capability, user_text) + NOT_BUILT
 
 
 def render_registry(caps):
     yes = [c for c in caps if c.available]
     no = [c for c in caps if not c.available]
-    return ("- available_capabilities: " + "; ".join(f"{c.name} ({c.detail})" for c in yes) + "\n"
+    return ("- available_capabilities: " + "; ".join(f"{c.name} ({c.detail})" if c.detail else c.name for c in yes) + "\n"
             "- NOT available (if asked, say plainly you can't do that; never pretend): "
-            + "; ".join(f"{c.name} ({c.detail})" for c in no))
+            + "; ".join(f"{c.name} ({c.detail})" if c.detail else c.name for c in no))
 
 
 ACTION_TOOLS = set()  # capabilities that change something (filled in by actions/core.register)

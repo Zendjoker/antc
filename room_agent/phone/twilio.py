@@ -29,6 +29,10 @@ class Twilio:
         """Ring `to` from Jarvis's number; when they answer, Twilio asks `url` what to do. -> call sid"""
         return self._post("Calls.json", {"To": to, "From": from_, "Url": url, "Method": "POST"})["sid"]
 
+    def sms(self, to, from_, body):
+        """Send a text message. -> message sid"""
+        return self._post("Messages.json", {"To": to, "From": from_, "Body": body[:1500]})["sid"]
+
     def set_voice_webhook(self, number, url):
         """Calls to Jarvis's number go to `url`."""
         r = self.http.get(f"{API}/Accounts/{self.sid}/IncomingPhoneNumbers.json", params={"PhoneNumber": number},

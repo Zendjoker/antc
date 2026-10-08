@@ -516,3 +516,8 @@ body.offline .needs-live { opacity: .45; pointer-events: none; }
 .research-host { color: var(--muted, #6b7280); font-size: 12px; }
 .research-quote { color: var(--muted, #6b7280); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
 .research-failed { color: var(--muted, #6b7280); font-size: 12px; margin-top: 10px; }
+
+/* lists card */
+.lists-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+.list-name { font-weight: 600; margin-bottom: 4px; }
+.list-items { margin: 0; padding-left: 18px; display: grid; gap: 3px; overflow-wrap: anywhere; }

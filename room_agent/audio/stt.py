@@ -22,7 +22,23 @@ _whisper = None
 _whisper_lock = threading.Lock()  # the main loop and the barge-in check share one model
 
 
+_load_lock = threading.Lock()  # (startup preloads it in the background; the voice loop may ask before it's done)
+
+
+def preload():
+    """Start loading Whisper now, in the background, so it's ready by the time the wake word model is."""
+    threading.Thread(target=load_whisper, name="whisper-preload", daemon=True).start()
+
+
 def load_whisper():
+    global _whisper
+    if _whisper is not None:
+        return _whisper
+    with _load_lock:
+        return _load()
+
+
+def _load():
     global _whisper
     if _whisper is None:
         try:

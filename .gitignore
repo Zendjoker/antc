@@ -37,3 +37,8 @@ actions_journal.json
 tests/report.json
 logs/
 research.json
+jarvis.lock
+jarvis.stop
+jarvis.supervisor
+lists.json
+event_reminders.json

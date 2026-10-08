@@ -453,6 +453,8 @@ def undo(action=None, app=None):
         target = r
         break
     last = env.last_successful_action
+    if last is not None and (last.kind == "already" or str(last.message).startswith("OK: nothing needed")):
+        last = None  # ("it's already on" changed nothing: "undo that" means the change before it)
     last_cap = core.get(last.capability) if last else None
     if (target is not None and not kind and last and not last.can_undo and last.at > target.at
             and last_cap and last_cap.changes_state and last.capability != "undo_last_action"):
