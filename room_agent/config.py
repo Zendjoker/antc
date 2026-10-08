@@ -115,6 +115,28 @@ SCREEN_VISION = os.getenv("SCREEN_VISION", "ask").lower()  # off | ask (asks onc
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").lower()  # auto | claude | openai | off: who reads screenshots
 VISION_MODEL = os.getenv("VISION_MODEL", "").strip()  # blank = CLAUDE_MODEL / OPENAI_MODEL
 RESEARCH_FILE = Path(os.getenv("RESEARCH_FILE", HERE / "research.json"))  # the last research reports, for the dashboard
+
+# Missions (room_agent/missions/): long background jobs such as "find 20 restaurants without a good website and build demos"
+MISSIONS_DIR = Path(os.getenv("MISSIONS_DIR", "").strip() or Path.home() / "Documents" / "Jarvis Missions")  # reports, demo sites, exports
+MISSIONS_DB = Path(os.getenv("MISSIONS_DB", "").strip() or HERE / "missions.db")  # missions, steps, leads, sources, drafts, approvals
+MISSION_DEFAULT_BUDGET_USD = float(os.getenv("MISSION_DEFAULT_BUDGET_USD", "") or "1.00")  # per mission, unless you say otherwise
+MISSION_MAX_BUDGET_USD = float(os.getenv("MISSION_MAX_BUDGET_USD", "") or "10.00")  # hard ceiling: a mission can't be given more
+MISSION_LIGHT_MODEL = os.getenv("MISSION_LIGHT_MODEL", "") or OPENAI_MODEL  # wording (email drafts, site copy): cheap model
+MISSION_STRONG_MODEL = (os.getenv("MISSION_STRONG_MODEL", "").strip() or "claude-sonnet-5-5")  # demo-site code edits (CODER_BACKEND=anthropic)
+MISSION_LLM_COPY = os.getenv("MISSION_LLM_COPY", "0") == "1"  # 1 = a model polishes outreach wording (costs a little); 0 = templates
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()  # optional: better business discovery (paid per request)
+PLACES_COST_PER_REQUEST = float(os.getenv("PLACES_COST_PER_REQUEST", "") or "0.035")  # USD estimate per Places Text Search call
+MISSION_PREVIEW_PORT = int(os.getenv("MISSION_PREVIEW_PORT", "") or "8790")  # demo-site previews, on 127.0.0.1 only
+CODER_BACKEND = (os.getenv("CODER_BACKEND", "").strip() or "auto").lower()  # auto | claude_cli | anthropic | none: who edits demo sites
+CODER_CLI = (os.getenv("CODER_CLI", "").strip() or "claude")  # the Claude Code command, if CODER_BACKEND uses it
+CODER_MODEL = os.getenv("CODER_MODEL", "").strip()  # for claude_cli: blank = its default model
+CODER_TIMEOUT_S = int(os.getenv("CODER_TIMEOUT_S", "") or "600")
+# You, as the sender of outreach drafts (shown in the drafts; required by anti-spam law for commercial email)
+MISSION_SENDER_NAME = os.getenv("MISSION_SENDER_NAME", "").strip()
+MISSION_SENDER_BUSINESS = os.getenv("MISSION_SENDER_BUSINESS", "").strip()
+MISSION_SENDER_EMAIL = os.getenv("MISSION_SENDER_EMAIL", "").strip()
+MISSION_SENDER_PHONE = os.getenv("MISSION_SENDER_PHONE", "").strip()
+MISSION_SENDER_ADDRESS = os.getenv("MISSION_SENDER_ADDRESS", "").strip()  # a postal address (CAN-SPAM)
 # Under the automated tests (tests/__init__.py sets it): the primitives that touch the real desktop refuse to run
 # (keyboard / mouse input, UI Automation, screenshots, launching browsers / files / links, theme / brightness / radio
 # writes, lock / sleep / shutdown, the Recycle Bin). A test fakes what it needs; one that forgets fails instead of

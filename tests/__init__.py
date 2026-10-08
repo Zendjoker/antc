@@ -22,6 +22,7 @@ for _name, _file in {
     "PROACTIVE_STATE_FILE": "proactive_state.json", "CONNECTIONS_FILE": "connections.json",
     "LEARNING_DB": "learning.db", "EXPERIENCE_DB": "experience.db", "APPS_CACHE": "apps_cache.json",
     "RESEARCH_FILE": "research.json", "TASKS_FILE": "tasks.json", "LISTS_FILE": "lists.json", "EVENT_REMINDERS_FILE": "event_reminders.json",
+    "MISSIONS_DB": "missions.db", "MISSIONS_DIR": "missions",
 }.items():
     os.environ[_name] = os.path.join(_TMP, _file)
 os.environ.setdefault("JARVIS_TEST", "1")  # (config.TEST_MODE: the real desktop is off-limits; hardware tests set 0)
@@ -33,4 +34,5 @@ LIVE_API = os.environ.get("JARVIS_LIVE_API") == "1" or "--live-api" in sys.argv
 if not LIVE_API:
     os.environ.update(ANTHROPIC_API_KEY="sk-ant-test-not-real", OPENAI_API_KEY="sk-test-not-real",
                       DEEPGRAM_API_KEY="test-not-real", ELEVENLABS_API_KEY="test-not-real",
-                      TWILIO_ACCOUNT_SID="", TWILIO_AUTH_TOKEN="", GOOGLE_CLIENT_SECRET="")
+                      TWILIO_ACCOUNT_SID="", TWILIO_AUTH_TOKEN="", GOOGLE_CLIENT_SECRET="",
+                      GOOGLE_PLACES_API_KEY="", CODER_BACKEND="none")
