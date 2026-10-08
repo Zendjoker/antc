@@ -12,7 +12,7 @@ import time
 
 from tests.harness import setup_env
 
-setup_env()
+setup_env(JARVIS_TEST="0")  # (this is the one test that touches the real browser, on purpose)
 
 from room_agent import runtime as rt  # noqa: E402
 from room_agent.actions import core, executor  # noqa: E402

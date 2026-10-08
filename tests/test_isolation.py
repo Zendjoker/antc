@@ -35,6 +35,28 @@ t.check("tracing and audio dumps off", os.environ.get("TRACE") == "0" and os.env
 print("Source files:")
 root_dir = Path(__file__).resolve().parents[1]
 bad = [str(p.relative_to(root_dir)) for d in ("room_agent", "tests", "UI") for p in (root_dir / d).rglob("*")
-       if p.suffix in (".py", ".js", ".html", ".css") and chr(8) in p.read_text(encoding="utf-8", errors="ignore")]
-t.check("no source file contains a stray backspace character (a mangled regex word boundary)", not bad, bad)
+       if p.suffix in (".py", ".js", ".html", ".css")
+       and any(c in p.read_text(encoding="utf-8", errors="ignore") for c in (chr(8), chr(0)))]
+t.check("no source file contains a stray backspace or null byte (a mangled escape)", not bad, bad)
+
+print("The real desktop is off-limits:")
+t.check("test mode is on", config.TEST_MODE)
+blocked = []
+from room_agent.computer import browsers, screen, uia, winput  # noqa: E402
+from room_agent.tools import music, pcsettings  # noqa: E402
+
+for name, call in [("keyboard / mouse", lambda: winput.hotkey("f5")), ("UI Automation", lambda: uia.api()),
+                   ("screenshot", lambda: screen._grab(0, 0, 10, 10)), ("window list", lambda: browsers._top_windows()),
+                   ("launch a browser", lambda: browsers._launch("x.exe", ["https://example.com"])),
+                   ("spotify link", lambda: music._open_uri("spotify:")), ("theme write", lambda: pcsettings._write_theme(0, 0)),
+                   ("brightness", lambda: pcsettings._ddc_set(0, 50)), ("radios", lambda: pcsettings._run_async(lambda: None)),
+                   ("sleep", lambda: pcsettings.sleep()), ("clipboard", lambda: winput.set_clipboard("x"))]:
+    try:
+        call()
+        blocked.append((name, "NOT blocked"))
+    except config.BlockedInTests:
+        pass
+    except Exception as e:  # noqa: BLE001
+        blocked.append((name, f"other error {e.__class__.__name__}"))
+t.check("every real-desktop primitive refuses to run under the tests", not blocked, blocked)
 t.done("ISOLATION")

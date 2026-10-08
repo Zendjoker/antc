@@ -24,6 +24,7 @@ for _name, _file in {
     "RESEARCH_FILE": "research.json", "TASKS_FILE": "tasks.json", "LISTS_FILE": "lists.json", "EVENT_REMINDERS_FILE": "event_reminders.json",
 }.items():
     os.environ[_name] = os.path.join(_TMP, _file)
+os.environ.setdefault("JARVIS_TEST", "1")  # (config.TEST_MODE: the real desktop is off-limits; hardware tests set 0)
 os.environ.update(JARVIS_VAULT="memory", ZIGBEE="0", HA_URL="", HA_TOKEN="", PHONE_TUNNEL="", PHONE_MODE="0",
                   LOCATION_SOURCE="off", TRACE="0", AUDIO_DEBUG="0", DIAGNOSTICS="0",
                   DIAGNOSTICS_DIR=os.path.join(_TMP, "logs"), AUDIO_DEBUG_DIR=os.path.join(_TMP, "debug"))

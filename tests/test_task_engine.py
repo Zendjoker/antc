@@ -152,6 +152,15 @@ time.sleep(2.0)
 WORLD["hang_s"] = 0.0
 
 print("Permission and authorization:")
+import ctypes  # noqa: E402
+
+
+def fake_recycle(op):  # (the Recycle Bin is faked: the file is removed, nothing reaches the real Recycle Bin)
+    Path(op._obj.pFrom.rstrip("\0")).unlink()
+    return 0
+
+
+ctypes.windll.shell32.SHFileOperationW = fake_recycle
 victim = home / "Documents" / "keep.txt"
 victim.write_text("important")
 task = plan("tidy up", [{"tool": "t_step", "args": {"x": "first"}},
@@ -212,6 +221,24 @@ t.check("resuming re-runs only the step that never started (3); the UNKNOWN one 
         WORLD["done"] == [("step", "3")] and states(loaded) == ["COMPLETED", "UNKNOWN", "COMPLETED", "BLOCKED"],
         (WORLD["done"], states(loaded)))
 
+print("Independent success checks:")
+task = plan("note with a check", [{"tool": "save_file", "args": {"name": "checked", "content": "milk and eggs"},
+                                   "check": {"file_contains": ["Desktop/checked.md", "eggs"]}}], said="save a note called checked")
+t.check("a check that passes -> COMPLETED, with the check in the evidence", states(task) == ["COMPLETED"]
+        and "success check" in task["steps"][0]["evidence"], task["steps"][0])
+task = plan("note with a wrong check", [{"tool": "save_file", "args": {"name": "checked2", "content": "milk"},
+                                         "check": {"file_contains": ["Desktop/checked2.md", "coffee"]}}], said="save a note called checked2")
+t.check("the tool said OK but the independent check fails -> FAILED (never COMPLETED)", states(task) == ["FAILED"]
+        and "success check failed" in task["steps"][0]["result"], task["steps"][0])
+from room_agent.computer import browser_ops  # noqa: E402
+
+browser_ops.target_window = lambda browser="": (None, "FAILED: no browser window")  # (never the real browser in tests)
+task = plan("unreadable check", [{"tool": "t_step", "args": {"x": "q"}, "check": {"url_contains": "youtube"}}])
+t.check("a check that can't run (no browser here) -> UNVERIFIED, not COMPLETED", states(task) == ["UNVERIFIED"], task["steps"][0])
+task = plan("list check", [{"tool": "add_to_list", "args": {"item": "butter", "list": "shopping"},
+                            "check": {"list_contains": ["shopping", "butter"]}}], said="add butter to my shopping list")
+t.check("a list check reads the list back -> COMPLETED", states(task) == ["COMPLETED"])
+
 print("Records, validation, the model:")
 data = json.loads(config.TASKS_FILE.read_text(encoding="utf-8"))
 t.check("every task is checkpointed on disk with intent, steps, states, events, time and cost",
@@ -236,7 +263,7 @@ convo.say("add milk and eggs to my shopping list and then show it", scripts=[
 from room_agent.tools import lists  # noqa: E402
 
 t.check("through the model: one run_task call, two model calls total, the list really has both",
-        len(convo.requests) == 2 and lists.snapshot().get("shopping") == ["milk", "eggs"], (len(convo.requests), lists.snapshot()))
+        len(convo.requests) == 2 and {"milk", "eggs"} <= set(lists.snapshot().get("shopping", [])), (len(convo.requests), lists.snapshot()))
 convo.say("set a timer for 3 minutes", scripts=[{"tools": [("set_timer", {"seconds": 180})]}, {"text": "Three minutes."}])
 last = tasks.recent(1)[0]
 t.check("an ordinary request gets a task record too (kind 'turn', with the step's evidence)", last["kind"] == "turn"

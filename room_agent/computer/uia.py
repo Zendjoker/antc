@@ -25,6 +25,9 @@ KINDS = {"link": "Hyperlink", "button": "Button", "edit": "Edit", "tab": "TabIte
 def api():
     """(IUIAutomation, the generated module) for this thread."""
     if getattr(_local, "auto", None) is None:
+        from room_agent import config
+
+        config.real_desktop("UI Automation")
         import comtypes
         import comtypes.client
 

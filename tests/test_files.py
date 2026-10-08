@@ -145,6 +145,9 @@ t.check("file reading is private (never logged, learned or remembered)", core.ge
 print("Opening:")
 opened = []
 os.startfile = lambda p: opened.append(p)
+from room_agent.computer import browsers  # noqa: E402
+
+browsers._top_windows = lambda: []  # (no real window list in tests: the opened file's window never shows here)
 r = run("open_file", {"file": str(docs / "tool.bat")}, "open tool.bat")
 t.check("a script is never opened", not r.success and not opened and "could run code" in r.message, r.message)
 r = run("open_file", {"file": "budget"}, "open my budget")

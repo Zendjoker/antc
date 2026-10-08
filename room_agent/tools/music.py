@@ -30,6 +30,9 @@ def _spotify_window():
 
 
 def _open_uri(uri):
+    from room_agent import config
+
+    config.real_desktop("opening a spotify: link")
     os.startfile(uri)  # noqa: S606 (a spotify: link, handled by the Spotify app)
 
 

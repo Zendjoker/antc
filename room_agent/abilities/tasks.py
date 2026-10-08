@@ -26,7 +26,10 @@ STEP = {"type": "object", "properties": {
     "tool": {"type": "string", "description": "A tool name you can call in this conversation"},
     "args": {"type": "object", "description": "Its arguments"},
     "depends_on": {"type": "array", "items": {"type": "integer"}, "description": "Earlier step numbers this one needs"},
-    "success": {"type": "string", "description": "What counts as done, in a few words"}},
+    "success": {"type": "string", "description": "What counts as done, in a few words"},
+    "check": {"type": "object", "description": "Optional independent check run after the step, one of: "
+              "{\"file_exists\": path}, {\"file_contains\": [path, text]}, {\"url_contains\": text}, "
+              "{\"page_contains\": text}, {\"list_contains\": [list, item]}"}},
     "required": ["tool", "args"]}
 
 

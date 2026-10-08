@@ -106,6 +106,9 @@ def _grab(left, top, width, height):
     import numpy as np
     from ctypes import wintypes as wt
 
+    from room_agent import config
+
+    config.real_desktop("a screenshot")
     user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
     gdi32.CreateCompatibleBitmap.restype = wt.HBITMAP
     gdi32.CreateCompatibleDC.restype = wt.HDC

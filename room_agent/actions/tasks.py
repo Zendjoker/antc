@@ -24,6 +24,7 @@ Task states: RUNNING COMPLETED UNVERIFIED PARTIAL FAILED UNKNOWN WAITING CANCELE
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -84,6 +85,7 @@ def new(goal, steps, kind="plan"):
          "steps": [{"n": i + 1, "tool": s["tool"], "args": dict(s.get("args") or {}), "shown": _shown_args(s["tool"], s.get("args")),
                     "depends_on": [int(d) for d in s.get("depends_on") or []], "success": _redact(s.get("success", ""), 200),
                     "timeout_s": float(s.get("timeout_s") or SLOW_TOOLS.get(s["tool"], DEFAULT_TIMEOUT_S)),
+                    "check": s.get("check") if isinstance(s.get("check"), dict) else None,
                     "state": "PENDING", "attempts": 0, "result": "", "evidence": "", "started": 0.0, "ended": 0.0}
                    for i, s in enumerate(steps)]}
     with _lock:
@@ -145,6 +147,65 @@ def get(task_id=None):
 def recent(n=10):
     with _lock:
         return sorted(_tasks.values(), key=lambda t: t["updated"])[-n:]
+
+
+# ---------------------------------------------------------------- independent success checks
+# A step may name a check of its outcome, run by code after the tool said OK (never trusted from the tool's own words):
+#   {"file_exists": path}  {"file_contains": [path, text]}  {"url_contains": text}  {"page_contains": text}
+#   {"list_contains": [list, item]}
+# -> (True / False / None, evidence). False = the step FAILED its success check; None = it couldn't be checked (UNVERIFIED).
+def _path(p):
+    from room_agent.computer import files
+
+    q = os.path.expanduser(str(p))
+    return q if os.path.isabs(q) else str(files.HOME / q)
+
+
+def run_check(check):
+    if not isinstance(check, dict) or not check:
+        return None, ""
+    kind, arg = next(iter(check.items()))
+    try:
+        if kind in ("file_exists", "file_contains"):
+            from room_agent.computer import files
+
+            path, text = (arg, None) if kind == "file_exists" else (arg[0], str(arg[1]))
+            path = _path(path)
+            ok, why = files.allowed(path)
+            if not ok:
+                return None, f"not checked: {why}"
+            if not os.path.isfile(path):
+                return False, f"{os.path.basename(path)} doesn't exist"
+            if text is None:
+                return True, f"{os.path.basename(path)} exists"
+            found = text.lower() in open(path, encoding="utf-8", errors="replace").read().lower()
+            return found, f"{os.path.basename(path)} {'contains' if found else 'does NOT contain'} \"{text[:40]}\""
+        if kind in ("url_contains", "page_contains"):
+            from room_agent.computer import browser_ops, browsers
+
+            key, hwnd = browser_ops.target_window("")
+            if not key:
+                return None, "no browser window to check"
+            if kind == "url_contains":
+                url = browsers.read_state(hwnd).get("url", "")
+                if not url:
+                    return None, "the address bar couldn't be read"
+                found = str(arg).lower() in url.lower()
+                return found, f"the address {'contains' if found else 'does NOT contain'} \"{arg}\""
+            page = browser_ops.read_page(hwnd, key, max_chars=200_000)
+            if not page["text"]:
+                return None, "the page text couldn't be read"
+            found = str(arg).lower() in page["text"].lower()
+            return found, f"the page {'shows' if found else 'does NOT show'} \"{str(arg)[:40]}\""
+        if kind == "list_contains":
+            from room_agent.tools import lists
+
+            items = [i["text"].lower() for i in lists._load().get(lists.canonical(arg[0]), []) if not i.get("done")]
+            found = str(arg[1]).lower() in items
+            return found, f"the {arg[0]} list {'has' if found else 'does NOT have'} \"{arg[1]}\""
+    except Exception as e:  # noqa: BLE001 (a check that can't run proves nothing)
+        return None, f"not checked ({e.__class__.__name__})"
+    return None, f"unknown check '{kind}'"
 
 
 # ---------------------------------------------------------------- running a plan
@@ -237,6 +298,14 @@ def run(t, only_pending=False):
                 event(t, f"step {s['n']} ({s['tool']}) timed out after {s['timeout_s']:.0f}s")
                 break
             s.update(state=_step_state(result), result=_redact(result.message, 300), evidence=result.evidence or "")
+            if s["state"] in DONE and s.get("check"):  # (the step's own success criterion, checked independently)
+                ok, why = run_check(s["check"])
+                s["evidence"] = (s["evidence"] + "; " if s["evidence"] else "") + _redact(f"success check: {why}", 200)
+                if ok is False:
+                    s.update(state="FAILED", result=_redact(f"the tool said OK, but the success check failed: {why}", 300))
+                    event(t, f"step {s['n']} ({s['tool']}) failed its success check: {why}")
+                elif ok is None and s["state"] == "COMPLETED":
+                    s["state"] = "UNVERIFIED"
             if s["state"] == "FAILED" and s["attempts"] <= MAX_RETRIES and _retry_safe(cap, result) and not _cancelled():
                 wait = BACKOFF_S[min(s["attempts"] - 1, len(BACKOFF_S) - 1)]
                 event(t, f"step {s['n']} ({s['tool']}) failed ({result.message[:80]}); retry {s['attempts']} in {wait}s")

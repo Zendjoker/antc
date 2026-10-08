@@ -116,6 +116,10 @@ def recycle(path):
                     ("pTo", ctypes.c_wchar_p), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", ctypes.c_int),
                     ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", ctypes.c_wchar_p)]
 
+    from room_agent import config
+
+    if config.TEST_MODE and getattr(ctypes.windll.shell32.SHFileOperationW, "__name__", "") == "SHFileOperationW":
+        config.real_desktop("the Recycle Bin")  # (a test that fakes SHFileOperationW may use it)
     op = SHFILEOPSTRUCTW(None, 3, str(p.resolve()) + "\0", None, 0x0040 | 0x0010 | 0x0400 | 0x0004, 0, None, None)
     rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))  # FO_DELETE + ALLOWUNDO + NOCONFIRMATION + NOERRORUI + SILENT
     if rc != 0 or p.exists():

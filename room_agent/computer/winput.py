@@ -56,6 +56,9 @@ if IS_WINDOWS:
 
 
 def _send(items):
+    from room_agent import config
+
+    config.real_desktop("keyboard / mouse input")
     arr = (INPUT * len(items))(*items)
     return user32.SendInput(len(items), arr, ctypes.sizeof(INPUT)) == len(items)
 
@@ -128,6 +131,9 @@ def foreground():
 
 def focus_window(hwnd, wait=1.5):
     """Bring a window to the front. -> True only if it really is in front afterwards."""
+    from room_agent import config
+
+    config.real_desktop("bringing a window to the front")
     if not hwnd:
         return False
     if foreground() == hwnd:
@@ -153,6 +159,9 @@ def focus_window(hwnd, wait=1.5):
 
 
 def set_clipboard(text):
+    from room_agent import config
+
+    config.real_desktop("the clipboard")
     data = ctypes.create_unicode_buffer(str(text))
     size = ctypes.sizeof(data)
     for _ in range(5):

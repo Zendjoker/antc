@@ -115,6 +115,23 @@ SCREEN_VISION = os.getenv("SCREEN_VISION", "ask").lower()  # off | ask (asks onc
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").lower()  # auto | claude | openai | off: who reads screenshots
 VISION_MODEL = os.getenv("VISION_MODEL", "").strip()  # blank = CLAUDE_MODEL / OPENAI_MODEL
 RESEARCH_FILE = Path(os.getenv("RESEARCH_FILE", HERE / "research.json"))  # the last research reports, for the dashboard
+# Under the automated tests (tests/__init__.py sets it): the primitives that touch the real desktop refuse to run
+# (keyboard / mouse input, UI Automation, screenshots, launching browsers / files / links, theme / brightness / radio
+# writes, lock / sleep / shutdown, the Recycle Bin). A test fakes what it needs; one that forgets fails instead of
+# touching the PC. Hardware tests opt out explicitly (JARVIS_TEST=0).
+TEST_MODE = os.getenv("JARVIS_TEST", "0") == "1"
+
+
+class BlockedInTests(RuntimeError):
+    pass
+
+
+def real_desktop(what):
+    """Call before touching the real desktop: raises BlockedInTests under the automated tests."""
+    if TEST_MODE:
+        raise BlockedInTests(f"{what} is blocked under the automated tests (fake it in the test)")
+
+
 EMERGENCY_HOTKEY = os.getenv("EMERGENCY_HOTKEY", "ctrl+alt+j").strip()  # stops everything Jarvis is doing (emergency.py)
 DIAGNOSTICS = os.getenv("DIAGNOSTICS", "0") == "1"  # live diagnostic mode: logs/diagnostics-*.jsonl (livelog.py)
 DIAGNOSTICS_DIR = Path(os.getenv("DIAGNOSTICS_DIR", HERE / "logs"))

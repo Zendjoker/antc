@@ -338,4 +338,8 @@ def open_with_default(path):
     if ext not in OPENABLE:
         raise ValueError(f"not opened: {ext or 'files without an extension'} could run code; only documents, images and "
                          "media are opened")
+    from room_agent import config
+
+    if getattr(os.startfile, "__module__", "") == "nt":
+        config.real_desktop("opening a file")  # (a test that fakes os.startfile may use it)
     os.startfile(path)  # noqa: S606 (a document with its registered app, never an executable: checked above)

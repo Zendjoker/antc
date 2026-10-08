@@ -34,6 +34,9 @@ def theme():
 
 
 def _write_theme(apps_light, system_light):
+    from room_agent import config
+
+    config.real_desktop("changing the Windows theme")
     import winreg
 
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PERSONALIZE, 0, winreg.KEY_SET_VALUE) as k:
@@ -102,6 +105,9 @@ def _ddc_get(h):
 
 
 def _ddc_set(h, value):
+    from room_agent import config
+
+    config.real_desktop("changing monitor brightness")
     return bool(ctypes.WinDLL("dxva2").SetMonitorBrightness(ctypes.c_void_p(h), int(value)))
 
 
@@ -175,6 +181,9 @@ KIND = {"wifi": 1, "bluetooth": 3}
 
 
 def _run_async(make):
+    from room_agent import config
+
+    config.real_desktop("Windows radios (Wi-Fi / Bluetooth)")
     out = {}
 
     def go():
@@ -241,12 +250,19 @@ def set_radio(which, on):
 
 # ---------------------------------------------------------------- lock, sleep, power
 def lock():
+    from room_agent import config
+
+    if getattr(ctypes.windll.user32.LockWorkStation, "__name__", "") == "LockWorkStation":
+        config.real_desktop("locking the PC")  # (a test that fakes LockWorkStation may use it)
     if not ctypes.windll.user32.LockWorkStation():
         return "FAILED: Windows didn't lock."
     return "OK: locked the PC."
 
 
 def sleep():
+    from room_agent import config
+
+    config.real_desktop("putting the PC to sleep")
     threading.Timer(3.0, lambda: ctypes.WinDLL("powrprof").SetSuspendState(0, 1, 0)).start()
     return "OK: the PC goes to sleep in 3 seconds (I won't hear you until it wakes)."
 
@@ -258,6 +274,10 @@ def power(action):
     flag = {"shutdown": "/s", "restart": "/r"}.get(action)
     if not flag:
         return "FAILED: I can shut down or restart."
+    from room_agent import config
+
+    if getattr(subprocess.run, "__module__", "") == "subprocess":
+        config.real_desktop("shutting down / restarting the PC")  # (a test that fakes subprocess.run may use it)
     r = subprocess.run(["shutdown", flag, "/t", "60", "/c", "Jarvis: as you asked. Say 'cancel the shutdown' to stop it."],
                        capture_output=True, text=True, creationflags=0x08000000)
     if r.returncode != 0:
@@ -278,6 +298,10 @@ def open_page(what):
     uri = SETTINGS_PAGES.get(str(what).lower().strip())
     if not uri:
         return f"FAILED: I don't know the settings page for '{what}'."
+    from room_agent import config
+
+    if getattr(os.startfile, "__module__", "") == "nt":
+        config.real_desktop("opening Windows Settings")  # (a test that fakes os.startfile may use it)
     os.startfile(uri)  # noqa: S606 (a Settings page)
     return (f"OK: opened the {what} page in Settings. Windows doesn't let apps flip that switch themselves, so they need "
             "to click it there.")

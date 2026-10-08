@@ -178,6 +178,9 @@ def _top_windows():
     import ctypes
     from ctypes import wintypes as wt
 
+    from room_agent import config
+
+    config.real_desktop("listing the PC's windows")
     user32 = ctypes.windll.user32
     out = []
 
@@ -338,6 +341,9 @@ def _site_word(url):
 # ---------------------------------------------------------------- opening
 def _launch(exe, args):
     """Start the browser with arguments (no shell). -> True if it started."""
+    from room_agent import config
+
+    config.real_desktop("launching a browser")
     subprocess.Popen([exe, *args], close_fds=True, creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
     return True
 
