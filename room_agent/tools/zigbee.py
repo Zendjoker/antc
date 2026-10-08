@@ -162,7 +162,16 @@ class Hub:
         elif rest.endswith("/availability") and not rest.startswith("bridge/"):
             name = rest[:-len("/availability")]
             state = data.get("state") if isinstance(data, dict) else data
+            was_offline = name in self.offline
             (self.offline.discard if state == "online" else self.offline.add)(name)
+            if state != "online" and not was_offline:
+                self.record(name, "went offline")
+                try:
+                    from room_agent import proactive
+
+                    proactive.decide(proactive.Event("device_offline", f"offline:{name}", f"{name} went offline"))
+                except Exception as e:
+                    log.debug("zigbee: offline notice skipped (%s)", e)
         elif not rest.startswith("bridge/") and "/" not in rest and isinstance(data, dict):
             self._update(rest, data)
 

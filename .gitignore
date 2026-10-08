@@ -32,3 +32,4 @@ bench/
 
 zigbee_events.json
 memory.db.bak-*
+proactive_state.json

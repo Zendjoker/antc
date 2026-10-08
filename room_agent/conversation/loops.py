@@ -127,6 +127,9 @@ def voice_loop():
             unsummarized = started  # quiet means no model calls at all: this waits for the next wake
         state.go(State.QUIET if ended == "quiet" else State.WAKE_WORD_ONLY,
                  "you asked me to be quiet" if ended == "quiet" else "long silence")
+        from room_agent import proactive
+
+        proactive.on_idle()  # (anything that waited for this conversation to end is decided again; stale ones drop)
         oww.reset()
         engine.drain_mic()
 

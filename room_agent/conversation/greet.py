@@ -126,11 +126,32 @@ def _note(event, note):
 
 
 def on_door(event):
-    ok, why = should_greet()
-    if not ok:
-        log.info("door opened: no greeting (%s)", why)
-        _note(event, "noticed; no greeting because " + why.replace("busy (listening)", "we were already talking")
-              .replace("busy (", "Jarvis was busy (").replace("busy (speaking)", "Jarvis was speaking"))
+    """The door opened. That proves the door opened, not who came in: if the room had been quiet for a while it may be
+    an arrival, and the proactive policy (proactive.py) decides whether a greeting fits right now."""
+    from room_agent import proactive
+
+    device = event.get("device", "Door sensor")
+    away = time.time() - last_activity()
+    if away < config.GREET_AWAY_MIN * 60:
+        _note(event, "noticed; no greeting: someone was already in the room (more likely leaving or passing)")
+        proactive.notify(proactive.Event("arrival", f"door:{device}", f"{device} opened (someone was already in the room)"))
+        log.info("door opened: no greeting (voice in the room %ds ago)", int(away))
+        return
+    try:
+        from room_agent.phone import state as phone
+
+        if phone.is_driving():  # (they're out: whoever opened it isn't them; the phone watcher handles that)
+            _note(event, "noticed while you were out driving; no greeting")
+            return
+    except Exception:
+        pass
+    ev = proactive.Event("arrival", f"door:{device}",
+                         f"{device} opened after the room was quiet for {_away_words(away)} (maybe someone arriving)")
+    decision, why = proactive.decide(ev, enabled=config.GREET_ON_ARRIVAL)
+    if decision != proactive.SPEAK_NOW:
+        reason = {"in a conversation: not interrupting": "we were already talking", "quiet mode: not interrupting":
+                  "Jarvis was in quiet mode"}.get(why, why)
+        _note(event, "noticed; no greeting because " + reason)
         return
 
     def work():
@@ -156,7 +177,15 @@ def take():
     return text if text and time.time() - at < 30 else ""
 
 
+def _on_presence(event):
+    from room_agent import proactive
+
+    what = "someone detected" if event["name"].endswith("detected") else "nobody detected anymore"
+    proactive.decide(proactive.Event("presence", f"presence:{event.get('device')}:{what}", f"{event.get('device')}: {what}"))
+
+
 def start():
     from room_agent.actions.events import events
 
     events.on("door.opened", on_door)
+    events.on("presence.*", _on_presence)
