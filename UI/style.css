@@ -215,6 +215,26 @@ input.dirty, select.dirty { border-color: var(--blue); background: var(--blue-bg
 .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .card { background: #fff; border: 1px solid var(--border); border-radius: var(--r-lg); padding: 18px; box-shadow: var(--shadow-xs); min-width: 0; }
 .card.span2 { grid-column: span 2; }
+.card.span3 { grid-column: 1 / -1; }
+
+/* home devices */
+.devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+.device { border: 1px solid var(--border); border-radius: var(--r); padding: 14px; background: var(--bg-subtle); min-width: 0;
+  display: flex; flex-direction: column; gap: 2px; transition: border-color .2s, background .2s; }
+.device.alert { border-color: #fde3b8; background: var(--amber-bg); }
+.device.on { background: #fff; }
+.device-top { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12.5px; margin-bottom: 6px; }
+.device-top .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--text-2); }
+.device-top .batt { font-size: 11.5px; color: var(--amber); }
+.device-main { font-size: 20px; font-weight: 600; letter-spacing: -.02em; line-height: 1.25; }
+.device-sub { font-size: 12.5px; color: var(--text-3); }
+.device .controls { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.swatches { display: flex; gap: 6px; flex-wrap: wrap; }
+.swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--border-strong);
+  cursor: pointer; padding: 0; transition: transform .12s; }
+.swatch:hover { transform: scale(1.12); }
+.swatch.fx { width: auto; height: 22px; border-radius: 999px; padding: 0 9px; font-size: 11.5px; font-weight: 500; color: #fff;
+  background: linear-gradient(90deg, #ff4d4d, #ffb300, #2ecc71, #2d8cff, #b04dff); border: none; }
 .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; min-height: 28px; }
 .card-head > [data-icon] { color: var(--text-3); }
 .card-head h3 { font-size: 13.5px; }

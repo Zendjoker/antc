@@ -152,6 +152,12 @@ SPEECH_DEBUG = os.getenv("SPEECH_DEBUG", "0") == "1"  # log SEMANTIC / STRATEGY 
 # ---------- integrations ----------
 HA_URL = os.getenv("HA_URL", "").rstrip("/")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
+# Zigbee sensors and lights through Zigbee2MQTT on this PC (tools/zigbee.py). Off if it isn't running.
+ZIGBEE = os.getenv("ZIGBEE", "1") == "1"
+ZIGBEE_MQTT_HOST = os.getenv("ZIGBEE_MQTT_HOST", "127.0.0.1")
+ZIGBEE_MQTT_PORT = int(os.getenv("ZIGBEE_MQTT_PORT", "1883"))
+ZIGBEE_TOPIC = os.getenv("ZIGBEE_TOPIC", "zigbee2mqtt")
+ZIGBEE2MQTT_DIR = os.getenv("ZIGBEE2MQTT_DIR", "").strip()  # folder with start.bat: Jarvis starts it if it isn't running
 WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "")
 UNITS = os.getenv("UNITS", "imperial").lower()  # imperial | metric
 

@@ -113,6 +113,9 @@ def main():
     from room_agent import control
 
     control.start()  # (the dashboard's live view and typed commands)
+    from room_agent.tools.zigbee import hub
+
+    hub.start()  # (Zigbee sensors and lights, if Zigbee2MQTT is here)
     if config.PHONE_MODE:
         from room_agent.phone import server
 

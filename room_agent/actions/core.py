@@ -122,7 +122,7 @@ def register_group(group: Group):
 MODULES = ["room_agent.abilities.info", "room_agent.abilities.location", "room_agent.abilities.timers", "room_agent.abilities.apps",
            "room_agent.abilities.windows", "room_agent.abilities.media", "room_agent.abilities.memory",
            "room_agent.abilities.presence", "room_agent.abilities.voice", "room_agent.abilities.home",
-           "room_agent.abilities.undo", "room_agent.abilities.phone", "room_agent.abilities.system", "room_agent.learning.capabilities", "room_agent.integrations.capabilities"]
+           "room_agent.abilities.undo", "room_agent.abilities.phone", "room_agent.abilities.zigbee", "room_agent.abilities.system", "room_agent.learning.capabilities", "room_agent.integrations.capabilities"]
 LINES = []    # extra "what I can do" lines that aren't a tool area: (title, available(), detail or detail())
 CONTEXT = []  # (order, provider): provider(user_text) -> lines for the runtime context
 

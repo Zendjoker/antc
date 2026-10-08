@@ -19,3 +19,4 @@ winrt-Windows.Foundation.Collections
 tzdata
 winrt-Windows.Devices.Geolocation
 aiohttp
+paho-mqtt>=2.0

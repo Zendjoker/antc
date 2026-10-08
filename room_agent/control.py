@@ -40,6 +40,9 @@ _SAY = {
     "email.sent": ("mail", "Sent an email"), "calendar.created": ("calendar", "Added a calendar event"),
     "calendar.updated": ("calendar", "Changed a calendar event"), "calendar.deleted": ("calendar", "Deleted a calendar event"),
     "driving.started": ("phone", "You started driving"), "driving.stopped": ("phone", "You stopped driving"),
+    "door.opened": ("door", "{app} opened"), "door.closed": ("door", "{app} closed"),
+    "vibration.detected": ("bed", "Movement: {app}"), "presence.detected": ("presence", "Someone's there ({app})"),
+    "presence.cleared": ("presence", "Nobody there anymore ({app})"), "light.changed": ("light", "Changed the {app}"),
 }
 
 
@@ -112,6 +115,16 @@ def _phone():
             "in_call": bool(phone.in_call), "number": f"••• {number[-4:]}" if number else None}
 
 
+def _home():
+    try:
+        from room_agent.tools.zigbee import hub
+
+        return hub.snapshot()
+    except Exception as e:
+        log.debug("dashboard: zigbee unavailable: %s", e)
+        return {"online": False, "devices": []}
+
+
 def _undo_hint():
     from room_agent.actions.context import env
 
@@ -155,6 +168,7 @@ def snapshot():
         "voice": config.TTS_PROVIDER, "hearing": config.STT_PROVIDER, "wake_word": config.WAKE_WORD,
         "user": config.USER_NAME,
         "connections": {"google": google, "phone": "on" if config.PHONE_MODE else "off"},
+        "home": _home(),
     }
 
 
@@ -235,6 +249,11 @@ def do(body):
         if what in ("play_pause", "next", "previous"):
             _media["at"] = 0
         return out
+    if what == "light":  # (through the executor, like "make the strip blue": verified, undoable)
+        args = {k: body[k] for k in ("device", "on", "toggle", "brightness", "color", "white", "effect") if k in body}
+        if "brightness" in args:
+            args["brightness"] = max(1, min(100, int(args["brightness"])))
+        return _execute("set_light", args, "change the light")
     if what == "cancel_timer":
         from room_agent.tools import timers
 

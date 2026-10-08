@@ -61,7 +61,7 @@ def setup_env(**extra):
         CONNECTIONS_FILE=os.path.join(tmp, "connections.json"), APPS_CACHE=os.path.join(tmp, "apps.json"),
         EXPERIENCE_DB=os.path.join(tmp, "experience.db"),
         HA_URL="", HA_TOKEN="", TRACE="0", AUDIO_DEBUG="0", PYTHONIOENCODING="utf-8",
-        PHONE_TUNNEL="",  # (never a real public tunnel from a test, whatever .env says)
+        PHONE_TUNNEL="", ZIGBEE="0",  # (never a real public tunnel or real Zigbee devices from a test, whatever .env says)
         SOCIAL_MEANING="0")  # (the meaning reader loads in the background: a test that wants it opts in and waits for it)
     env.update({k: str(v) for k, v in extra.items()})
     os.environ.update(env)

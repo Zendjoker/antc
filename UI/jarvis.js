@@ -47,6 +47,9 @@
     zap: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
     clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
     dollar: '<path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+    door: '<path d="M13 4h3a2 2 0 0 1 2 2v14"/><path d="M2 20h3"/><path d="M13 20h9"/><path d="M10 12v.01"/><path d="M13 4.562v16.157a1 1 0 0 1-1.242.97L5 20V5.562a2 2 0 0 1 1.515-1.94l4-1A2 2 0 0 1 13 4.561Z"/>',
+    thermo: '<path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/>',
+    bed: '<path d="M2 4v16"/><path d="M2 8h18a2 2 0 0 1 2 2v10"/><path d="M2 17h20"/><path d="M6 8v9"/>',
     route: '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
   };
   const FILLED = new Set(["play", "pause", "next", "prev"]);
@@ -204,7 +207,7 @@
     $("#greeting").textContent = greeting();
     const d = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
     $("#home-sub").textContent = [d, live.online && live.location].filter(Boolean).join("  ·  ");
-    renderMedia(); renderTimers(); renderPhone(); renderEnv();
+    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices();
   }
 
   function renderMedia() {
@@ -327,6 +330,91 @@
               row("Brain", live.online ? live.brain : "—", "sparkle"));
   }
 
+  // ---- home devices (Zigbee)
+  const SWATCHES = [["warm", "#ffc778"], ["white", "#f4f4f4"], ["red", "#ff3b30"], ["orange", "#ff9500"], ["green", "#34c759"],
+                    ["blue", "#0a84ff"], ["purple", "#8e5cff"], ["pink", "#ff4fa3"]];
+  let deviceBusy = false;
+  function renderDevices() {
+    const h = (live.online && live.home) || { online: false, devices: [] };
+    const tagEl = $("#home-tag");
+    tagEl.className = `tag push ${h.online ? "green" : ""}`;
+    tagEl.textContent = h.online ? `${h.devices.length} device${h.devices.length === 1 ? "" : "s"}` : "Offline";
+    const box = $("#devices");
+    const sig = JSON.stringify(h) + Math.floor(Date.now() / 30000);
+    if (deviceBusy || box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = "";
+    if (!h.online || !h.devices.length) {
+      box.append(emptyState("home", live.online ? "No devices connected" : "Waiting for Jarvis",
+        live.online ? "Start Zigbee2MQTT (start.bat) and pair your sensors" : ""));
+      return;
+    }
+    for (const d of h.devices) box.append(deviceTile(d));
+  }
+  function deviceTile(d) {
+    const t = el("div", "device"), top = el("div", "device-top");
+    const icon = { contact: "door", climate: "thermo", vibration: "bed", presence: "user", light: "bulb", switch: "power" }[d.kind] || "zap";
+    top.append(ico(icon), el("span", "name", d.name));
+    if (d.battery != null && d.battery <= 20) top.append(el("span", "batt", `${d.battery}%`));
+    t.append(top);
+    const main = text => t.append(el("div", "device-main", text));
+    const sub = text => { if (text) t.append(el("div", "device-sub", text)); };
+    if (d.kind === "contact") {
+      main(d.open ? "Open" : "Closed");
+      t.classList.toggle("alert", !!d.open);
+      sub(d.open && d.opened ? `since ${ago(d.opened)}` : d.opened ? `last opened ${ago(d.opened)}` : "");
+    } else if (d.kind === "climate") {
+      main(d.temperature_text || "—");
+      sub(d.humidity != null ? `${Math.round(d.humidity)}% humidity` : "");
+    } else if (d.kind === "vibration") {
+      main(d.moved ? ago(d.moved) : "No movement");
+      sub(d.moved ? "last movement" : "since Jarvis started");
+    } else if (d.kind === "presence") {
+      main(d.present ? "Someone's there" : "Empty");
+    } else if (d.kind === "light" || d.kind === "switch") {
+      t.classList.toggle("on", !!d.on);
+      const row = el("div", "device-main");
+      row.style.display = "flex"; row.style.alignItems = "center";
+      row.append(el("span", "grow", d.on ? "On" : "Off"));
+      const sw = el("label", "switch"), cb = el("input");
+      cb.type = "checkbox"; cb.checked = !!d.on;
+      sw.append(cb, el("span", "slider"));
+      cb.addEventListener("change", () => act({ do: "light", device: d.name, on: cb.checked }, true));
+      row.append(sw);
+      t.append(row);
+      sub(d.on ? d.summary.replace(/^on,?\s*/, "") : "");
+      if (d.kind === "light") {
+        const c = el("div", "controls"), r = el("input");
+        r.type = "range"; r.min = 1; r.max = 100; r.value = d.brightness || 1;
+        r.style.setProperty("--v", `${d.brightness || 0}%`);
+        r.addEventListener("input", () => { deviceBusy = true; r.style.setProperty("--v", `${r.value}%`); });
+        r.addEventListener("change", async () => { await act({ do: "light", device: d.name, brightness: +r.value }, true); deviceBusy = false; });
+        c.append(r);
+        if (d.color) {
+          const row2 = el("div", "swatches");
+          for (const [name, hex] of SWATCHES) {
+            const b = el("button", "swatch");
+            b.type = "button"; b.title = name; b.style.background = hex;
+            const body = name === "warm" ? { white: "warm" } : name === "white" ? { white: "neutral" } : { color: name };
+            b.addEventListener("click", () => act({ do: "light", device: d.name, ...body }, true));
+            row2.append(b);
+          }
+          if ((d.effects || []).some(e => /rainbow/i.test(e))) {
+            const fx = el("button", "swatch fx", "Rainbow");
+            fx.type = "button";
+            fx.addEventListener("click", () => act({ do: "light", device: d.name, effect: "rainbow" }, true));
+            row2.append(fx);
+          }
+          c.append(row2);
+        }
+        t.append(c);
+      }
+    } else {
+      main(d.summary);
+    }
+    return t;
+  }
+
   // suggestions
   const SUGGEST = [["sun", "Brief me"], ["calendar", "What's on my calendar today?"], ["mail", "Any important emails?"],
                    ["sun", "What's the weather?"], ["bulb", "What have you learned about me?"]];
@@ -421,7 +509,7 @@
 
   // ---------------------------------------------------------------- activity
   const KIND_ICON = { app: "window", window: "window", volume: "volume", media: "music", timer: "timer", mail: "mail",
-                      calendar: "calendar", phone: "car", undo: "undo" };
+                      calendar: "calendar", phone: "car", undo: "undo", door: "door", bed: "bed", light: "bulb", presence: "user" };
   function renderActivity() {
     const items = (live.online && live.activity) || [];
     const sig = JSON.stringify(items.map(a => [a.at, a.text])) + Math.floor(Date.now() / 30000);
@@ -580,6 +668,10 @@
       { group: "Actions", icon: "next", label: "Next track", run: () => act({ do: "next" }, true), live: 1, keys: "skip song music" },
       { group: "Actions", icon: "prev", label: "Previous track", run: () => act({ do: "previous" }, true), live: 1, keys: "back song music" },
       { group: "Actions", icon: muted ? "volume" : "mute", label: muted ? "Unmute" : "Mute", run: () => act({ do: muted ? "unmute" : "mute" }, true), live: 1, keys: "volume sound audio silence" },
+      { group: "Actions", icon: "bulb", label: "Turn the LED strip on", run: () => act({ do: "light", on: true }, true), live: 1, keys: "light lamp led strip on", off: !hasLight() },
+      { group: "Actions", icon: "bulb", label: "Turn the LED strip off", run: () => act({ do: "light", on: false }, true), live: 1, keys: "light lamp led strip off", off: !hasLight() },
+      { group: "Ask Jarvis", icon: "door", label: "Is the door open?", run: () => send("Is the door open?", true), live: 1, keys: "door sensor" },
+      { group: "Ask Jarvis", icon: "thermo", label: "What's the temperature in here?", run: () => send("What's the temperature in here?", true), live: 1, keys: "temperature humidity" },
       { group: "Actions", icon: "timer", label: "Start a 5 minute timer", run: () => startTimer(300, ""), live: 1, keys: "alarm countdown" },
       { group: "Actions", icon: "timer", label: "Start a 25 minute focus timer", run: () => startTimer(1500, "focus"), live: 1, keys: "pomodoro work alarm" },
       { group: "Actions", icon: "undo", label: live.undo ? `Undo: ${live.undo}` : "Undo last change", run: () => act({ do: "undo" }), live: 1, off: !live.undo, keys: "revert back" },
@@ -592,6 +684,7 @@
       ...NAV.map(([page, label, icon]) => ({ group: "Go to", icon, label, run: () => show(page), hint: "Page" })),
     ].filter(c => !c.off && (!c.live || live.online));
   }
+  const hasLight = () => ((live.home && live.home.devices) || []).some(d => d.kind === "light");
   function drawPalette() {
     const q = pin.value.trim().toLowerCase();
     pitems = commands().filter(c => !q || `${c.label} ${c.keys || ""} ${c.group}`.toLowerCase().includes(q));

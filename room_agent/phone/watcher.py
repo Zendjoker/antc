@@ -45,6 +45,13 @@ class Watcher:
             self.consider(f"ring:{event.get('label')}:{int(event['at'])}", f"Hey, it's Jarvis. Heads up: {text}", None,
                           urgent=True)
 
+    def on_door(self, event):
+        """Your door opened while you're out driving: worth a call."""
+        if state.is_driving():
+            self.consider(f"door:{event.get('device')}:{int(event['at'] // 60)}",
+                          f"Hey, it's Jarvis. Heads up: the {event.get('device', 'door').lower()} just opened while you're out.",
+                          None, urgent=True)
+
     # ----- deciding
     def consider(self, key, greeting, item, urgent=False):
         if key in self.notified:
@@ -142,6 +149,7 @@ class Watcher:
         events.on("driving.*", self.on_driving)
         events.on("alarm.ringing", lambda e: self.on_ring({**e, "at": e["at"]}))
         events.on("timer.finished", lambda e: self.on_ring({**e, "at": e["at"]}))
+        events.on("door.opened", self.on_door)
         threading.Thread(target=self._loop, daemon=True, name="phone-watcher").start()
 
     def _loop(self):
