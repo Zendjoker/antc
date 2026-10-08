@@ -16,6 +16,7 @@ from room_agent.audio.fillers import LOOP, filler
 from room_agent.audio.speaker import say
 from room_agent.llm.guard import (correction_note, interrupted_now, new_guard, release_checked, speak_checked,
                                   stop_for_interruption)
+from room_agent.audio.styles import semantic_content
 from room_agent.prompt import system_parts
 from room_agent.speech import chunking
 from room_agent.actions import core, pending
@@ -105,7 +106,7 @@ def run_model(history, make_call):
             speak_checked(guard, buf.strip(), spoken)
 
         if reply.stop == "tool_use":
-            history.append({"role": "assistant", "content": reply.content})
+            history.append({"role": "assistant", "content": semantic_content(reply.content)})
             uses = reply.uses
             if (not rt.must_answer and not spoken and not current_pending()
                     and any(missing_required(u.name, u.input)
@@ -180,7 +181,7 @@ def run_model(history, make_call):
                 history.append({"role": "assistant", "content": fallback})
                 spoken.append(fallback)
         elif reply.content:  # (an empty reply after a tool result would make every later request fail)
-            history.append({"role": "assistant", "content": reply.content})
+            history.append({"role": "assistant", "content": semantic_content(reply.content)})
         if spoken:
             print("Agent:", " ".join(spoken), flush=True)
         return

@@ -49,7 +49,11 @@ tool("set_speaking_style", "Change how you sound from now on and keep it: softer
      "excited, more serious, playful, or back to normal. Use when they say things like 'talk softer', 'be more serious', "
      "'more energy' or 'talk normal again'.",
      params({"style": {"type": "string", "enum": list(BASE_STYLES)}}, ["style"]), _call("set_speaking_style", "style"),
-     group="voice", claim="style", available=lambda: tts_on() and styles.supported())
+     group="voice", claim="style", available=tts_on,
+     reflex=[(r"(?:talk|speak|sound|be)\s+(?:like\s+)?(?P<style>normal)(?:ly)?(?:\s+again)?", {}),
+             (r"(?:talk|speak)\s+(?:like\s+)?(?:a\s+)?(?:regular|normal)(?:\s+person)?", {"style": "normal"}),
+             (r"(?:go\s+)?back\s+to\s+(?:your\s+)?(?P<style>normal)(?:\s+voice)?", {})],
+     reflex_say=lambda result: "Okay, normal voice." if result.success else None)
 tool("list_voices", "List the voices you can switch to right now, and which one you're using.", NO_ARGS,
      _call("list_voices"), group="voice", changes_state=False, available=tts_on)
 tool("set_voice", "Change your speaking voice. Give a voice name from list_voices, or a description like 'British man' or "

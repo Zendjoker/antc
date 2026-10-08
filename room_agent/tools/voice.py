@@ -33,6 +33,10 @@ def set_speaking_style(style):
     wanted = style.lower().strip()
     if not rt.tts_enabled:
         return "UNAVAILABLE: there's no voice output in this mode."
+    if wanted == "normal":  # ("talk normal": always possible, right away, and kept)
+        voices.save_style("normal")
+        rt.turn_style = ""  # (the rest of this reply is plain too)
+        return "OK: back to my normal voice, from now on."
     if not styles.supported():
         return ("UNAVAILABLE: the current voice model can't change how it sounds. That needs ELEVENLABS_MODEL=eleven_v4_turbo "
                 "(or eleven_v3_conversational) in .env.")

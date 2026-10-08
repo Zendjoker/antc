@@ -84,7 +84,7 @@ def direct(sentence, strategy=None, snapshot=None, position=0, previous=None, la
     if mode == "urgent":
         words, p.energy, p.pace, p.pauses = ["clear", "firm"], "normal", 1.05, "brisk"
         p.why.append("urgent: clear and firm, controlled, never dramatic")
-    elif mode == "emotional":
+    elif mode == "emotional" and confident:  # (a weak guess about their mood never changes how it sounds)
         words = ["quiet", "warm"] if s.response_energy == "low" else ["calm", "warm"]
         p.energy, p.pace, p.pauses = "low", 0.95, "thoughtful"
         p.why.append("something heavy: calm and warm")

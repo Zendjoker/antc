@@ -53,6 +53,22 @@ def strip_tags(text):
     return _ANY_STYLE_TAG.sub("", text)
 
 
+def semantic_content(content):
+    """A model reply as stored in the history: text without delivery tags (tool calls untouched). Speech-performance
+    instructions exist only on the way to the voice, never in what's stored or shown."""
+    if isinstance(content, str):
+        return strip_tags(content)
+    out = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "text":
+            out.append({**b, "text": strip_tags(b.get("text", ""))})
+        elif getattr(b, "type", "") == "text" and not isinstance(b, dict):
+            out.append({"type": "text", "text": strip_tags(b.text)})
+        else:
+            out.append(b)
+    return out
+
+
 def delivery_text(item):
     """What actually goes to ElevenLabs: the sentence, led by its style tag when this model understands tags."""
     text = str(item)

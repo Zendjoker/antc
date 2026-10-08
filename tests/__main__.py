@@ -14,7 +14,7 @@ import sys
 import time
 
 OFFLINE = ["test_cost", "test_reliability", "test_listening", "test_speaker", "test_fixes", "test_intent", "test_claims",
-           "test_apps", "test_media", "test_windows", "test_actions", "test_learning", "test_integrations", "test_location", "test_phone", "test_pending", "test_social", "test_cognition", "test_speech", "test_generalization", "test_zigbee", "test_live_fixes", "test_greet", "test_reliability_fixes", "test_conversation_policy", "test_latency", "test_memory_lifecycle", "test_proactive", "test_tasks"]
+           "test_apps", "test_media", "test_windows", "test_actions", "test_learning", "test_integrations", "test_location", "test_phone", "test_pending", "test_social", "test_cognition", "test_speech", "test_generalization", "test_zigbee", "test_live_fixes", "test_greet", "test_reliability_fixes", "test_conversation_policy", "test_latency", "test_memory_lifecycle", "test_proactive", "test_tasks", "test_voice_delivery"]
 LIVE = ["apps_live", "media_live", "windows_live", "actions_live"]
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
