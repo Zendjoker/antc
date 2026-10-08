@@ -51,6 +51,10 @@ def _context(user_text):
     if rt.last_ring and time.time() - rt.last_ring["at"] < 300:
         r = rt.last_ring
         how = "rang and was stopped when they spoke" if r.get("stopped") else "rang"
+        nxt = _next_of(r["label"])
+        if nxt:
+            how += (f"; the '{r['label']}' listed above is its NEXT occurrence ({nxt}), a different one that is not "
+                    "ringing; leave it alone unless they explicitly ask to cancel that one")
         lines.append(f"- just_rang: the {r['kind']} '{r['label']}' ({r['message']!r}) {how}. It is FINISHED: not running, not "
                      "counting down, nothing left to stop or cancel, so never offer to. "
                      + ("Their message is a reaction to it: reply naturally and briefly, never <silent>. " if r.get("stopped") else "")
@@ -105,9 +109,30 @@ def _list(args):
     return list_timers()
 
 
+def _next_of(label):
+    """When the alarm that just rang is a daily one, its next occurrence (re-armed for tomorrow): 'tomorrow at 7:00 AM'."""
+    from room_agent.tools import timers
+
+    with timers._lock:
+        due = [i["due"] for i in timers._items.values() if i["label"] == label]
+    return f"at {timers._when(min(due))}" if due else ""
+
+
+# words that really ask to cancel something (vs. "stop" / "okay I'm up", which only stop the ringing)
+EXPLICIT_CANCEL = re.compile(r"\b(cancel|delete|remove|clear|get rid of|turn off|disable|tomorrow|tonight|every|daily|all|"
+                             r"for good|the (other|next)|at \d|\d\s*(am|pm)|\d+:\d\d)\b", re.I)
+
+
 def _cancel(args):
     from room_agent.tools.timers import cancel_timer
 
+    r, said = rt.last_ring, rt.turn_text or ""
+    if (r and r.get("stopped") and time.time() - r["at"] < 120 and not EXPLICIT_CANCEL.search(said)
+            and (args["label"].lower().strip() in ("all", "it", "that", "alarm", "timer") or args["label"].lower() in r["label"].lower()
+                 or r["label"].lower() in args["label"].lower())):
+        nxt = _next_of(r["label"])
+        return (f"OK: nothing to stop: the {r['kind']} '{r['label']}' already stopped ringing when they spoke, and nothing "
+                "else was cancelled." + (f" Its next one ({nxt}) is still set." if nxt else ""))
     return cancel_timer(args["label"])
 
 

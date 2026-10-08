@@ -19,11 +19,15 @@ def _detail():
     if missing:
         return "not finished setting up: needs " + ", ".join(missing) + " (python main.py --setup-phone)"
     vip = f"; email from {', '.join(config.VIP_SENDERS)} counts as important" if config.VIP_SENDERS else ""
-    return ("they can call Jarvis's number, and while they're driving Jarvis calls them, only for something important "
-            f"(an important email, a meeting soon or moved, an alarm going off){vip}")
+    return ("they can call Jarvis's number, and while they're driving Jarvis calls them by itself, only for something "
+            f"important (an important email, a meeting soon or moved, an alarm going off, the door opening){vip}. You have NO "
+            "tool to call or text them on request")
 
 
 register_line("phone calls with them", _detail, available=_ready)
+register_line("calling, texting or notifying their phone on request, or setting alarms on their phone",
+              "not built: alarms and timers ring here in the room; never offer to ring, text or notify their phone",
+              available=lambda: False)
 
 
 def _context(user_text):

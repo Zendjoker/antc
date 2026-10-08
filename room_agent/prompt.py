@@ -9,6 +9,7 @@
 """
 
 import datetime
+import re
 
 from room_agent import config
 from room_agent import runtime as rt
@@ -88,6 +89,32 @@ def _session(user_text):
     return [f"- session_memory: this conversation (the messages above), since {rt.session_started.strftime('%I:%M %p')}"]
 
 
+_OFFER = re.compile(r"[^.!?]*\b(want me to|should i|shall i|how about|i can|i could|would you like me to|instead)\b[^.!?]*[.!?]",
+                    re.I)
+_CANT = re.compile(r"[^.!?]*\b(can'?t|cannot|can not|not able to|no way to|don'?t have (a|any) way|isn'?t possible)\b[^.!?]*[.!?]",
+                   re.I)
+
+
+def _already_said(user_text):
+    """What the last replies already offered or explained, when their answer didn't take it up: so a follow-up gets a
+    direct, brief answer instead of the same alternatives again."""
+    from room_agent.actions.executor import AFFIRM
+
+    replies = [m["text"] for m in rt.recent[-4:] if m["role"] == "assistant"][-2:]
+    if not replies or AFFIRM.match(user_text or ""):
+        return []
+    offers = [x.group(0).strip() for r in replies for x in _OFFER.finditer(r)
+              if x.group(0).rstrip().endswith("?") or "instead" in x.group(0).lower()][-2:]  # ("I can do that" isn't an offer)
+    cant = [x.group(0).strip() for r in replies for x in _CANT.finditer(r)][-1:]
+    out = []
+    if cant:
+        out.append(f"- you_already_explained: {cant[0][:140]!r}. Don't explain it again unless they ask why.")
+    if offers:
+        out.append("- you_already_offered: " + " / ".join(repr(o[:120]) for o in offers) + ". They didn't take it: don't "
+                   "offer it or list alternatives again; answer what they said directly and briefly.")
+    return out
+
+
 def _environment(user_text):
     from room_agent.actions.context import env
 
@@ -137,6 +164,7 @@ def _register_core_context():
     from room_agent.actions import core
 
     core.register_context(_session, order=20)
+    core.register_context(_already_said, order=21)
     core.register_context(_environment, order=60)
 
 

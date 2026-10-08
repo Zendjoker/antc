@@ -82,13 +82,23 @@ def to_openai(history):
 # chat doesn't pay for tools it can't need. Capabilities with no area are always offered.
 RECENT_MESSAGES = 6
 def _recent_text(history):
+    """The words that decide which tool areas are offered: what THEY said recently, the tools used recently, and only
+    Jarvis's last reply if it asked them something (so "yes" to "want me to set a timer?" still has the timer tools).
+    Jarvis's other replies are left out: a reply that merely mentioned volume, apps and the door used to switch all
+    those areas on for the next several turns."""
     parts = []
-    for m in history[-RECENT_MESSAGES:]:
+    recent = history[-RECENT_MESSAGES:]
+    last_reply = next((i for i in range(len(recent) - 1, -1, -1) if recent[i]["role"] == "assistant"), None)
+    for i, m in enumerate(recent):
         if isinstance(m["content"], str):
-            parts.append(m["content"])
+            if m["role"] == "user" or (i == last_reply and m["content"].rstrip().endswith("?")):
+                parts.append(m["content"])
             continue
         for b in _blocks(m["content"]):
-            parts.append(b.get("text") or b.get("name") or "")  # (a tool used recently counts as touching its group)
+            if b.get("type") == "tool_use":
+                parts.append(b.get("name") or "")  # (a tool used recently counts as touching its group)
+            elif m["role"] == "user" or (i == last_reply and str(b.get("text") or "").rstrip().endswith("?")):
+                parts.append(b.get("text") or "")
     return " ".join(parts)
 
 

@@ -36,19 +36,32 @@ class SocialState:
             e.seq = self.seq
             for dim in e.clears:
                 self.cleared[dim] = self.seq  # (evidence from earlier updates is overridden; this update's still counts)
-        self.evidence += items
+        for e in items:
+            # The same observation re-derived from history ("cut Jarvis off" while that turn is still recent, "repeated
+            # the request") is not new, independent evidence: keep the original (it keeps decaying) instead of adding a
+            # fresh copy every turn, which used to pin confidence at 1.00.
+            same = next((o for o in self.evidence if o.dim == e.dim and o.source == e.source and o.why == e.why
+                         and o.seq >= self.cleared.get(e.dim, 0) and e.at - o.at < HALF_LIFE.get(e.dim, 300)), None)
+            if same is None:
+                self.evidence.append(e)
+            elif e.weight > same.weight:
+                same.weight = e.weight  # (stronger now: e.g. it failed again) but still dated from the first time
         cutoff = time.time() - KEEP_S
         self.evidence = [e for e in self.evidence if e.at >= cutoff]
 
     def value(self, dim, now=None):
-        """0..1: noisy-or of the decayed weights of this dimension's evidence."""
+        """0..1: the strongest decayed evidence from each source, combined across sources (noisy-or): several cues of
+        the same kind from one source don't add up as if they were independent."""
         now = now or time.time()
-        miss = 1.0
+        best = {}
         for e in self.evidence:
             if e.dim != dim or e.seq < self.cleared.get(dim, 0):
                 continue
             w = e.weight * math.pow(0.5, max(0.0, now - e.at) / HALF_LIFE.get(dim, 300))
-            miss *= 1 - min(0.95, w)
+            best[e.source] = max(best.get(e.source, 0.0), min(0.95, w))
+        miss = 1.0
+        for w in best.values():
+            miss *= 1 - w
         return 1 - miss
 
     def sources(self, dim, now=None, within=600):
@@ -80,7 +93,7 @@ class SocialState:
             mode = "task"
         top = max(v.values()) if v else 0.0
         srcs = set().union(*(self.sources(d, now) for d, x in v.items() if x >= 0.3)) if top >= 0.3 else set()
-        confidence = round(min(1.0, top * (0.75 + 0.15 * len(srcs))), 2) if known else 0.0
+        confidence = round(min(0.9, top * (0.6 + 0.15 * len(srcs))), 2) if known else 0.0  # (inferred: never certain)
         return {"mood_signal": mood, "energy": energy, "frustration": _level(frustr), "seriousness": _level(v["serious"]),
                 "urgency": _level(v["urgent"]), "interaction_mode": mode, "confidence": confidence, "values": v,
                 "sources": sorted(srcs)}

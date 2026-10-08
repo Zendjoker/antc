@@ -120,6 +120,17 @@ def _negated(s, m):
     return bool(NEGATION.search(before[clause_start + 1:] + s[m.start():m.end()]))
 
 
+# Offers and promises to reach their phone: no tool does that (phone mode only calls by itself while they drive), so
+# "want me to ring your phone?" is false even as a question. "I can't call you" (negated) and the real feature (a call
+# while they're driving) are fine.
+PHONE_OFFER = re.compile(
+    r"\b(i'?ll|i will|i can|i could|let me|want me to|should i|shall i|how about i|i'?d be happy to|i'?m able to|happy to)"
+    r"\s+(?:\w+\s+){0,3}?(call|ring|text|phone|buzz|ping|notify|message)\s+(you|your)\b"
+    r"|\b(alarm|reminder|notification|alert|push notification)s?\b.{0,25}\bon your (phone|iphone|cell|mobile)\b"
+    r"|\b(send|push)\b.{0,25}\b(to|on) your (phone|iphone|cell|mobile)\b", re.I)
+DRIVING_CALL = re.compile(r"\b(driv|on the road|in the car)", re.I)
+
+
 class ClaimGuard:
     """Per-turn gate between the model's words and the speaker."""
 
@@ -146,6 +157,9 @@ class ClaimGuard:
 
     def unverified(self, sentence):
         """The kinds of claims in this sentence that nothing confirms. [] = fine to say."""
+        m = PHONE_OFFER.search(sentence)
+        if m and not _negated(sentence, m) and not DRIVING_CALL.search(sentence):
+            return ["phone_offer"]  # (checked on the whole sentence: an offer phrased as a question is still false)
         s = _claim_part(sentence)
         if not s:
             return []  # a question isn't a claim

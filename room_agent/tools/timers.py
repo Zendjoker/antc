@@ -140,16 +140,19 @@ def _ring(item):
     heard_before = engine.user_voice_at  # (only set while the agent is silent, so anything newer is you)
     _acked.clear()
     rt.ringing = item
+    spoke = False
     try:
         _say(message)
         while True:
             finish_speaking()
             if engine.interrupted.is_set() or engine.user_voice_at > heard_before or _acked.is_set():
+                spoke = True
                 break  # you talked over it, in a pause, or your speech was confirmed (acknowledge_ring)
             gap_start = time.time()
             while time.time() - gap_start < ALARM_GAP_S and engine.user_voice_at <= heard_before and not _acked.is_set():
                 time.sleep(0.1)
             if engine.user_voice_at > heard_before or _acked.is_set() or time.time() > deadline:
+                spoke = time.time() <= deadline
                 break
             n += 1
             _chime(2)
@@ -163,6 +166,8 @@ def _ring(item):
     finally:
         rt.ringing = None
         _acked.clear()
+        if spoke and rt.last_ring and rt.last_ring.get("label") == item["label"]:
+            rt.last_ring = {**rt.last_ring, "stopped": True, "at": time.time()}  # (latest verified state: it's stopped)
     engine.interrupted.clear()
     log.info("stopped ringing: %s", item["label"])
 

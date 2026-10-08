@@ -105,6 +105,61 @@ class EchoDelay:
         return float(10 ** max(seg) - 1) if seg else 0.0
 
 
+class BargeTracker:
+    """The bookkeeping of a possible interruption, frame by frame (no audio, no I/O, so it can be tested on its own).
+
+    Your voice reaches the mic in pieces while the agent talks: the echo canceller gates out parts of it, so a long,
+    loud "wait, stop, that's wrong" can arrive as 2-3 voiced frames, a 240 ms gap, 2-3 more... Pieces less than RUN_GAP
+    frames apart are one run of voice: a new piece carries on the run's count instead of starting from zero (which used
+    to reject every piece of a real interruption as "too short"). Whether enough voice is the user or the agent's echo
+    is still decided by the verifier / echo check, exactly as before."""
+
+    RUN_GAP = 12  # frames (~1 s) between pieces of the same run
+
+    def __init__(self):
+        self.recent = collections.deque(maxlen=12)
+        self.episode = None
+        self.run_start, self.last_voice, self.run_frames = None, -100, 0
+
+    def reset(self):
+        self.recent.clear()
+        self.episode, self.run_start, self.run_frames = None, None, 0
+
+    def step(self, frame_no, candidate, gap, epoch=0, heard_before=0.0):
+        """One frame. -> ("start" | "too_short" | None, the episode)."""
+        self.recent.append(candidate)
+        ep = self.episode
+        if candidate:
+            event = None
+            if ep is None or ep["done"]:
+                if self.run_start is None or frame_no - self.last_voice > self.RUN_GAP:
+                    self.run_start, self.run_frames = frame_no, 0  # a new run of voice, not a continuation
+                ep = self.episode = {"start": frame_no, "run": self.run_start, "frames": self.run_frames, "quiet": 0,
+                                     "done": False, "pending": False, "tries": 0, "epoch": epoch, "heard_before": heard_before}
+                event = "start"
+            ep["frames"] += 1
+            ep["quiet"] = 0
+            self.run_frames += 1
+            self.last_voice = frame_no
+            return event, ep
+        if ep and not ep["done"]:
+            ep["quiet"] += 1
+            if ep["quiet"] >= gap and not ep["pending"]:
+                self.episode = None
+                self.recent.clear()
+                return "too_short", ep
+        return None, ep
+
+    def sustained(self, window, barge_frames, min_frames):
+        """Enough voice in this run to judge it: dense (barge_frames of the last `window` frames), or spread out over
+        pieces but plenty of it (a choppy interruption)."""
+        ep = self.episode
+        if not ep or ep["done"] or ep["pending"] or ep["frames"] < min_frames * (1 + ep["tries"]):
+            return False
+        dense = sum(list(self.recent)[-window:]) >= barge_frames
+        return dense or ep["frames"] >= min_frames + barge_frames
+
+
 class AudioEngine:
     def __init__(self, out_sr, aec=True, noise_suppression=True, barge_in=True, speech_rms=500.0,
                  barge_ms=240, barge_vad=0.6, duck_gain=1.0):
@@ -322,10 +377,9 @@ class AudioEngine:
     def _process_loop(self):
         noise = 30.0  # the mic's own background level after cleaning
         leftover = collections.deque(maxlen=75)  # leftover echo as a fraction of playback (fallback check)
-        recent = collections.deque(maxlen=12)
+        tracker = BargeTracker()  # which voice-like frames during playback belong together, and when to judge them
         history = self._history
-        episode = None  # a stretch of voice-like sound during playback being judged
-        run_start, last_voice = None, -100  # first frame of the current run of voice (episodes < 1 s apart)
+        episode = None  # a stretch of voice-like sound during playback being judged (tracker.episode)
         cooldown_until = 0  # frame number: after an echo rejection, give the canceller a moment
         last_hint = 0.0
         frame_no = 0
@@ -366,10 +420,10 @@ class AudioEngine:
                     # (not a rejection: voice_heard_at stays, so the app can still check what was said)
                     episode["done"] = True
                     log.info("barge-in undecided: the agent stopped talking first")
-                recent.clear()
+                tracker.reset()
                 with self._q_lock:
                     history.clear()
-                episode, run_start = None, None
+                episode = None
                 continue
 
             ref = self.delay.ref_level_at_echo()
@@ -378,32 +432,20 @@ class AudioEngine:
                 leftover.append(max(c - noise, 0.0) / ref)  # clearly cancelled echo: learn its level
             if frame_no < cooldown_until:
                 candidate = False
-            recent.append(candidate)
-
+            event, ep = tracker.step(frame_no, candidate, self.barge_gap, self.epoch, self.voice_heard_at)
             if candidate:
-                if episode is None or episode["done"]:
-                    if run_start is None or frame_no - last_voice > 12:
-                        run_start = frame_no  # a new run of voice (not a continuation of the last one)
-                    episode = {"start": frame_no, "run": run_start, "frames": 0, "quiet": 0, "done": False,
-                               "pending": False, "tries": 0, "epoch": self.epoch, "heard_before": self.voice_heard_at}
-                    log.info("barge-in candidate (voice %.2f, mic %.0f, cleaned %.0f)", voice, r, c)
+                if event == "start":
+                    log.info("barge-in candidate (voice %.2f, mic %.0f, cleaned %.0f%s)", voice, r, c,
+                             f", run so far {ep['frames'] - 1} voice frames" if ep["frames"] > 1 else "")
                     self.duck(self.duck_gain < 1.0)
-                    debug.event("barge_candidate", frame=frame_no, run_start=run_start, voice=voice, mic_rms=r, cleaned_rms=c)
-                episode["frames"] += 1
-                episode["quiet"] = 0
-                last_voice = frame_no
+                    debug.event("barge_candidate", frame=frame_no, run_start=ep["run"], voice=voice, mic_rms=r, cleaned_rms=c)
                 self.voice_heard_at = time.time()
-            elif episode and not episode["done"]:
-                episode["quiet"] += 1
-                if episode["quiet"] >= self.barge_gap and not episode["pending"]:  # 240 ms without a voice: it's over
-                    self._end_episode(episode, "too short")
-                    episode = None
-                    recent.clear()
+            elif event == "too_short":  # a gap ended this piece before there was enough voice to judge
+                self._end_episode(ep, f"too short ({ep['frames']} voice frames, {ep['frames'] * 80} ms of voice in this run)")
+                episode = None
                 continue
-
-            if (not episode or episode["done"] or episode["pending"]
-                    or sum(list(recent)[-self.barge_win_eff:]) < self.barge_frames
-                    or episode["frames"] < self.barge_min_frames * (1 + episode["tries"])):
+            episode = tracker.episode
+            if not candidate or not tracker.sustained(self.barge_win_eff, self.barge_frames, self.barge_min_frames):
                 continue
             # Sustained voice. Now: is it you, or the agent's own echo? (Judge the whole run of voice.)
             with self._q_lock:
@@ -419,7 +461,7 @@ class AudioEngine:
                 else:
                     self._end_episode(episode, f"likely echo (cleaned {c:.0f} vs expected echo {expected:.0f})")
             if episode["done"]:
-                recent.clear()
+                tracker.recent.clear()
             if self._rejections and time.time() - self._rejections[-1] < 0.2:
                 cooldown_until = frame_no + 5  # 0.4 s after an echo rejection
             if len([t for t in self._rejections if time.time() - t < 60]) >= 5 and time.time() - last_hint > 300:

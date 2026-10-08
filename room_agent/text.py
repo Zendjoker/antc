@@ -50,6 +50,10 @@ _DANGLING = frozenset("a an the to for and or but with in on at of from by if th
 _OPENER = re.compile(r"(?:^|\s)(?:can|could|would|will|do|did|are|should)\s+you(?:\s+please)?$|\bi\s+(?:want|need)\s+you$", re.I)
 
 
+_FILLER = re.compile(r"(?:[\s,]+(?:u+m+|u+h+|uhm|e+r+m?|hmm+|you know|i mean|kind of|kinda|sort of|basically))+$", re.I)
+_REQUEST = re.compile(r"(?:^|\s)(?:can|could|would|will)\s+you(?:\s+please)?$|\bi\s+(?:want|need)\s+you$", re.I)
+
+
 def looks_unfinished(text):
     """Said so it trails off: an ellipsis, dash or comma at the end, or no end punctuation and a last word that needs
     something after it. Judged from the words alone, so it works for any request."""
@@ -58,7 +62,15 @@ def looks_unfinished(text):
         return True
     if not t or t[-1] in ".?!":
         return False
-    return t.split()[-1].lower() in _DANGLING or bool(_OPENER.search(t))
+    if t.split()[-1].lower() in _DANGLING or _OPENER.search(t):
+        return True
+    # trailing fillers ("but can you, like", "and um", "so I was, kind of"): look at what comes before them
+    core = _FILLER.sub("", t).strip()
+    if core != t:
+        return not core or len(core.split()) <= 3 or looks_unfinished(core)
+    # "like" is only a filler after an opener or a dangling word ("can you like", "and like"); "what do you like" is complete
+    m = re.search(r"^(.*\S)\s+like$", t, re.I)
+    return bool(m and (_REQUEST.search(m.group(1)) or m.group(1).split()[-1].lower() in _DANGLING))
 
 
 def join_fragments(first, second):
