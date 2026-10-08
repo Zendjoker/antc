@@ -21,9 +21,10 @@ from room_agent.actions.context import env
 from room_agent.actions.events import events
 
 log = logging.getLogger("room-agent")
-PREFIXES = ("OK", "FAILED", "UNAVAILABLE", "NEEDS_CONFIRMATION", "NEEDS")
+# UNKNOWN: the action ran (or may have) but whether it took effect can't be told: never claimed, never blindly repeated
+PREFIXES = ("OK", "FAILED", "UNAVAILABLE", "NEEDS_CONFIRMATION", "NEEDS", "UNKNOWN")
 ERROR_CODES = {"FAILED": "failed", "UNAVAILABLE": "unavailable", "NEEDS": "needs_input",
-               "NEEDS_CONFIRMATION": "needs_confirmation"}
+               "NEEDS_CONFIRMATION": "needs_confirmation", "UNKNOWN": "unknown_outcome"}
 # Extension points: BEFORE_HOOKS (cap, args) -> args may fill in or adjust arguments (e.g. learned preferences);
 # AFTER_HOOKS (cap, args, result) -> extra text for the result, after a follow-up action (e.g. an app's usual monitor).
 BEFORE_HOOKS, AFTER_HOOKS = [], []
@@ -56,12 +57,31 @@ class ActionResult:
     undo_hint: str = ""
     expected: Any = None           # what the capability's `expect` said should be observed afterwards (cognition)
     observed: Any = None           # what was actually observed for those same fields
+    evidence: str = ""             # how the outcome is known (the verification that ran), for the task record
 
     @property
     def can_undo(self):
         return self.undo_fn is not None
 
+    @property
+    def outcome(self):
+        """verified | unverified | unknown | waiting | canceled | failed"""
+        if self.success:
+            return "verified" if self.verified else "unverified"
+        if self.error_code == "unknown_outcome":
+            return "unknown"
+        if self.error_code in ("needs_confirmation", "needs_input"):
+            return "waiting"
+        if self.error_code == "canceled" or "stopped: they interrupted" in self.message or "not run, they interrupted" in self.message:
+            return "canceled"
+        return "failed"
+
     def to_model(self):
+        if self.success and not self.verified and self.kind != "duplicate":
+            return self.message + " (Unverified: nothing could check the result, so say it was done, not confirmed.)"
+        if self.error_code == "unknown_outcome":
+            return self.message + (" (Outcome UNKNOWN: it may or may not have happened. Don't say it worked, and don't "
+                                   "just repeat it: check first, or tell them.)")
         return self.message
 
     def as_dict(self):
@@ -299,7 +319,8 @@ def _execute(name, args):
     elif result.success and cap.changes_state:  # 6. verify independently
         journal.state(journal.VERIFYING)
         result.state_before, result.state_after = before, _observe(cap, clean, before)
-        result.verified = True
+        result.verified = cap.verification != "none"
+        result.evidence = cap.verified_by or ("state read before and after" if cap.verification == "independent" else "")
         if cap.verify and before is not None and result.state_after is not None:
             try:
                 result.verified = bool(cap.verify(clean, before, result.state_after))
@@ -321,7 +342,8 @@ def _execute(name, args):
                                  kind=name, state_before=before, state_after=after)
                 result.expected, result.observed, result.error_code = expected, observed, "not_as_expected"
     elif result.success:
-        result.verified = True
+        result.verified = cap.verification != "none"  # (a read, or a change the tool checked itself)
+        result.evidence = cap.verified_by
     if result.success:
         pending.finished(name)  # the unfinished request is done
     if result.success and cap.undo and result.state_before is not None and result.state_after is not None and (
@@ -390,7 +412,12 @@ class Plan:
         args = args if isinstance(args, dict) else {}
         blocker = self._blocked_by(cap, args)
         twice = self._already_done(cap, name, args)
-        if twice is not None:  # (a retry after a timeout / a later round asking again: done once, not twice)
+        if twice is not None and twice.outcome == "unknown":  # (it may already have happened: never blindly again)
+            result = ActionResult(False, name, args, "UNKNOWN: not run again: an earlier attempt in this request may already "
+                                  "have done it (its outcome is unknown). Check, or ask them, before trying again.",
+                                  error_code="unknown_outcome", subject=twice.subject, kind="duplicate")
+            log.info("plan: %s not repeated (an earlier attempt's outcome is unknown)", name)
+        elif twice is not None:  # (a retry after a timeout / a later round asking again: done once, not twice)
             result = ActionResult(True, name, args, f"OK: already done earlier in this request ({twice.message[4:80]}); "
                                   "not run a second time.", verified=True, subject=twice.subject, kind="duplicate")
             log.info("plan: %s not repeated (already completed in round %s)", name, getattr(twice, "round", 0))
@@ -410,13 +437,14 @@ class Plan:
     ADDITIVE = {"timer.set", "alarm.set", "email.sent", "email.drafted", "calendar.created", "app.opened"}
 
     def _already_done(self, cap, name, args):
-        """An action that adds something (a timer, an email, an event) asked for again with the same arguments in a LATER
-        round of the same request was already done: running it again would make two. (Several in the same round are
-        deliberate, e.g. two timers.)"""
-        if not cap or cap.event not in self.ADDITIVE:
+        """An action that adds something (a timer, an email, an event) or can't be taken back, asked for again with the
+        same arguments in a LATER round of the same request, already ran: running it again could make two. That includes
+        an earlier attempt whose outcome is UNKNOWN (it may have happened). (Several in the same round are deliberate.)"""
+        if not cap or (cap.event not in self.ADDITIVE and cap.risk != core.Risk.SENSITIVE):
             return None
         key = {k: v for k, v in args.items() if k != "confidence"}
-        return next((s for s in self.steps if s.success and s.capability == name and getattr(s, "round", 0) < self.round
+        return next((s for s in self.steps if (s.success or s.outcome == "unknown") and s.capability == name
+                     and getattr(s, "round", 0) < self.round
                      and {k: v for k, v in (s.parameters or {}).items() if k != "confidence"} == key), None)
 
     def _blocked_by(self, cap, args):

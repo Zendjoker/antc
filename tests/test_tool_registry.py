@@ -59,4 +59,38 @@ t.check("'go back' with no browser in play -> not an instant browser command (co
         reflex.match("go back") and reflex.match("go back")[0].name)
 t.check("...'scroll down' / 'open the second one' likewise", all(
     (reflex.match(x) is None or not reflex.match(x)[0].name.startswith("browser")) for x in ("scroll down", "open the second one")))
+print("Verification is explicit:")
+from room_agent.actions import executor, journal  # noqa: E402
+from room_agent import runtime as rt  # noqa: E402
+
+kinds = {c.name: c.verification for c in caps}
+t.check("every tool says how its result is checked (independent / internal / none / read)",
+        set(kinds.values()) <= {"independent", "internal", "none", "read"} and all(kinds.values()))
+internal_without_evidence = [c.name for c in caps if c.verification == "internal" and not c.verified_by]
+t.check("every self-checking tool says HOW it checks", not internal_without_evidence, internal_without_evidence)
+unchecked = sorted(n for n, k in kinds.items() if k == "none")
+print("     not verifiable (reported UNVERIFIED when OK):", ", ".join(unchecked))
+cap = core.get(unchecked[0]) if unchecked else None
+fake = core.Capability(name="test_unchecked_action", description="a test action nothing can check", parameters={"type": "object",
+                       "properties": {}}, execute=lambda a: "OK: done it.")
+core.register(fake)
+rt.new_turn("do the test action")
+r = executor.execute("test_unchecked_action", {})
+t.check("an unchecked OK is success but NOT verified, and the model is told", r.success and not r.verified
+        and r.outcome == "unverified" and "Unverified" in r.to_model())
+t.check("...the journal records UNVERIFIED, not COMPLETED", journal.recent(1)[0]["state"] == "UNVERIFIED", journal.recent(1)[0]["state"])
+unknown = core.Capability(name="test_unknown_action", description="a test action whose outcome can't be told",
+                          parameters={"type": "object", "properties": {}}, execute=lambda a: "UNKNOWN: not confirmed: maybe.",
+                          event="email.sent", risk=core.Risk.SAFE)
+core.register(unknown)
+rt.new_turn("send the test thing")
+r = executor.execute("test_unknown_action", {})
+t.check("UNKNOWN: not success, outcome unknown, journal UNKNOWN, the model told not to repeat it", not r.success
+        and r.outcome == "unknown" and journal.recent(1)[0]["state"] == "UNKNOWN" and "don't just repeat" in r.to_model())
+plan = executor.Plan()
+plan.run("test_unknown_action", {})
+plan.round = 1
+r2 = plan.run("test_unknown_action", {})
+t.check("...asked again in a later round of the same request -> NOT run again (it may have happened)",
+        r2.outcome == "unknown" and "not run again" in r2.message, r2.message)
 t.done("TOOL REGISTRY")

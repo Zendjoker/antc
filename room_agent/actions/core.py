@@ -52,6 +52,13 @@ class Capability:
                                                    # a model call when a request matches exactly (cognition/reflex.py)
     reflex_check: Optional[Callable[[dict], bool]] = None  # a reflex only fires if this agrees (e.g. the app exists)
     reflex_say: Optional[Callable[[Any], str]] = None  # (verified ActionResult) -> the short spoken confirmation
+    # How an OK is known to be true (filled in at registration; see VERIFICATION below):
+    #   independent  the executor reads the state before and after (observe + verify / expect)
+    #   internal     the tool itself checks the outcome before saying OK (`verified_by` says how)
+    #   none         nobody checks: an OK is reported as UNVERIFIED, never as a verified success
+    #   read         changes nothing
+    verification: str = ""
+    verified_by: str = ""
 
     def schema(self):
         """The tool definition the model sees."""
@@ -102,6 +109,15 @@ def register(cap: Capability):
     from room_agent.tools import validate
 
     REGISTRY[cap.name] = cap
+    if not cap.verification:
+        if not cap.changes_state:
+            cap.verification = "read"
+        elif cap.observe and (cap.verify or cap.expect):
+            cap.verification = "independent"
+        elif cap.name in VERIFICATION:
+            cap.verification, cap.verified_by = "internal", VERIFICATION[cap.name]
+        else:
+            cap.verification = "none"
     validate.SCHEMAS[cap.name] = cap.parameters
     if cap.risk == Risk.CONFIRM and cap.min_confidence:
         validate.HIGH_IMPACT[cap.name] = cap.min_confidence
@@ -110,6 +126,53 @@ def register(cap: Capability):
     if cap.changes_state:
         truth.ACTION_TOOLS.add(cap.name)
     return cap
+
+
+# Tools that check their own outcome before answering OK, and how (the evidence). Anything state-changing that is neither
+# here nor independently verified (observe + verify) is reported UNVERIFIED. tests/test_tool_registry.py keeps this honest.
+VERIFICATION = {
+    "open_url": "the browser's address bar / window title shows the site",
+    "browser_search": "the browser's address bar shows the results page",
+    "browser_navigate": "the address changed / the tab count grew / the page reloaded / the tab is selected",
+    "browser_click": "the address changed to the link's target (links) or the page changed (buttons)",
+    "browser_click_sensitive": "the address changed to the link's target (links) or the page changed (buttons)",
+    "browser_type": "the field's value is read back",
+    "browser_scroll": "the page's scroll position moved",
+    "copy_link": "the clipboard is read back",
+    "open_research_source": "the browser's address bar shows the source",
+    "save_file": "the file is read back from disk",
+    "save_research_report": "the file is read back from disk",
+    "make_folder": "the folder exists afterwards",
+    "move_file": "the file is at the new place and gone from the old one",
+    "delete_file": "the file is gone (in the Recycle Bin)",
+    "open_file": "a window showing the file appeared",
+    "add_to_list": "the list is read back from disk", "check_off": "the list is read back from disk",
+    "remove_from_list": "the list is read back from disk", "clear_list": "the list is read back from disk",
+    "take_note": "the notes are read back from disk",
+    "remind_me_when": "the reminder is read back from disk", "cancel_moment_reminder": "the reminders are read back from disk",
+    "set_dark_mode": "the theme setting is read back", "set_brightness": "each monitor's brightness is read back",
+    "set_bluetooth": "the radio's state is read back", "set_wifi": "the radio's state is read back",
+    "play_music": "Windows' media controls show something new playing",
+    "play_pause": "the media session's playback status is read back",
+    "next_track": "the media session's track changed", "previous_track": "the media session's track changed",
+    "focus_app": "the app's window is the foreground window", "focus_window": "the window is the foreground window",
+    "cancel_timer": "the timer is gone from the running timers",
+    "remember": "the memory database confirms the row", "forget": "the memory database confirms the rows are gone",
+    "emergency_stop": "the turn is cancelled and the speech queue is empty",
+    "allow_screen_vision": "the setting is saved", "add_vip": "the setting is saved", "remove_vip": "the setting is saved",
+    "set_listening_patience": "the setting is applied", "set_speaking_rate": "the setting is applied",
+    "set_speaking_style": "the setting is saved", "set_voice": "the voice is switched and saved",
+    "set_pronunciation": "the pronunciation is saved", "forget_pronunciation": "the pronunciation is removed",
+    "go_quiet": "the state is quiet mode",
+    "text_me": "Twilio accepted the text (delivery to the phone isn't checked)",
+    "call_me": "Twilio accepted the call (whether it rang isn't checked)",
+    "gmail_create_draft": "Gmail returns the saved draft", "gmail_update_draft": "Gmail returns the updated draft",
+    "gmail_send": "Gmail returns the sent message's id",
+    "calendar_create_event": "the event is read back from Calendar", "calendar_update_event": "the event is read back from Calendar",
+    "calendar_delete_event": "Calendar no longer returns the event",
+    "learn_preference": "the preference store confirms it", "forget_preference": "the preference store confirms it",
+    "set_automation": "the preference store confirms it",
+}
 
 
 def register_group(group: Group):

@@ -471,7 +471,8 @@ r = run("open_url", {"site": "youtube"}, "open youtube")
 browsers.wait_loaded = browsers_wait
 t.check("the page never shows up -> 'not confirmed', never 'opened'", not r.success and "not confirmed" in r.message, r.message)
 e = journal.recent(1)[0]
-t.check("...and the action journal records it as FAILED (not COMPLETED)", e["state"] == "FAILED", e["state"])
+t.check("...and the action journal records it as UNKNOWN (it may have opened; never COMPLETED)", e["state"] == "UNKNOWN",
+        e["state"])
 d.reset(front="opera")
 r = run("browser_read_page", {}, "read this page")
 t.check("E. 'read this page' -> the real text of the page in front", r.success and "This is news.example.org" in r.message, r.message[:200])

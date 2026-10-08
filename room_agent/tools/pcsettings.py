@@ -57,7 +57,7 @@ def dark_mode(on):
     _write_theme(0 if on else 1, 0 if on else 1)
     after = theme()
     if after["apps_light"] != (0 if on else 1):
-        return "FAILED: not confirmed: the theme setting didn't change."
+        return "UNKNOWN: not confirmed: the theme setting didn't change."
     return f"OK: dark mode is {'on' if on else 'off'} (Windows and apps; some open apps change when you switch to them)."
 
 
@@ -157,7 +157,7 @@ def set_brightness(percent=None, step=None):
     after = brightness()
     now = after["monitors"] + ([after["laptop"]] if after["laptop"] is not None else [])
     if not changed or not now or all(abs(a - b) > 3 for a, b in zip(now, targets)):
-        return f"FAILED: not confirmed: asked the screens to change brightness, but they still read {now}."
+        return f"UNKNOWN: not confirmed: asked the screens to change brightness, but they still read {now}."
     skipped = _monitor_count() - len(before["monitors"])
     return (f"OK: brightness is now {', '.join(f'{x}%' for x in now)} ({len(now)} screen{'s' if len(now) != 1 else ''}"
             + (f"; {skipped} other screen{'s' if skipped != 1 else ''} can't be changed by apps" if skipped > 0 else "")
@@ -234,7 +234,7 @@ def set_radio(which, on):
                 "Nothing changed.")
     time.sleep(0.5)
     if radios().get(which) != bool(on):
-        return f"FAILED: not confirmed: asked Windows to turn {name} {'on' if on else 'off'}, but it's still {'off' if on else 'on'}."
+        return f"UNKNOWN: not confirmed: asked Windows to turn {name} {'on' if on else 'off'}, but it's still {'off' if on else 'on'}."
     warn = " (Jarvis's own internet goes with it: cloud voices and the AI won't work until it's back on)" if which == "wifi" and not on else ""
     return f"OK: {name} is {'on' if on else 'off'}{warn}."
 

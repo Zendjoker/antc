@@ -60,7 +60,7 @@ def write(name, content, where="desktop", overwrite=False):
         return "NEEDS: what to write in it."
     path.write_text(text, encoding="utf-8")
     if not path.is_file() or path.read_text(encoding="utf-8") != text:
-        return f"FAILED: not confirmed: {path.name} doesn't read back as written."
+        return f"UNKNOWN: not confirmed: {path.name} doesn't read back as written."
     return f"OK: saved {path.name} in your {target_dir.name} folder ({len(text)} characters, checked on disk)."
 
 
@@ -73,7 +73,7 @@ def make_folder(name, where="documents"):
     if path.exists():
         return f"OK: nothing needed: the folder {path.name} already exists in {base.name}."
     path.mkdir(parents=False)
-    return f"OK: made the folder {path.name} in {base.name} (checked)." if path.is_dir() else "FAILED: not confirmed."
+    return f"OK: made the folder {path.name} in {base.name} (checked)." if path.is_dir() else "UNKNOWN: not confirmed."
 
 
 def move(src, dest_folder="", new_name=""):
@@ -96,7 +96,7 @@ def move(src, dest_folder="", new_name=""):
         return f"FAILED: {dest.name} already exists there; nothing was moved (pick another name)."
     s.rename(dest)
     if not dest.is_file() or s.exists():
-        return "FAILED: not confirmed: the file isn't where it should be."
+        return "UNKNOWN: not confirmed: the file isn't where it should be."
     return f"OK: {s.name} is now {dest.name} in {target_dir.name} (checked)."
 
 

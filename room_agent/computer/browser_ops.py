@@ -221,7 +221,7 @@ def click(hwnd, key, target="", number=None, sensitive_ok=False):
                          and _norm_url(s["url"]) != _norm_url(before["url"]))
         st = st or _new_tab_with(key, el.href, before["url"])
         if st is None:
-            return (f"FAILED: not confirmed: clicked {label}, but the browser never went to {browsers.host(el.href)}. "
+            return (f"UNKNOWN: not confirmed: clicked {label}, but the browser never went to {browsers.host(el.href)}. "
                     "Don't say it opened.")
         desk.saw_page(key, st.get("hwnd", hwnd), st["url"], st["title"])
         return f"OK: clicked {label}; now on \"{st['title'][:80]}\" ({browsers.host(st['url'])})."
@@ -229,7 +229,7 @@ def click(hwnd, key, target="", number=None, sensitive_ok=False):
     if st is not None:
         desk.saw_page(key, hwnd, st["url"], st["title"])
         return f"OK: clicked {label}; the page changed to \"{st['title'][:80]}\"."
-    return (f"FAILED: not confirmed: {label} was activated, but nothing visible changed (same page). Tell them you "
+    return (f"UNKNOWN: not confirmed: {label} was activated, but nothing visible changed (same page). Tell them you "
             "pressed it but can't see an effect; don't say it worked.")
 
 
@@ -298,7 +298,7 @@ def type_text(hwnd, key, text, field="", submit=False, sensitive_ok=False):
         time.sleep(0.15)
         ok = _matches(uia.read_value(el), text)
     if not ok:
-        return f"FAILED: not confirmed: typed into \"{el.name[:50] or 'the field'}\", but it doesn't show the text afterwards."
+        return f"UNKNOWN: not confirmed: typed into \"{el.name[:50] or 'the field'}\", but it doesn't show the text afterwards."
     desk.touched(el.name, el.kind)
     if not submit:
         return f"OK: typed it into \"{el.name[:50] or 'the field'}\" (checked: the field shows it). Not submitted."
@@ -306,7 +306,7 @@ def type_text(hwnd, key, text, field="", submit=False, sensitive_ok=False):
         return "FAILED: typed it, but couldn't press Enter in that window, so it wasn't submitted."
     st = wait_change(hwnd, before)
     if st is None:
-        return "FAILED: not confirmed: typed it and pressed Enter, but the page didn't change."
+        return "UNKNOWN: not confirmed: typed it and pressed Enter, but the page didn't change."
     desk.saw_page(key, hwnd, st["url"], st["title"])
     return f"OK: typed it and pressed Enter; now on \"{st['title'][:80]}\"."
 
@@ -339,7 +339,7 @@ def scroll(hwnd, direction="down", amount="some"):
             return f"OK: scrolled to the {'bottom' if down else 'top'} ({after:.0f}% down the page)."
         if after is not None and after == (100.0 if down else 0.0):
             return f"OK: it's already at the {'bottom' if down else 'top'}."
-        return "FAILED: not confirmed: pressed End/Home, but the page position didn't change."
+        return "UNKNOWN: not confirmed: pressed End/Home, but the page position didn't change."
     big = amount in ("lot", "page", "a lot", "much", "more")
     steps = 3 if amount in ("a lot", "lot", "much") else 1
     before = uia.scroll_info(doc)
@@ -360,9 +360,9 @@ def scroll(hwnd, direction="down", amount="some"):
     if before is not None and after is not None and after != before:
         return f"OK: scrolled {'down' if down else 'up'} ({after:.0f}% down the page)."
     if after is None:
-        return ("FAILED: not confirmed: sent the scroll, but this page doesn't report its position, so I can't tell if it "
+        return ("UNKNOWN: not confirmed: sent the scroll, but this page doesn't report its position, so I can't tell if it "
                 "moved. Say you tried, not that it worked.")
-    return "FAILED: not confirmed: the page didn't move (it may not scroll, or it's at the end)."
+    return "UNKNOWN: not confirmed: the page didn't move (it may not scroll, or it's at the end)."
 
 
 # ---------------------------------------------------------------- navigation and tabs
@@ -388,7 +388,7 @@ def navigate(hwnd, key, action, tab=""):
                 desk.saw_page(key, hwnd, "", "New tab")
                 return f"OK: opened a new tab in {b.name}."
             time.sleep(0.2)
-        return f"FAILED: not confirmed: pressed Ctrl+T in {b.name}, but no new tab appeared."
+        return f"UNKNOWN: not confirmed: pressed Ctrl+T in {b.name}, but no new tab appeared."
     if action == "refresh":
         doc = uia.document(hwnd)
         rid = uia.runtime_id(doc) if doc is not None else ()
@@ -399,11 +399,11 @@ def navigate(hwnd, key, action, tab=""):
             d2 = uia.document(hwnd, wait=0.3)
             if d2 is not None and rid and uia.runtime_id(d2) != rid:
                 return f"OK: reloaded \"{_short(before['title'], b)}\"."
-        return "FAILED: not confirmed: pressed F5, but couldn't see the page reload."
+        return "UNKNOWN: not confirmed: pressed F5, but couldn't see the page reload."
     winput.hotkey(combo)
     st = wait_change(hwnd, before)
     if st is None:
-        return (f"FAILED: not confirmed: pressed {'Back' if action == 'back' else 'Forward'}, but the page didn't change "
+        return (f"UNKNOWN: not confirmed: pressed {'Back' if action == 'back' else 'Forward'}, but the page didn't change "
                 f"(maybe there's no page to go {'back' if action == 'back' else 'forward'} to).")
     desk.saw_page(key, hwnd, st["url"], st["title"])
     return f"OK: went {action}; now on \"{_short(st['title'], b)}\" ({browsers.host(st['url'])})."
@@ -426,7 +426,7 @@ def go_here(hwnd, key, url):
     st = wait_change(hwnd, before, check=lambda s: s["url"] and browsers.same_site(s["url"], url)
                      and _norm_url(s["url"]) != _norm_url(before["url"]))
     if st is None:
-        return f"FAILED: not confirmed: typed the address into {b.name}, but the tab didn't go to {browsers.host(url)}."
+        return f"UNKNOWN: not confirmed: typed the address into {b.name}, but the tab didn't go to {browsers.host(url)}."
     desk.saw_page(key, hwnd, st["url"], st["title"])
     return f"OK: loaded {browsers.host(url)} in the current {b.name} tab; it's showing \"{_short(st['title'], b)}\"."
 
@@ -454,7 +454,7 @@ def switch_tab(hwnd, key, wanted):
             desk.saw_page(key, h, st["url"], st["title"])
             return f"OK: switched to the \"{name[:70]}\" tab in {b.name}."
         time.sleep(0.15)
-    return f"FAILED: not confirmed: selected the \"{name[:60]}\" tab, but the window doesn't show it."
+    return f"UNKNOWN: not confirmed: selected the \"{name[:60]}\" tab, but the window doesn't show it."
 
 
 def _short(title, b):

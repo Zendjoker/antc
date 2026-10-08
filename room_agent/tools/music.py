@@ -114,7 +114,7 @@ def _spotify(query, kind="any"):
                 return f"FAILED: couldn't press Play on your playlist \"{name}\"."
             got = _wait_playing(before, query)
             if not got:
-                return f"FAILED: not confirmed: pressed Play on your playlist \"{name}\", but nothing new started playing."
+                return f"UNKNOWN: not confirmed: pressed Play on your playlist \"{name}\", but nothing new started playing."
             return f"OK: playing your playlist \"{name}\" on Spotify (now: {got[0]}{' by ' + got[1] if got[1] else ''})."
     seen = {n for n, _ in library}
     _open_uri("spotify:search:" + urllib.parse.quote(query))
@@ -130,7 +130,7 @@ def _spotify(query, kind="any"):
         return f"FAILED: couldn't press Play on \"{name}\" in Spotify."
     got = _wait_playing(before, query)
     if not got:
-        return f"FAILED: not confirmed: pressed Play on \"{name}\" in Spotify, but nothing new started playing."
+        return f"UNKNOWN: not confirmed: pressed Play on \"{name}\" in Spotify, but nothing new started playing."
     return f"OK: playing on Spotify: {got[0]}{' by ' + got[1] if got[1] else ''} (from the search for \"{query}\")."
 
 

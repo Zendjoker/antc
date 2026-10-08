@@ -387,7 +387,7 @@ def open_url(url, browser="", said="", query=""):
     if not hwnd and cancel.requested():
         return f"FAILED: stopped: they interrupted while {b.name} was opening {host(url)}; whether it opened isn't confirmed."
     if not hwnd:
-        return (f"FAILED: not confirmed: {b.name} was asked to open {host(url)}, but its window never showed the page "
+        return (f"UNKNOWN: not confirmed: {b.name} was asked to open {host(url)}, but its window never showed the page "
                 f"within a few seconds. Tell them you couldn't confirm it opened; don't say it did.")
     desk.saw_page(key, hwnd, st.get("url") or url, st.get("title", ""))
     return f"OK: opened {host(url)} in a new {b.name} tab ({why}); it's showing \"{_short_title(st.get('title', ''), b)}\"."

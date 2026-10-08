@@ -97,7 +97,7 @@ def _open(args):
         time.sleep(0.3)
     if cancel.requested():
         return f"FAILED: stopped: they interrupted; {name} was handed to Windows but its window isn't confirmed."
-    return f"FAILED: not confirmed: asked Windows to open {name}, but no window showing it appeared."
+    return f"UNKNOWN: not confirmed: asked Windows to open {name}, but no window showing it appeared."
 
 
 FILE = {"type": "string", "description": "The file as they called it ('my CV', 'invoice march', 'report.pdf'); leave out "

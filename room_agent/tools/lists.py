@@ -41,9 +41,12 @@ def _load():
 
 
 def _save(data):
+    """Write, then read back: raises OSError if the file doesn't hold what was written (a full disk, a sync tool...)."""
     tmp = config.LISTS_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
     tmp.replace(config.LISTS_FILE)
+    if _load() != json.loads(json.dumps(data)):
+        raise OSError("the list file doesn't read back as written")
 
 
 def _prune(items, now=None):

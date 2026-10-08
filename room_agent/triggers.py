@@ -64,9 +64,12 @@ def _load():
 
 
 def _save(items):
+    """Write, then read back (raises OSError if it doesn't hold what was written)."""
     tmp = config.EVENT_REMINDERS_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(items, indent=1), encoding="utf-8")
     tmp.replace(config.EVENT_REMINDERS_FILE)
+    if _load() != json.loads(json.dumps(items)):
+        raise OSError("the reminders file doesn't read back as written")
 
 
 def add(text, event):

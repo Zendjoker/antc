@@ -19,7 +19,8 @@ from room_agent import runtime as rt
 log = logging.getLogger("room-agent")
 REQUESTED, PLANNED, EXECUTING, VERIFYING, COMPLETED, FAILED, CANCELED, WAITING = (
     "REQUESTED", "PLANNED", "EXECUTING", "VERIFYING", "COMPLETED", "FAILED", "CANCELED", "WAITING")
-FINAL = (COMPLETED, FAILED, CANCELED, WAITING)
+UNVERIFIED, UNKNOWN = "UNVERIFIED", "UNKNOWN"  # (ran, nothing could check it / may or may not have happened)
+FINAL = (COMPLETED, FAILED, CANCELED, WAITING, UNVERIFIED, UNKNOWN)
 _lock = threading.Lock()
 _ids = itertools.count(int(time.time() * 1000) % 10_000_000)
 _entries = {}
@@ -61,14 +62,10 @@ def state(new, note="", jid=None):
 def finish(result):
     """The executor's final word on the current action."""
     msg = result.message or ""
-    if result.success:
-        new = COMPLETED
-    elif msg.startswith("NEEDS"):
-        new = WAITING
-    elif "interrupt" in msg.lower() or "cancel" in (result.error_code or ""):
+    new = {"verified": COMPLETED, "unverified": UNVERIFIED, "unknown": UNKNOWN, "waiting": WAITING,
+           "canceled": CANCELED}.get(result.outcome, FAILED)
+    if new == FAILED and ("interrupt" in msg.lower() or "cancel" in (result.error_code or "")):
         new = CANCELED
-    else:
-        new = FAILED
     state(new, "" if result.success else msg.split(":", 1)[-1].strip())
     _local.jid = None
 
