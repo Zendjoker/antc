@@ -57,8 +57,15 @@ def normalized(pcm, target=3000.0, max_gain=30.0):
     return np.clip(x * min(target / float(np.sqrt(np.mean(x[x != 0] ** 2))), max_gain), -32768, 32767)
 
 
+_recent_runs = {}  # (audio fingerprint, prompt) -> (text, confidence): the same audio is never decoded twice
+
+
 def whisper_text(pcm, prompt=None):
     """`prompt`: what the speech is expected to be (Whisper's initial prompt), e.g. while Jarvis waits for an address."""
+    key = (len(pcm), hash(np.asarray(pcm).tobytes()), prompt or "")
+    if key in _recent_runs:  # (e.g. the barge-in check already transcribed exactly this snippet)
+        text, rt.stt_confidence = _recent_runs[key]
+        return text
     with _whisper_lock:
         # beam 5 and a fixed temperature: the default fallback re-decodes doubtful audio with random sampling,
         # which is where completely unrelated phrases came from. No carry-over text between segments either.
@@ -80,6 +87,10 @@ def whisper_text(pcm, prompt=None):
         text = " ".join(s.text for s in kept).strip()
         rt.stt_confidence = ({"logprob": min(s.avg_logprob for s in kept), "no_speech": max(s.no_speech_prob for s in kept)}
                              if kept else None)
+        rt.stt_raw = " ".join(t for t, *_ in seen).strip()  # (everything Whisper produced, kept or not: diagnostics)
+        _recent_runs[key] = (text, rt.stt_confidence)
+        while len(_recent_runs) > 8:
+            _recent_runs.pop(next(iter(_recent_runs)))
         if debug.ENABLED:
             engine = rt.engine
             debug.event("whisper", why=getattr(debug.ctx, "why", "utterance"), seconds=len(pcm) / 16000,

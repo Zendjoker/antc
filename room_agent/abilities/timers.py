@@ -67,6 +67,22 @@ register_context(_context, order=30)
 
 
 # ---------------------------------------------------------------- checks and undo
+def _said_set(result):
+    """Spoken after a timer / alarm is set, from the item that was really created (verified), not from the request."""
+    from room_agent.tools import timers
+
+    new = set((result.state_after or {}).get("ids", [])) - set((result.state_before or {}).get("ids", []))
+    with timers._lock:
+        items = [timers._items[i] for i in new if i in timers._items]
+    if len(items) != 1:
+        return None
+    item = items[0]
+    if item["kind"] == "timer":
+        what = "" if item["label"] == "timer" else f" for {item['label']}"
+        return f"Okay, {timers._left(item['due'] - time.time())}{what}, starting now."
+    return f"Alarm's set for {timers._when(item['due'])}" + (", every day." if item.get("daily") else ".")
+
+
 def _ids(args, before=None):
     from room_agent.tools import timers
 
@@ -147,7 +163,7 @@ tool("set_timer", "Anything that should go off after a length of time from now, 
                                                           "e.g. 'Hey, the pasta's ready!' or 'Hey, time to wake up!'"},
              "ring_once": {"type": "boolean", "description": "Only if they want a single ping. By default it keeps ringing "
                                                              "every few seconds until they say something."}}, ["seconds"]),
-     _set_timer, group="timers", claim="timer", event="timer.set", observe=_ids, verify=_grew, undo=_undo)
+     _set_timer, group="timers", claim="timer", event="timer.set", observe=_ids, verify=_grew, undo=_undo, reflex_say=_said_set)
 tool("set_alarm", "Set an alarm or reminder for a clock time, e.g. 'wake me at 7:30' or 'remind me at 5pm to call mom'. For a "
      "length of time from now ('alarm in 10 seconds'), use set_timer instead. Rings at the next time it's that time, unless "
      "a date is given. Survives restarts. When it rings it says your `message`. Use the current time in the runtime context "
@@ -159,7 +175,7 @@ tool("set_alarm", "Set an alarm or reminder for a clock time, e.g. 'wake me at 7
              "ring_once": {"type": "boolean", "description": "Only if they want a single ping. By default it keeps ringing "
                                                              "until they say something"},
              "daily": {"type": "boolean", "description": "True if they want it every day"}}, ["time"]),
-     _set_alarm, group="timers", claim="timer", event="alarm.set", observe=_ids, verify=_grew, undo=_undo)
+     _set_alarm, group="timers", claim="timer", event="alarm.set", observe=_ids, verify=_grew, undo=_undo, reflex_say=_said_set)
 tool("list_timers", "List running timers and set alarms with time remaining.", NO_ARGS, _list, group="timers",
      changes_state=False, claim="timer")
 tool("cancel_timer", "Cancel a running timer or an alarm by its label (or 'all').",

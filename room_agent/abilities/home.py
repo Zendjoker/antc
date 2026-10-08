@@ -22,6 +22,19 @@ register_claim("home", r"(?<!\ball )\b(turned|switched|shut|flipped|set)\b.{0,40
                        r"|\b(locked|unlocked)\b.{0,25}\b(door|doors|lock|garage|gate)\b|\b(door|doors|garage|gate)\b.{0,25}\b(locked|unlocked)\b")
 
 
+def _ha_on():
+    try:
+        return _status()[0]
+    except Exception:
+        return False
+
+
+from room_agent import truth  # noqa: E402
+
+for _kind in ("window", "climate", "lock"):
+    truth.DEVICE_AVAILABLE.setdefault(_kind, []).append(_ha_on)
+
+
 def _states(args):
     from room_agent.tools.home_assistant import ha_states
 

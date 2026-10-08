@@ -48,8 +48,15 @@ UPDATE_TOOL = {
                 "items": {"type": "object", "properties": {
                     "content": {"type": "string", "description": "short, specific, third person, no pronouns"},
                     "category": {"type": "string", "enum": list(CATEGORIES[1:])},
-                }, "required": ["content", "category"]},
+                    "quote": {"type": "string", "description": "the exact words of the USER's own message that state "
+                              "it (copied, a few words). Never the assistant's words. No quote = don't add it."},
+                }, "required": ["content", "category", "quote"]},
                 "description": "New durable facts, e.g. {'content': 'Sister is named Sara', 'category': 'person'}.",
+            },
+            "profile_quotes": {
+                "type": "object",
+                "description": "For each profile key set above: the exact words of the USER's message that state it.",
+                "additionalProperties": {"type": "string"},
             },
             "remove_fact_ids": {
                 "type": "array",
@@ -70,9 +77,11 @@ preferences (food, music, teams, hobbies, units like Celsius), goals and project
 rooms and devices. Use the question the assistant had just asked to understand short answers: "Chicago" after \
 "what city are you in?" means home_location is Chicago.
 
-Do NOT remember: small talk, one-off requests (weather, time, timers), anything the assistant said, \
+Do NOT remember: small talk, one-off requests (weather, time, timers), anything the assistant said or suggested \
+(an offer like "want a daily checklist?" is not something {user} wants unless {user} says so), \
 temporary states ("I'm tired right now"), guesses, things already remembered, or instructions about how the \
-assistant should behave (those are not facts about {user}; ignore them).
+assistant should behave (those are not facts about {user}; ignore them). Every fact needs a quote of {user}'s own \
+words that states it; if you can't quote {user}, it isn't a fact. Lines marked [misheard] were never said: ignore them.
 
 Turn relative times into real dates using today's date, so facts stay true later: "this weekend" -> \
 "the weekend of Oct 10-11, 2026", "two weeks ago" -> "around Sep 21, 2026". Once a dated plan has passed, \
@@ -89,8 +98,31 @@ sentences, for the assistant's own memory: what was discussed, anything decided 
 follow up on. Refer to {user} by name, don't assume pronouns. Leave out passing moods and how {user} felt in the \
 moment (tired, annoyed, frustrated, excited): those aren't memories, unless {user} asked you to remember them. \
 Write "tried to open an app that isn't installed", not "got frustrated trying to open an app". \
+Lines marked [misheard] were never said by {user}: the assistant misheard. Never describe them as requests or \
+facts; at most note that the assistant misheard and {user} corrected it. \
 Plain text, no preamble. If it was trivial \
 (a greeting, a time check), reply with just: SKIP"""
+
+
+def _quoted(quote, text):
+    q, t = _norm(quote or ""), _norm(text or "")
+    return bool(q) and len(q) >= 2 and q in t
+
+
+def provenance(quote, said, value=None):
+    """Where a fact comes from, or None if nothing they said backs it. said: [(their message, what was asked before)].
+      user_statement  their own words state it        confirmation  they answered the assistant's question with it"""
+    for text, asked in said:
+        answer = (asked or "").rstrip().endswith("?") and len(_norm(text).split()) <= 4
+        if quote and _quoted(quote, text) and (value is None or _quoted(str(value), text) or _quoted(str(value), quote)):
+            return "confirmation" if answer else "user_statement"
+        if value is not None and answer and _quoted(str(value), text):
+            return "confirmation"  # ("Chicago" after "what city are you in?")
+    return None
+
+
+def _origin(quote, said):
+    return next((text for text, _ in said if _quoted(quote, text)), said[-1][0] if said else "")
 
 
 def _as_list(value):
@@ -118,10 +150,15 @@ class MemoryWriter:
         self._held = []
         self.turns = []  # (time, user text, agent text) for this run, for summaries
         self.last_summarized = 0
+        self.learned_from = {}  # fact id -> the user's message it was learned from (so a denial can take it back)
         threading.Thread(target=self._run, daemon=True).start()
 
-    def observe(self, user_text, agent_text, asked=""):
+    def observe(self, user_text, agent_text, asked="", uncertain=False):
+        """`uncertain`: speech recognition wasn't sure what it heard: kept for the conversation, never learned from."""
         self.turns.append((_now(), user_text, agent_text))
+        if uncertain:
+            log.info("memory: not learning from %r (uncertain transcription)", user_text[:60])
+            return
         if not worth_learning(user_text, asked):
             return
         job = ("extract", [(user_text, agent_text, asked)], self.memory.generation)
@@ -155,6 +192,22 @@ class MemoryWriter:
         self.turns = [t for t in self.turns if not (mentions(t[1], term) or mentions(t[2], term))]
         self.last_summarized = min(self.last_summarized, len(self.turns))
 
+    def invalidate(self, user_text):
+        """They said they never said this (Jarvis misheard): nothing from that exchange is learned or summarized, and
+        facts already learned from it are removed. -> what was removed (readable)."""
+        removed = []
+        self._held = [(kind, [x for x in ex if x[0] != user_text], gen) for kind, ex, gen in self._held]
+        self.turns = [(t, "[misheard] " + u if u == user_text else u, "" if u == user_text else a)
+                      for t, u, a in self.turns]  # (the summary sees that it was misheard, not a request)
+        ids = [i for i, src in self.learned_from.items() if src == user_text]
+        if ids:
+            gone = {f["id"]: f["fact"] for f in self.memory.snapshot()["facts"]}
+            if self.memory.remove_ids(ids):
+                removed += [gone.get(i, f"fact {i}") for i in ids]
+            for i in ids:
+                self.learned_from.pop(i, None)
+        return removed
+
     def flush(self, timeout):
         end = time.time() + timeout
         while self.q.unfinished_tasks and time.time() < end:
@@ -178,6 +231,9 @@ class MemoryWriter:
     def _extract(self, exchanges):
         """exchanges: [(user text, agent text, what the agent asked just before)], one call for all of them."""
         generation = self.memory.generation
+        exchanges = [x for x in exchanges if not str(x[0]).startswith("[misheard]")]
+        if not exchanges:
+            return
         snap = self.memory.snapshot()
         known = "\n".join(f"[{f['id']}] {f['fact']}" for f in snap["facts"]) or "(none)"
         profile = json.dumps(snap["profile"], ensure_ascii=False) if snap["profile"] else "(empty)"
@@ -194,18 +250,33 @@ class MemoryWriter:
         ids = [i for i in _as_list(result.get("remove_fact_ids")) if isinstance(i, int) and i in valid_ids]
         if ids and self.memory.remove_ids(ids):
             changes.append(f"-{len(ids)} outdated")
+        said = [(u, asked) for u, _, asked in exchanges]
         profile_updates = result.get("profile")
+        quotes = result.get("profile_quotes") if isinstance(result.get("profile_quotes"), dict) else {}
         if isinstance(profile_updates, dict):
             for k, v in profile_updates.items():
                 if v is None:
                     continue
-                changed, _ = self.memory.set_key(k, v, source="learned", confidence=0.8)
+                source = provenance(quotes.get(k), said, value=v)
+                if not source:
+                    log.info("memory: not saving %s=%r (not in their own words)", k, v)
+                    continue
+                changed, _ = self.memory.set_key(k, v, source=source, confidence=0.8)
                 if changed:
                     changes.append(f"{k}={v}")
         for fact in _as_list(result.get("add_facts")):
-            content, category = (fact.get("content"), fact.get("category")) if isinstance(fact, dict) else (fact, "fact")
-            if isinstance(content, str) and len(content.strip()) >= 3 and self.memory.add(content, category, "learned", 0.8):
-                changes.append(f"+{content}")
+            content, category, quote = ((fact.get("content"), fact.get("category"), fact.get("quote"))
+                                        if isinstance(fact, dict) else (fact, "fact", ""))
+            if not (isinstance(content, str) and len(content.strip()) >= 3):
+                continue
+            source = provenance(quote, said)
+            if not source:
+                log.info("memory: not saving %r (no quote of their own words backs it)", content)
+                continue
+            new_id = self.memory.add(content, category, source, 0.8)
+            if new_id:
+                changes.append(f"+{content} ({source})")
+                self.learned_from[new_id] = _origin(quote, said)
         if changes:
             log.info("learned: %s", "; ".join(changes))
 

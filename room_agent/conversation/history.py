@@ -62,7 +62,9 @@ def remember_turn(user_text, agent_text, private=False):
     except Exception as e:
         log.warning("couldn't save the conversation: %s", e)
     if rt.writer and not private:  # (email / calendar content stays in the service, not in long-term memory)
-        rt.writer.observe(user_text, agent_text, asked=asked)  # `asked`: so "Chicago" after "what city?" is understood
+        # `asked`: so "Chicago" after "what city?" is understood; uncertain speech recognition is never learned from
+        extra = {"uncertain": True} if getattr(rt.turn, "uncertain", False) else {}
+        rt.writer.observe(user_text, agent_text, asked=asked, **extra)
 
 
 def trim(history):

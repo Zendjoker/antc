@@ -40,6 +40,7 @@ class Budget:
         self.path, self.limit = path, daily_limit
         self._lock = threading.Lock()
         self.turn = {}  # this turn's spend per model, for the per-turn log line
+        self.turn_tokens = {"calls": 0, "input": 0, "cached": 0, "output": 0}
         self.warned_on = ""  # the day the "budget reached" line was said (said once a day)
         self.data = self._load()
 
@@ -65,6 +66,9 @@ class Budget:
             d["usd"][provider] = d["usd"].get(provider, 0.0) + usd
             d["calls"] = d.get("calls", 0) + 1
             self.turn[model] = self.turn.get(model, 0.0) + usd
+            t = self.turn_tokens
+            t.update(calls=t["calls"] + 1, input=t["input"] + fresh_in + cached_in + cache_write, cached=t["cached"] + cached_in,
+                     output=t["output"] + out)
             try:
                 self.path.write_text(json.dumps(d, indent=1), encoding="utf-8")
             except OSError as e:
@@ -88,14 +92,18 @@ class Budget:
 
     def start_turn(self):
         self.turn = {}
+        self.turn_tokens = {"calls": 0, "input": 0, "cached": 0, "output": 0}
 
-    def turn_line(self):
-        """'turn cost: 0.21c (gpt-5-mini), today: 3.4c (openai 2.1c, claude 1.3c)'"""
+    def turn_line(self, kind="", seconds=None):
+        """'turn cost: 0.21c (gpt-5-mini), today: 3.4c (...)' + this turn's type, model calls, tokens and latency."""
         if not self.turn:
-            return ""
+            return f"turn metrics: {kind or 'turn'}, 0 model calls" + (f", {seconds:.1f}s" if seconds is not None else "")
         spent = sum(self.turn.values()) * 100
         by = ", ".join(f"{k} {v * 100:.1f}c" for k, v in sorted(self.today().items()))
-        return f"turn cost: {spent:.2f}c ({', '.join(self.turn)}), today: {self.total() * 100:.1f}c ({by})"
+        t = self.turn_tokens
+        return (f"turn cost: {spent:.2f}c ({', '.join(self.turn)}), today: {self.total() * 100:.1f}c ({by}) | turn metrics: "
+                f"{kind or 'turn'}, {t['calls']} model call{'s' if t['calls'] != 1 else ''}, {t['input']} in "
+                f"({t['cached']} cached), {t['output']} out" + (f", {seconds:.1f}s" if seconds is not None else ""))
 
 
 budget = Budget()

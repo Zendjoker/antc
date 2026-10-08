@@ -41,6 +41,39 @@ class Reply:
     uses: list = field(default_factory=list)
 
 
+_MORE = re.compile(r"\b(and|also|then|plus|but|after that|as well|too|tell me|explain|why|how)\b|[?;]", re.I)
+
+
+def _single_request(text):
+    """One plain request ("make the strip pink"), nothing else to answer ("...and motivate me", a question)."""
+    t = str(text or "").strip()
+    return bool(t) and len(t.split()) <= 12 and not _MORE.search(t)
+
+
+def verified_done(plan, n, spoken, guard):
+    """After tool calls: can the turn end without asking the model again? Only when every call was a SAFE state change
+    that succeeded and was verified, nothing is held back by the claim check, and there's something truthful to say:
+    the model's own words that came with the call (already spoken), or each tool's confirmation built from the state
+    it read back (reflex_say). -> lines still to say ([] = already said), or None (ask the model)."""
+    steps = list(plan.steps)[-n:] if n else []
+    if not steps or guard.held or len(steps) != n or not _single_request(rt.turn_text):
+        return None
+    caps = [core.get(s.capability) for s in steps]
+    if any(c is None or not c.changes_state or c.risk != core.Risk.SAFE for c in caps):
+        return None
+    if any(not (s.success and s.verified) or s.message.rstrip().endswith("?") for s in steps):
+        return None
+    if spoken:
+        return []
+    lines = []
+    for cap, step in zip(caps, steps):
+        line = cap.reflex_say(step) if cap.reflex_say else None
+        if not line:
+            return None
+        lines.append(line)
+    return lines
+
+
 def run_model(history, make_call):
     """Answer the last message in `history` with the model behind `make_call`; speak the verified reply and append it
     (and any tool calls) to `history`. `make_call(history, fixed, changing, tools)` returns an adapter."""
@@ -115,6 +148,15 @@ def run_model(history, make_call):
                 results.append({"type": "tool_result", "tool_use_id": u.id, "content": out})
             history.append({"role": "user", "content": results})
             release_checked(guard, spoken)  # e.g. "Timer's set." said before the tool ran, now confirmed
+            done = verified_done(plan, len(uses), spoken, guard)
+            if done is not None:  # a simple action, verified: no second model call just to say so
+                for line in done:
+                    say(line)
+                    spoken.append(line)
+                history.append({"role": "assistant", "content": " ".join(spoken)})
+                log.info("tool turn finished in code: verified simple action, no second model call")
+                print("Agent:", " ".join(spoken), flush=True)
+                return
             if spoken:
                 print("Agent:", " ".join(spoken), flush=True)
             continue

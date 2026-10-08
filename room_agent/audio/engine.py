@@ -559,7 +559,26 @@ class AudioEngine:
                 for item in kept:
                     self.mic_q.put(item)
 
-    def close(self):
-        for s in self._streams:
-            s.stop()
-            s.close()
+    def close(self, timeout=2.0):
+        """Stop the audio streams: safe to call twice, never hangs. abort() drops queued audio at once (stop() would
+        wait for it to play, and blocks while a callback is stuck); each stream gets `timeout` seconds."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        with self._lock:
+            self._buf.clear()  # (nothing stale plays on the way out)
+        streams, self._streams = list(self._streams), []
+
+        def shut():
+            for s in streams:
+                try:
+                    s.abort()
+                    s.close()
+                except Exception as e:
+                    log.debug("closing an audio stream: %s", e)
+
+        t = threading.Thread(target=shut, daemon=True, name="audio-close")
+        t.start()
+        t.join(timeout * max(1, len(streams)))
+        if t.is_alive():
+            log.warning("audio streams didn't close in time; exiting anyway")

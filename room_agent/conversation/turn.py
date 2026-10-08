@@ -11,6 +11,7 @@ from room_agent.actions import pending
 from room_agent.audio.speaker import finish_speaking, say
 from room_agent.cognition import reflex
 from room_agent.speech import timing
+from room_agent.conversation import corrections
 from room_agent.conversation.history import remember_turn, reply_text, trim
 from room_agent.llm.router import ask
 from room_agent.memory import mentions
@@ -94,6 +95,9 @@ def _take_turn(history, text, raw=None, final=False, output=None):
             timing.mark("user_endpoint", mic.last_speech_end)
     timing.mark("reasoning_start")
     private = pending.private_now()
+    rt.turn.uncertain = bool(rt.turn_start is not None and rt.stt_uncertain)  # (typed text is never "misheard")
+    rt.stt_uncertain = False
+    corrections.on_user_turn(raw or text)  # ("I didn't say that": the misheard request is discarded everywhere)
     social.on_user_turn(raw or text)  # (how the conversation is going -> how to answer: social/, a few ms, no model call)
     info = cognition.begin_turn(raw or text)  # (REFLEX / FAST / DELIBERATE / DEEP, goal, constraints: cognition/, no model)
     decision = pending.on_utterance(raw or text)  # (a request being filled in: answers, corrections, "never mind")
@@ -136,8 +140,7 @@ def _take_turn(history, text, raw=None, final=False, output=None):
         log.warning("learning skipped this turn: %s", e)
     from room_agent.llm.budget import budget
 
-    if budget.turn_line():
-        log.info(budget.turn_line())
+    log.info(budget.turn_line(kind=str(getattr(rt.turn, "level", "") or "turn").lower(), seconds=time.time() - t0))
     if len(history) > mark:
         history[mark]["content"] = text  # the note was for this one reply only
     said = reply_text(history[mark + 1 :])

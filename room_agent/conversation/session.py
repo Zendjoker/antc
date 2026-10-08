@@ -14,8 +14,8 @@ from room_agent.audio import debug
 from room_agent.audio.fillers import filler_if_slow, stop_thinking
 from room_agent.audio.mic import record_utterance
 from room_agent.audio.sounds import tone
-from room_agent.audio.speaker import finish_speaking
-from room_agent.audio.speech_check import AGENT_ECHO, NOISE, UNCERTAIN, classify_audio
+from room_agent.audio.speaker import finish_speaking, say
+from room_agent.audio.speech_check import AGENT_ECHO, NOISE, UNCERTAIN, classify_audio, transcript_uncertain
 from room_agent.audio.stt import transcribe
 from room_agent.audio.tts import clip
 from room_agent.config import (CHECKIN_AFTER_S, CHECKIN_CHANCE, CHECKIN_COOLDOWN_S, EXPLAIN_DONE_S, EXPLAIN_WAIT_S,
@@ -82,6 +82,23 @@ def speak_phrase(kind, history=None):
     except Exception as e:
         log.warning("couldn't say %r: %s", text, e)
     return settle_mic(started)  # (heard, interrupted)
+
+
+def speak_line(text, history=None):
+    """Say a line Jarvis came up with by itself (a greeting), then listen like after any reply. -> (heard, interrupted)"""
+    rt.turn_start = None
+    print("Agent:", text, flush=True)
+    if history is not None:
+        history.append({"role": "assistant", "content": text})  # (so its next reply knows it just greeted them)
+    rt.engine.interrupted.clear()
+    started = time.time()
+    try:
+        say(text)
+        finish_speaking()
+    except Exception as e:
+        log.warning("couldn't say %r: %s", text, e)
+    rt.last_reply = text
+    return settle_mic(started)
 
 
 def converse(mic_q, history, text=None, heard=False, barged=False):
@@ -155,6 +172,12 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
             rt.stt_seconds = time.time() - rt.turn_start
             social.heard(pcm, text)  # (how it was said: supporting evidence for the social layer, a few ms)
             label, detail = classify_audio(text, mic_input.last_speech_start)  # who is this? before what does it mean?
+            rt.stt_uncertain = label in ("USER", "UNCERTAIN") and transcript_uncertain(text)
+            conf = rt.stt_confidence or {}
+            log.info("transcript: raw=%r accepted=%r -> %s (%s)%s%s", rt.stt_raw, text,
+                     "ACCEPTED" if label in ("USER", "UNCERTAIN") else "REJECTED", f"{label}: {detail}",
+                     f", logprob {conf['logprob']:.2f}, no-speech {conf['no_speech']:.2f}" if "logprob" in conf else "",
+                     ", UNCERTAIN (no memory, nothing irreversible)" if rt.stt_uncertain else "")
             trace.note("INPUT", repr(text))
             trace.note("AUDIO", f"{label} ({detail})")
             debug.event("decision", text=text, label=label, detail=detail, barged=barged, tts_end_in=rt.tts_end - time.time())

@@ -98,6 +98,24 @@ def is_short_answer(text, conf=None):
 
 
 USER, AGENT_ECHO, NOISE, UNCERTAIN = "USER", "AGENT_ECHO", "NOISE", "UNCERTAIN"
+# Short commands that matter even as a single word: never thrown away for being short
+COMMAND_WORDS = {"stop", "wait", "no", "nope", "yeah", "okay", "pause", "cancel", "enough", "hold", "quiet", "shut", "sorry"}
+
+
+def is_short_command(text):
+    words = norm_words(text)
+    return 0 < len(words) <= 3 and bool(set(words) & COMMAND_WORDS)
+
+
+def transcript_uncertain(text, conf=None):
+    """Recognition passed its thresholds but only just: kept for the conversation, but never learned from or used for
+    something that can't be undone. (Whisper's scores aren't calibrated probabilities: this is a band, not a verdict.)"""
+    conf = rt.stt_confidence if conf is None else conf
+    if not conf or is_short_command(text):
+        return False
+    if "score" in conf:
+        return conf["score"] < 0.75
+    return conf["logprob"] < -0.7 or conf["no_speech"] > 0.4
 
 
 def classify_audio(text, speech_started=None):
@@ -117,10 +135,25 @@ def classify_audio(text, speech_started=None):
         if age is not None and age <= engine.delay.delay + 0.15 and set(heard) & set(agent_said()):
             return AGENT_ECHO, "short word the agent just said, heard while its audio was still arriving"
         return USER, "short answer (recognition confident)"
-    if engine is None or len(heard) < 4:
-        return USER, "too short to resemble the agent, or no live audio"
+    if engine is None:
+        return USER, "no live audio"
     echo_s = engine.delay.delay + 0.15  # how long after its last sound the agent's echo can still arrive
     age = None if speech_started is None else speech_started - rt.tts_end  # < 0: it started while the agent was talking
+    if len(heard) <= 5 and not (age is not None and age > echo_s) and not is_short_command(text) and not confident():
+        return NOISE, "short, over the agent's audio, and recognition wasn't sure"
+    if len(heard) < 4:
+        # A short phrase used to count as you, always. Heard over the agent's own audio (or its echo's trip back), a
+        # fragment like "if you want" is usually the agent leaking into the mic or a recognition guess: only a real
+        # short command, or words the agent didn't just say with confident recognition, count as you there.
+        if age is not None and age > echo_s:
+            return USER, f"short, started {age * 1000:.0f}ms after the agent stopped"
+        if is_short_command(text):
+            return USER, "short command over the agent's audio"
+        if set(w for w in heard if w not in STOP_WORDS) & set(agent_said()):
+            return AGENT_ECHO, "short fragment of what the agent was saying"
+        if not confident():
+            return NOISE, "short, over the agent's audio, and recognition wasn't sure"
+        return USER, "short, but not the agent's words and recognition was confident"
     if age is not None and age > echo_s:
         return USER, f"started {age * 1000:.0f}ms after the agent stopped (its echo needs {echo_s * 1000:.0f}ms)"
     word_ratio, pair_ratio = own_speech_scores(heard)

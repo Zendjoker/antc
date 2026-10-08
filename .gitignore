@@ -29,3 +29,5 @@ bin/
 recent.json
 traces/
 bench/
+
+zigbee_events.json

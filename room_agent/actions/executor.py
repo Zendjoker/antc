@@ -220,6 +220,12 @@ def execute(name, args):
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: they didn't ask for this "
                                                        f"in their own words ({what}). Ask them first, in one short "
                                                        "question; only if they say yes, call it again."))
+    if (getattr(rt.turn, "uncertain", False) and not confirmed and cap.changes_state
+            and (cap.risk != core.Risk.SAFE or cap.undo is None)):  # 4c. misheard? never something that can't be undone
+        pending.confirming(name, clean)
+        return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: speech recognition wasn't "
+                                                       f"sure it heard them right ({what}). Say what you heard in a few "
+                                                       "words and ask if that's right."))
     if cap.risk == core.Risk.SENSITIVE and not confirmed:  # 4b. risk: always asked first
         pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done. This can't be taken back "

@@ -28,6 +28,8 @@ CASES = [
     ("time", "what time is it?", dict(reply="It's just after eleven.")),
     ("timer (tool)", "set a timer for 5 minutes", dict(calls=[("set_timer", {"seconds": 300})], reply="Five minutes, starting now.")),
     ("can you call me", "can you call my phone?", dict(reply="I can't call you on request, sorry.")),
+    ("timer via model, verified", "can you set me a timer for 5 minutes", dict(calls=[("set_timer", {"seconds": 300})],
+                                                                                reply="SHOULD NOT BE NEEDED")),
     ("session: thanks", "ok thanks", dict(reply="Anytime.")),
     ("session: time", "what time is it", dict(reply="It's 11:20.")),
 ]

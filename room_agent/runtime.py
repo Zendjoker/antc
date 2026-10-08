@@ -85,6 +85,8 @@ explaining = False          # "let me finish": collect what they say, answer onl
 turn_start = None           # when they stopped talking, to time the answer (conversation/session.py)
 stt_confidence = None       # how sure speech recognition was about the last utterance (audio/stt.py)
 stt_seconds = None          # how long speech-to-text took for the last utterance (conversation/session.py)
+stt_raw = ""                # everything recognition produced for it, kept or dropped (diagnostics)
+stt_uncertain = False       # recognition only just passed: no memory, nothing irreversible (audio/speech_check.py)
 patience = float(voices.saved("patience", 1.0))  # x SILENCE_S before it treats you as finished (tools/voice.py)
 speech_rate = float(voices.saved("speech_rate", 1.0))  # their speaking pace, both voices (tools/voice.py)
 

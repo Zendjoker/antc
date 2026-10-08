@@ -44,10 +44,58 @@ class Hub:
     def __init__(self):
         self.devices, self.state = {}, {}
         self.changed = {}  # name -> {"opened": at, "closed": at, "moved": at, "presence": at, "updated": at}
+        self.events = self._load_events()  # what happened, newest last, kept on disk (a restart doesn't forget the door)
+        self.offline = set()  # devices Zigbee2MQTT reports unavailable
         self.online = False
         self.client = None
         self._lock = threading.Lock()
         self._updated = threading.Condition(self._lock)
+
+    # ---------------------------------------------------------------- event history (on disk, 48 h)
+    KEEP_EVENTS_S = 48 * 3600
+
+    def _load_events(self):
+        try:
+            items = json.loads(config.ZIGBEE_EVENTS_FILE.read_text(encoding="utf-8"))
+            cutoff = time.time() - self.KEEP_EVENTS_S
+            return [e for e in items if isinstance(e, dict) and e.get("at", 0) >= cutoff][-300:]
+        except (FileNotFoundError, ValueError, OSError):
+            return []
+
+    def _save_events(self):
+        try:
+            config.ZIGBEE_EVENTS_FILE.write_text(json.dumps(self.events[-300:]), encoding="utf-8")
+        except OSError as e:
+            log.debug("zigbee: couldn't save the event history (%s)", e)
+
+    def record(self, device, event, note="", at=None):
+        """One thing that happened ("door opened"), with an optional note about what Jarvis did about it."""
+        with self._lock:
+            self.events.append({"at": at or time.time(), "device": device, "event": event, "note": note})
+            cutoff = time.time() - self.KEEP_EVENTS_S
+            self.events = [e for e in self.events if e["at"] >= cutoff][-300:]
+        self._save_events()
+
+    def annotate(self, device, event, note):
+        """Add what Jarvis did to the latest such event (e.g. 'no greeting: you were talking with me')."""
+        with self._lock:
+            hit = next((e for e in reversed(self.events) if e["device"] == device and e["event"] == event), None)
+            if hit is not None:
+                hit["note"] = note
+        self._save_events()
+
+    def last_event(self, device, event):
+        return next((e for e in reversed(self.events) if e["device"] == device and e["event"] == event), None)
+
+    def recent_events(self, within_s=6 * 3600, limit=8):
+        cutoff = time.time() - within_s
+        return [e for e in self.events if e["at"] >= cutoff][-limit:]
+
+    def event_lines(self, within_s=6 * 3600, limit=8):
+        out = []
+        for e in self.recent_events(within_s, limit):
+            out.append(f"{e['device']} {e['event']} at {clock(e['at'])}" + (f" ({e['note']})" if e.get("note") else ""))
+        return out
 
     # ---------------------------------------------------------------- connection
     def ready(self):
@@ -111,6 +159,10 @@ class Hub:
             self.online = (data.get("state") if isinstance(data, dict) else data) == "online"
         elif rest == "bridge/devices" and isinstance(data, list):
             self._devices(data)
+        elif rest.endswith("/availability") and not rest.startswith("bridge/"):
+            name = rest[:-len("/availability")]
+            state = data.get("state") if isinstance(data, dict) else data
+            (self.offline.discard if state == "online" else self.offline.add)(name)
         elif not rest.startswith("bridge/") and "/" not in rest and isinstance(data, dict):
             self._update(rest, data)
 
@@ -181,6 +233,9 @@ class Hub:
                 marks["presence"] = now
                 said.append(("presence." + ("detected" if data[key] else "cleared"), {}))
         for event, extra in said:
+            self.record(name, {"door.opened": "opened", "door.closed": "closed", "vibration.detected": "moved",
+                               "presence.detected": "someone detected", "presence.cleared": "nobody there"}[event]
+                        + (f" ({extra['action']})" if extra.get("action") not in (None, "vibration") else ""), at=now)
             try:
                 events.emit(event, device=name, app=name, **extra)
             except Exception as e:
@@ -255,21 +310,31 @@ class Hub:
             return f"{name}: unknown device"
         marks = self.changed.get(name, {})
         k = dev["kind"]
+        if name in self.offline:
+            return f"{name}: UNAVAILABLE (Zigbee2MQTT can't reach it right now; its last reading may be out of date)"
+        if not st and k != "vibration":  # (a vibration sensor's history comes from the event log)
+            return f"{name}: no reading yet since Jarvis started (unknown, don't guess)"
+        last_open = self.last_event(name, "opened")
         if k == "contact":
             if "contact" not in st:
                 text = "no reading yet"
             else:
                 since = marks.get("closed" if st["contact"] else "opened")
                 text = ("closed" if st["contact"] else "OPEN") + (f" (since {clock(since)})" if since else "")
-                if st["contact"] and marks.get("opened"):
-                    text += f", last opened {_ago(marks['opened'])}"
+                opened_at = marks.get("opened") or (last_open or {}).get("at")
+                if st["contact"] and opened_at:
+                    text += f", last opened {_ago(opened_at)}"
+                    note = (last_open or {}).get("note")
+                    text += f" ({note})" if note and last_open and abs(last_open["at"] - opened_at) < 2 else ""
         elif k == "climate":
             parts = [self.temperature(st["temperature"])] if "temperature" in st else []
             parts += [f"{st['humidity']:.0f}% humidity"] if "humidity" in st else []
             parts += [f"{st['pressure']:.0f} hPa"] if "pressure" in st else []
             text = ", ".join(parts) or "no reading yet"
-        elif k == "vibration":
-            text = f"last movement {_ago(marks['moved'])}" if marks.get("moved") else "no movement since Jarvis started"
+        elif k == "vibration":  # (a vibration sensor stuck to one thing, e.g. the bed: not a room motion sensor)
+            moved = marks.get("moved") or (self.last_event(name, "moved") or {}).get("at")
+            text = (f"vibration sensor (on one object, NOT a room motion sensor): last movement {_ago(moved)}" if moved
+                    else "vibration sensor (on one object, NOT a room motion sensor): no movement recorded in the last 48 hours")
         elif k == "presence":
             key = "presence" if "presence" in st else "occupancy"
             text = ("someone is there" if st.get(key) else "nobody detected") if key in st else "no reading yet"
@@ -286,6 +351,9 @@ class Hub:
                 text += f", effect {st['effect']}"
         else:
             text = ", ".join(f"{k2}={v}" for k2, v in list(st.items())[:4]) or "no reading yet"
+        updated = marks.get("updated")
+        if k == "climate" and updated and time.time() - updated > 3 * 3600:
+            text += f" (last reading {_ago(updated)}, may be out of date)"
         if dev["battery"] and isinstance(st.get("battery"), (int, float)) and st["battery"] <= 20:
             text += f" (battery low: {st['battery']}%)"
         return f"{name}: {text}"

@@ -130,6 +130,24 @@ PHONE_OFFER = re.compile(
     r"|\b(send|push)\b.{0,25}\b(to|on) your (phone|iphone|cell|mobile)\b", re.I)
 DRIVING_CALL = re.compile(r"\b(driv|on the road|in the car)", re.I)
 
+# Offers to operate a kind of device: only true if such a device is actually connected (registered checks below).
+_OFFER_LEAD = r"\b(i'?ll|i will|i can|i could|let me|want me to|should i|shall i|how about i|i'?d be happy to|happy to)\s+(?:\w+\s+){0,3}?"
+DEVICE_OFFERS = {
+    "window": re.compile(_OFFER_LEAD + r"(open|close|crack|shut)\s+(?:up\s+)?(?:the\s+|a\s+|your\s+)?(window|windows|blinds|curtains|shades)\b", re.I),
+    "climate": re.compile(_OFFER_LEAD + r"(?:(cool|heat|warm)\s+(?:it|things|the room|the place|you)?\s*(down|up)\b|"
+                          r"(turn|switch|crank|put)\s+(on|up|down|off)?\s*(?:the\s+)?(ac|a/?c|air ?con\w*|heat(er|ing)?|fan|thermostat)\b|"
+                          r"(lower|raise|set)\s+(?:the\s+)?(temperature|thermostat))", re.I),
+    "lock": re.compile(_OFFER_LEAD + r"(lock|unlock)\s+(?:the\s+|your\s+)?(door|front door|doors)\b", re.I),
+}
+DEVICE_AVAILABLE = {}  # kind -> callable: is a device of this kind connected? (filled in by the areas that control one)
+
+
+def _device_available(kind):
+    try:
+        return any(bool(fn()) for fn in DEVICE_AVAILABLE.get(kind, []))
+    except Exception:
+        return False
+
 
 class ClaimGuard:
     """Per-turn gate between the model's words and the speaker."""
@@ -160,6 +178,10 @@ class ClaimGuard:
         m = PHONE_OFFER.search(sentence)
         if m and not _negated(sentence, m) and not DRIVING_CALL.search(sentence):
             return ["phone_offer"]  # (checked on the whole sentence: an offer phrased as a question is still false)
+        for kind, rx in DEVICE_OFFERS.items():
+            m = rx.search(sentence)
+            if m and not _negated(sentence, m) and not _device_available(kind):
+                return [f"no_{kind}_device"]  # (e.g. "want me to open the window?" with no window controller)
         s = _claim_part(sentence)
         if not s:
             return []  # a question isn't a claim

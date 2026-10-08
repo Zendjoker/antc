@@ -36,9 +36,13 @@ def voice_mass(frames):
 def wait_for_wake(mic_q, oww):
     """Block until the wake word. Returns the last ~2 s of audio, which contain "hey jarvis" itself
     (and the start of a command if you kept talking)."""
+    from room_agent.conversation import greet
+
     oww.reset()
     recent = collections.deque(maxlen=int(2.0 * SR / FRAME))
     while True:
+        if greet.request.is_set():
+            return None  # (not the wake word: Jarvis has something to say first, e.g. you just came home)
         pcm, voice = next_frame(mic_q)
         recent.append((pcm, voice))
         engine = rt.engine

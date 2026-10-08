@@ -18,7 +18,8 @@ from room_agent.audio.tts import clip, el, load_piper, record_in_background
 from room_agent.config import (BARGE_VERIFY, EL_KEY, LLM_PROVIDER, MODEL, SR, STT_PROVIDER, TTS_PROVIDER, WAKE_ACK_DELAY,
                                WAKE_SOUND_ON, WAKE_WORD)
 from room_agent.conversation.history import start_history
-from room_agent.conversation.session import converse, speak_phrase
+from room_agent.conversation import greet
+from room_agent.conversation.session import converse, speak_line, speak_phrase
 from room_agent.conversation.states import State
 from room_agent.conversation.turn import take_turn
 from room_agent.llm.client import client
@@ -90,6 +91,9 @@ def voice_loop():
         # Asleep (or in quiet mode): only the wake word detector runs. No speech recognition, no model calls.
         log.info("Listening for '%s'%s...", WAKE_WORD, " (quiet mode)" if state.quiet else "")
         heard_wake = wait_for_wake(mic_q, oww)
+        greeting = greet.take() if heard_wake is None else ""
+        if heard_wake is None and not greeting:
+            continue  # (a greeting that went stale: back to waiting for the wake word)
         state.go(State.LISTENING, "wake word")  # this also ends quiet mode
         engine.interrupted.clear()
         if writer and unsummarized is not None:
@@ -100,16 +104,21 @@ def voice_loop():
         try:
             # Did you keep going ("hey jarvis, what's the weather?") or stop at "hey jarvis"? The recording
             # starts with "hey jarvis" itself so no word of the command gets clipped; it's stripped from the text.
-            pcm = record_utterance(mic_q, start_timeout=WAKE_ACK_DELAY, prefix=heard_wake)
-            command = strip_wake(transcribe(pcm)) if pcm is not None else ""
-            if command:
-                ended = converse(mic_q, history, text=command)
-            else:
-                if WAKE_SOUND_ON == "wake":
-                    beep()
-                state.go(State.IDLE_CHECK, "answering the wake word")
-                heard, barged = speak_phrase("wake", history)
+            if greeting:  # you came home: it speaks first, then it's an ordinary conversation (no wake word needed)
+                state.go(State.IDLE_CHECK, "greeting you")
+                heard, barged = speak_line(greeting, history)
                 ended = converse(mic_q, history, heard=heard, barged=barged)
+            else:
+                pcm = record_utterance(mic_q, start_timeout=WAKE_ACK_DELAY, prefix=heard_wake)
+                command = strip_wake(transcribe(pcm)) if pcm is not None else ""
+                if command:
+                    ended = converse(mic_q, history, text=command)
+                else:
+                    if WAKE_SOUND_ON == "wake":
+                        beep()
+                    state.go(State.IDLE_CHECK, "answering the wake word")
+                    heard, barged = speak_phrase("wake", history)
+                    ended = converse(mic_q, history, heard=heard, barged=barged)
         except Exception:
             log.exception("conversation crashed, going back to listening")  # never leave it deaf
         if writer and ended != "quiet":

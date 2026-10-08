@@ -18,6 +18,9 @@ from room_agent.memory import MemoryWriter
 from room_agent.prompt import capabilities
 
 
+log = logging.getLogger("room-agent")
+
+
 def main():
     p = argparse.ArgumentParser(description="Voice agent for your room")
     p.add_argument("--text", action="store_true", help="type instead of talk")
@@ -116,6 +119,9 @@ def main():
     from room_agent.tools.zigbee import hub
 
     hub.start()  # (Zigbee sensors and lights, if Zigbee2MQTT is here)
+    from room_agent.conversation import greet
+
+    greet.start()  # (a friendly hello when you walk in: conversation/greet.py)
     if config.PHONE_MODE:
         from room_agent.phone import server
 
@@ -126,13 +132,48 @@ def main():
     except KeyboardInterrupt:
         print("\nBye.")
     finally:
-        # don't lose what was just said: summarize this run's last conversation and finish saving facts
-        rt.writer.conversation_ended(rt.writer.last_summarized)
-        rt.writer.flush(timeout=15)
-        if rt.engine:
-            rt.engine.close()
-        sys.stdout.flush()
-        os._exit(0)  # skip native-library teardown noise on exit
+        shutdown()
+
+
+_shutting_down = threading.Event()
+
+
+def shutdown(flush_s=8.0):
+    """Clean exit, in a safe order and bounded in time: audio first (it stops talking at once), then save what was
+    just said (bounded), then the helpers it started (the phone tunnel), then exit. Safe to call twice; a second Ctrl+C
+    while it runs exits immediately instead of crashing inside the sound driver."""
+    import signal
+
+    if _shutting_down.is_set():
+        return
+    _shutting_down.set()
+
+    def force(*_):
+        print("\nForced exit (cleanup skipped).", flush=True)
+        os._exit(1)
+
+    try:
+        signal.signal(signal.SIGINT, force)
+    except (ValueError, OSError):
+        pass  # (not the main thread: nothing to re-route)
+    steps = [("audio", lambda: rt.engine and rt.engine.close())]
+    if rt.writer:  # don't lose what was just said: summarize this run's last conversation and finish saving facts
+        steps.append(("memory", lambda: (rt.writer.conversation_ended(rt.writer.last_summarized),
+                                         rt.writer.flush(timeout=flush_s))))
+    steps.append(("phone tunnel", _stop_tunnel))  # (os._exit skips atexit: stopped here, or cloudflared is orphaned)
+    for name, step in steps:
+        try:
+            step()
+        except Exception as e:
+            log.warning("shutdown: %s didn't stop cleanly: %s", name, e)
+    sys.stdout.flush()
+    os._exit(0)  # skip native-library teardown noise on exit
+
+
+def _stop_tunnel():
+    from room_agent.phone import tunnel
+
+    tunnel.stop()
 
 
 def _connections(a):

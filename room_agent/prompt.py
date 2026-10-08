@@ -143,6 +143,9 @@ def runtime_context(user_text):
     last = rt.turn_text.strip()
     if rt.must_answer:
         lines.append("- this_turn: they are waiting for an answer in words. Do not reply <listen> or <silent>.")
+    if getattr(rt.turn, "uncertain", False):
+        lines.append("- transcript_uncertain: speech recognition wasn't sure it heard this right. If it doesn't fit the "
+                     "conversation or sounds odd, say what you heard and ask, instead of acting on a guess.")
     if last:
         lines.append("- last_message_ends: " + ("with a full stop, question mark or exclamation mark: a finished sentence, so never reply <listen>"
                                                 if last[-1] in ".?!" else "with no ending punctuation, so it may be cut off"))
@@ -165,6 +168,9 @@ def _register_core_context():
 
     core.register_context(_session, order=20)
     core.register_context(_already_said, order=21)
+    from room_agent.conversation import corrections
+
+    corrections.register()
     core.register_context(_environment, order=60)
 
 
