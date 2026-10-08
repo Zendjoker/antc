@@ -511,6 +511,10 @@ def swap_in(workspace, s, staged, why):
         if version.exists():
             version = version.with_name(version.name + "-" + uuid.uuid4().hex[:4])
         _rename(live, version)
+    from room_agent.missions import crashpoints
+
+    if version is not None:  # (an existing site is being replaced: the window where it's briefly absent)
+        crashpoints.hit("during_site_swap")
     try:
         _rename(staged, live)
     except Exception:

@@ -433,7 +433,8 @@ def step_edit(ctx, step):
     if proj is None:
         return StepResult(False, error="that demo site isn't part of this mission", final=True)
     lead = s.lead(proj["lead_id"])
-    r = coder.edit(proj["path"], lead, step["args"]["instruction"], workspace=ctx.workspace)
+    r = coder.edit(proj["path"], lead, step["args"]["instruction"], workspace=ctx.workspace,
+                   idem_key=f"edit:{ctx.id}:{step['key']}", mission_id=ctx.id)
     entry = {"what": step["args"]["instruction"][:200], "by": r.get("backend"), "ok": r["ok"],
              "changed": r.get("changed"), "problems": r.get("problems")}
     if not r["ok"]:
@@ -507,6 +508,33 @@ def summarize(ctx):
     return text
 
 
+def reconcile(m, st):
+    """A non-idempotent step that was running when Jarvis stopped: decide from the recorded operations (and the files),
+    never by guessing. -> (state, note)"""
+    from room_agent.missions import coder
+
+    s = store()
+    if st["kind"] != "edit":
+        return "uncertain", "interrupted while running; its effect is unknown, so it isn't repeated automatically"
+    key = f"edit:{m['id']}:{st['key']}"
+    swap = s.op_by_key(key + ":swap")
+    if swap is not None and swap["state"] == "completed":
+        return "completed", "the edit was applied before Jarvis stopped (recorded)"
+    if swap is not None and swap["state"] == "running":
+        d = swap.get("detail") or {}
+        if d.get("hash") and coder.live_hash(d.get("folder", "")) == d["hash"]:
+            s.op_finish(swap["id"], "completed", detail={"recovered": True})
+            return "completed", "the edit was applied before Jarvis stopped (the live site matches the new version)"
+        s.op_finish(swap["id"], "failed", error="not applied: the live site doesn't match the new version")
+    model = s.op_by_key(key + ":model")
+    if model is None or model["state"] == "failed":
+        return "pending", "interrupted before anything was paid for or applied; it will run again"
+    if model["state"] == "completed" and model["result"]:
+        return "pending", "the paid edit result is kept but wasn't applied yet; it will be applied without paying again"
+    return "uncertain", ("the edit's model call may have been billed, but its result was lost when Jarvis stopped; it "
+                         "isn't repeated automatically (ask for the edit again: that costs again)")
+
+
 def recover(m):
     """At startup: finish / undo half-done demo-site swaps in this mission's folder."""
     ws = Path(m["workspace"])
@@ -518,6 +546,7 @@ WORKFLOW = engine.register(Workflow(
     handlers={"discover": step_discover, "research": step_research, "rank": step_rank, "demo": step_demo,
               "outreach": step_outreach, "edit": step_edit, "redesign": step_redesign},
     describe=describe, summarize=summarize, progress=progress, status_line=status_line, recover=recover,
+    reconcile=reconcile,
     timeouts={"discover": 300, "research": 180, "rank": 60, "demo": 60, "redesign": 60, "outreach": 120,
               "edit": config.CODER_TIMEOUT_S + 60}))
 

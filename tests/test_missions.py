@@ -862,11 +862,15 @@ class FakeGmail:
     def __init__(self, provider, account=None):
         pass
 
-    def create_draft(self, to, subject, body, reply_to=None):
+    def create_draft(self, to, subject, body, reply_to=None, message_id=""):
         if GM["fail"]:
             raise GM["fail"]
         GM["drafts"].append((to, subject, body))
+        GM.setdefault("ids", {})[message_id] = f"d{len(GM['drafts'])}"
         return {"id": f"d{len(GM['drafts'])}", "to": to, "subject": subject, "body": body}
+
+    def find_draft_by_message_id(self, message_id):
+        return GM.get("ids", {}).get(message_id)
 
 
 import room_agent.integrations as integ  # noqa: E402

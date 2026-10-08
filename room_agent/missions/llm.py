@@ -66,17 +66,21 @@ def _connect_errors():
     return tuple(out)
 
 
-def complete(prompt, system="", tier="light", max_tokens=800, what="model call"):
+def complete(prompt, system="", tier="light", max_tokens=800, what="model call", idem_key=None):
     """-> text. Raises meter.BudgetExceeded before spending past the mission's budget, ModelUnavailable without a key,
     runctx.Cancelled if the step was stopped (before sending; a call already sent is still charged)."""
     from room_agent.llm.budget import budget
 
+    prior = meter.completed_result(idem_key)  # (raises OperationUncertain for an unresolved earlier attempt)
+    if prior is not None:
+        log.info("mission model call (%s): reusing the stored result of %s (not paid again)", what, idem_key)
+        return prior
     provider, model = _pick(tier)
     out_cap = max_tokens * 3 if provider == "openai" else max_tokens  # (GPT-5 thinking tokens count as output)
     estimate = meter.model_estimate(model, len(prompt) + len(system), out_cap)
     t0 = time.time()
     runctx.check_before_send()
-    with meter.paid(estimate, what, provider=provider, model=model) as charge:
+    with meter.paid(estimate, what, provider=provider, model=model, idem_key=idem_key) as charge:
         runctx.check_before_send()  # (released, not counted, if stopped here: nothing was sent yet)
         try:
             if provider == "openai":
@@ -91,7 +95,12 @@ def complete(prompt, system="", tier="light", max_tokens=800, what="model call")
             if _not_billed(e):
                 charge.not_billed()
             raise
+        from room_agent.missions import crashpoints
+
+        crashpoints.hit("after_external_response")
         charge.actual(usd, tin, tout)
+        if idem_key:
+            charge.result = text  # (stored with the settlement: a retry reuses it instead of paying again)
     log.info("mission model call (%s, %s): %d in / %d out, $%.5f, %.1fs", what, model, tin, tout, usd, time.time() - t0)
     runctx.check()  # (stopped while the model was answering: the cost is recorded, the text isn't used)
     return text

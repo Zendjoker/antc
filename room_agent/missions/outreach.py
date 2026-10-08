@@ -11,6 +11,7 @@
 
 import logging
 import re
+import time
 from pathlib import Path
 
 from room_agent import config
@@ -270,24 +271,39 @@ def approve(aid, via):
             return False, "Gmail isn't connected with permission to write drafts"
     except Exception as e:  # noqa: BLE001
         return False, f"Gmail isn't available ({e.__class__.__name__})"
+    # Write-ahead: the operation and the Message-ID the draft will carry are recorded BEFORE Gmail is called, so if the
+    # answer is lost (crash, network) the draft can be looked up by that id instead of guessed about (reconcile).
+    import uuid
+
+    op, existed = s.op_start(a["mission_id"], "gmail_draft", f"Gmail draft for approval #{aid}", idem_key=f"gmail:{aid}",
+                             detail={"message_id": f"<jarvis-{aid}-{uuid.uuid4().hex[:12]}@jarvis.invalid>"})
+    if existed:
+        return False, "an earlier attempt of this draft is unresolved: use retry (it checks Gmail first)"
     if not s.claim_approval(aid, via):
+        s.op_finish(op["id"], "failed", error="not claimed (handled elsewhere)")
         return False, "it's already being handled"
     s.update_outreach(o["id"], status="sending_to_gmail")
     try:
         from room_agent.integrations.google.gmail import GmailService
 
-        draft = GmailService(g).create_draft(rcpt, o["subject"], o["body"])
+        draft = GmailService(g).create_draft(rcpt, o["subject"], o["body"], message_id=op["detail"]["message_id"])
+        from room_agent.missions import crashpoints
+
+        crashpoints.hit("after_gmail_draft")
     except Exception as e:  # noqa: BLE001
         name = e.__class__.__name__
         if name in _NOT_CREATED:
+            s.op_finish(op["id"], "failed", error=f"{name}: nothing was created")
             s.update_outreach(o["id"], status="draft")
             s.finish_approval(aid, "failed", f"{name}: nothing was created")
             s._exec("UPDATE approvals SET status='pending' WHERE id=? AND status='failed'", (aid,))
             return False, f"Gmail draft not created ({name}); nothing was created, so it can be approved again later"
+        s.op_finish(op["id"], "uncertain", error=f"{name}: {str(e)[:150]}")
         s.update_outreach(o["id"], status="unknown")
         s.finish_approval(aid, "unknown", f"{name}: {str(e)[:150]}")
         return False, (f"not confirmed ({name}): the draft may or may not be in Gmail. Look in your Drafts; if it isn't "
                        "there, say 'retry approval " + str(aid) + "'.")
+    s.op_finish(op["id"], "completed", detail={"draft_id": str(draft.get("id", ""))})
     s.update_outreach(o["id"], status="gmail_draft", external_id=str(draft.get("id", "")))
     s.finish_approval(aid, "done", f"Gmail draft {draft.get('id', '?')} created and read back")
     lead = s.lead(o["lead_id"])
@@ -296,8 +312,36 @@ def approve(aid, via):
     return True, "Gmail draft created and read back; it is NOT sent: open Gmail to review and send it yourself"
 
 
+def reconcile(aid):
+    """Resolve an UNKNOWN Gmail draft from Gmail itself: look for the draft by the Message-ID recorded before the call.
+    -> ("created", draft id) / ("absent", "") / ("unknown", why) - absent only if Gmail answered the search."""
+    from room_agent.missions.store import store
+
+    s = store()
+    op = s.op_by_key(f"gmail:{aid}")
+    msgid = ((op or {}).get("detail") or {}).get("message_id")
+    if op is None or not msgid:
+        return "unknown", "no record of what was sent (made by an older version)"
+    if op["state"] == "completed":
+        return "created", ((op.get("detail") or {}).get("draft_id") or "")
+    try:
+        from room_agent.integrations import provider
+        from room_agent.integrations.google.gmail import GmailService
+
+        found = GmailService(provider("google")).find_draft_by_message_id(msgid)
+    except Exception as e:  # noqa: BLE001
+        return "unknown", f"Gmail couldn't be checked ({e.__class__.__name__})"
+    if found:
+        s.op_finish(op["id"], "completed", detail={"draft_id": str(found), "reconciled": True})
+        return "created", str(found)
+    s.op_finish(op["id"], "failed", error="reconciled: no draft with its Message-ID exists in Gmail")
+    return "absent", ""
+
+
 def retry(aid, via):
-    """After an UNKNOWN outcome, once you've checked Gmail's Drafts: make it approvable again, then approve."""
+    """After an UNKNOWN outcome: first ask Gmail whether the draft exists (by its recorded Message-ID). If it does, it's
+    recorded as done - no second draft. If Gmail says it doesn't, it's approved again. If Gmail can't be asked, nothing
+    is done."""
     from room_agent.missions.store import store
 
     s = store()
@@ -305,6 +349,14 @@ def retry(aid, via):
     if a is None or a["status"] != "unknown":
         return False, "only an approval whose outcome is unknown can be retried"
     oid = (a["payload"] or {}).get("outreach_id")
+    verdict, info = reconcile(aid)
+    if verdict == "created":
+        s._exec("UPDATE approvals SET status='done', decided=?, result=? WHERE id=? AND status='unknown'",
+                (time.time(), f"reconciled: the draft exists in Gmail ({info})", aid))
+        s._exec("UPDATE outreach SET status='gmail_draft', external_id=? WHERE id=? AND status='unknown'", (info, oid))
+        return True, "the draft was already in Gmail (found by its id): recorded as done, no second draft created"
+    if verdict == "unknown" and "older version" not in info:
+        return False, f"not retried: {info}; nothing was done"
     s._exec("UPDATE approvals SET status='pending', result=? WHERE id=? AND status='unknown'",
             (f"retried by {via} after checking Gmail", aid))
     s._exec("UPDATE outreach SET status='draft' WHERE id=? AND status='unknown'", (oid,))

@@ -23,6 +23,7 @@ Estimates are upper bounds: input ~3 characters a token (pessimistic), the outpu
 costs nothing and never touches the ledger.
 """
 
+import json
 import logging
 import threading
 from contextlib import contextmanager
@@ -62,6 +63,7 @@ class _Charge:
     def __init__(self, cid, estimate):
         self.id, self.estimate = cid, estimate
         self._actual = None
+        self.result = None  # (what the provider returned, kept with the settlement when the call has an idem_key)
 
     def actual(self, usd, tokens_in=0, tokens_out=0):
         self._actual = (max(0.0, float(usd or 0.0)), int(tokens_in or 0), int(tokens_out or 0))
@@ -86,9 +88,12 @@ def daily_exhausted(estimate=0.0):
 
 
 @contextmanager
-def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True):
+def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True, idem_key=None):
     """Reserve -> run the block -> settle. Outside a mission (no mission bound) the call runs unmetered here (Jarvis's
-    own daily budget still applies through llm/budget.py)."""
+    own daily budget still applies through llm/budget.py).
+    Each paid call is an operation (store.operations) created with its reservation and closed with its settlement, in
+    the same transactions. idem_key: the logical identity of this call (e.g. "this step's edit"): its result is stored
+    with the settlement so a retry can reuse it (see completed_result) instead of paying again."""
     from room_agent.missions.store import store
 
     runctx.check()
@@ -101,7 +106,7 @@ def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True)
         yield c
         return
     s = store()
-    cid = s.reserve(mid, est, what, provider, model, getattr(_local, "step", "") or "")
+    cid = s.reserve(mid, est, what, provider, model, getattr(_local, "step", "") or "", idem_key=idem_key)
     if cid is None:
         m = s.mission(mid) or {"spent_usd": 0, "reserved_usd": 0, "budget_usd": 0}
         raise BudgetExceeded(m["spent_usd"] + m.get("reserved_usd", 0), m["budget_usd"], est, what)
@@ -128,10 +133,32 @@ def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True)
         s.settle(cid, 0, state="released", note="not billed")
     else:
         usd, tin, tout = c._actual
-        row = s.settle(cid, usd, tin, tout)
+        row = s.settle(cid, usd, tin, tout, result=json.dumps({"text": c.result}) if c.result is not None else None)
         if row and usd > est * 1.05 + 1e-6:
             log.warning("mission %s: %s cost $%.5f, above its estimate $%.5f (estimate too low?)", mid, what, usd, est)
             s.event(mid, f"{what} cost ${usd:.4f}, more than its ${est:.4f} estimate", "warn")
+
+
+class OperationUncertain(Exception):
+    """An earlier attempt of this exact paid operation may have been billed but its result was lost (Jarvis stopped
+    mid-call). It isn't repeated automatically: that could pay twice."""
+
+
+def completed_result(idem_key):
+    """The stored result of a completed paid operation with this key, or None. Raises OperationUncertain if an earlier
+    attempt's outcome is unknown (still open, or settled as uncertain)."""
+    from room_agent.missions.store import store
+
+    if not idem_key:
+        return None
+    op = store().op_by_key(idem_key)
+    if op is None or op["state"] == "failed":
+        return None
+    if op["state"] == "completed" and op["result"]:
+        r = op["result"]  # (stored as {"text": ...}: the result column is JSON-decoded on read)
+        return r.get("text") if isinstance(r, dict) else r
+    raise OperationUncertain(f"an earlier attempt of this paid operation ({op['what']}) ended {op['state']}: it may have "
+                             "been billed and its result wasn't kept, so it isn't repeated automatically")
 
 
 def model_estimate(model, prompt_chars, max_out_tokens):

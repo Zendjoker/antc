@@ -157,8 +157,10 @@ class GmailService:
         return _b64d(data.get("data", "")).decode("utf-8", "replace")[:1500]
 
     # ----- drafts and sending (gmail.compose)
-    def _mime(self, to, subject, body, in_reply_to="", references="", cc=""):
+    def _mime(self, to, subject, body, in_reply_to="", references="", cc="", message_id=""):
         msg = EmailMessage()
+        if message_id:
+            msg["Message-ID"] = message_id  # (lets a caller find this exact draft again: find_draft_by_message_id)
         msg["To"] = to
         if cc:
             msg["Cc"] = cc
@@ -175,14 +177,21 @@ class GmailService:
         return {"id": d["id"], "message_id": d["message"]["id"], "thread_id": m["thread_id"], "to": m["to"], "cc": m["cc"],
                 "subject": m["subject"], "body": m["body"]}
 
-    def create_draft(self, to, subject, body, reply_to=None):
-        """reply_to: the message being answered (same thread, proper reply headers)."""
+    def find_draft_by_message_id(self, message_id):
+        """The id of the draft carrying this Message-ID, or None (reconciling a draft whose creation was cut off)."""
+        res = self._get("drafts", q=f"rfc822msgid:{message_id}", maxResults=5)
+        drafts = res.get("drafts") or []
+        return drafts[0]["id"] if drafts else None
+
+    def create_draft(self, to, subject, body, reply_to=None, message_id=""):
+        """reply_to: the message being answered (same thread, proper reply headers). message_id: an explicit
+        Message-ID header (so the draft can be found again if the answer to this request is lost)."""
         thread, irt, refs = None, "", ""
         if reply_to:
             to = to or reply_to["reply_to"] or f"{reply_to['from_name']} <{reply_to['from_email']}>"
             subject = subject or (reply_to["subject"] if reply_to["subject"].lower().startswith("re:") else "Re: " + reply_to["subject"])
             thread, irt, refs = reply_to["thread_id"], reply_to["message_id"], reply_to["references"]
-        body_json = {"message": {"raw": self._mime(to, subject or "(no subject)", body, irt, refs)}}
+        body_json = {"message": {"raw": self._mime(to, subject or "(no subject)", body, irt, refs, message_id=message_id)}}
         if thread:
             body_json["message"]["threadId"] = thread
         d = self.session.call("POST", f"{BASE}/drafts", json_body=body_json, scope_hint="gmail.compose")

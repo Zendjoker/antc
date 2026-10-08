@@ -32,12 +32,12 @@ from pathlib import Path
 from typing import Callable
 
 from room_agent import config
-from room_agent.missions import meter, runctx
+from room_agent.missions import crashpoints, meter, runctx
 from room_agent.missions.store import GuardedStore, store
 
 log = logging.getLogger("room-agent")
 DONE = ("completed", "skipped")
-DEAD = ("failed", "blocked", "cancelled")
+DEAD = ("failed", "blocked", "cancelled", "uncertain")  # (uncertain: interrupted, its effect unknown: needs checking)
 LIVE_MISSION = ("planned", "running")
 PAUSED = ("paused", "paused_budget", "paused_daily", "interrupted")
 RESTARTABLE = ("completed", "finished_with_problems")  # the only states new work may start a new run from
@@ -90,6 +90,9 @@ class Workflow:
     status_line: Callable = None            # (ctx, progress) -> one spoken sentence
     timeouts: dict = field(default_factory=dict)  # step kind -> seconds
     recover: Callable = None                # (mission row) -> [notes]: workflow-specific repair at startup
+    reconcile: Callable = None              # (mission row, step row) -> (state, note) for a NON-idempotent step that was
+                                            # running when Jarvis stopped: "completed" (its effect is in place),
+                                            # "pending" (provably not applied, safe to run again), "uncertain"
 
 
 WORKFLOWS = {}
@@ -174,7 +177,7 @@ def create(kind, params, budget_usd=None):
     m = s.create_mission(mid, kind, title, params, budget, workspace)
     for spec in wf.plan(params):
         s.add_step(mid, spec.key, spec.kind, spec.title, spec.args, spec.depends, spec.idempotent, spec.max_attempts)
-    s.update_mission(mid, state="running")
+    s.set_state(mid, "running", "created")
     s.event(mid, f"mission planned: {title} (budget ${budget:.2f})")
     _audit("mission_started", mid, title=title, budget=budget)
     start_runner()
@@ -199,8 +202,7 @@ def add_steps(mid, specs):
         raise MissionClosed("that mission was stopped for good; start a new one")
     added = sum(s.add_step(mid, x.key, x.kind, x.title, x.args, x.depends, x.idempotent, x.max_attempts) for x in specs)
     if added and m["state"] in RESTARTABLE:
-        s._exec("UPDATE missions SET state='running', updated=? WHERE id=? AND state IN ('completed', "
-                "'finished_with_problems')", (time.time(), mid))
+        s.set_state(mid, "running", f"{added} step(s) added", only_from=RESTARTABLE)
         s.event(mid, f"{added} step{'s' if added != 1 else ''} added; running again")
     state = s.mission(mid)["state"]
     if added and state == "running":
@@ -222,7 +224,8 @@ def pause(mid, why="you asked"):
     m = store().mission(mid)
     if m is None or m["state"] not in LIVE_MISSION:
         return False
-    store().update_mission(mid, state="paused")
+    if not store().set_state(mid, "paused", why, only_from=LIVE_MISSION):
+        return False
     _cancel_active(mid, f"paused ({why})")
     store().event(mid, f"paused ({why})")
     _audit("mission_paused", mid, why=why)
@@ -275,9 +278,7 @@ def resume(mid):
         if s.mission(mid) is not None:
             s.event(mid, f"not resumed: {why}", "warn")
         return False
-    changed = s._exec("UPDATE missions SET state='running', updated=? WHERE id=? AND state IN (" +
-                      ",".join("?" * len(PAUSED)) + ")", (time.time(), mid, *PAUSED)).rowcount
-    if changed != 1:  # (stopped / resumed by someone else in the meantime)
+    if not s.set_state(mid, "running", "resumed", only_from=PAUSED):  # (stopped / resumed meanwhile)
         return False
     s.event(mid, "resumed")
     _audit("mission_resumed", mid)
@@ -292,7 +293,9 @@ def stop(mid, why="you asked"):
     m = s.mission(mid)
     if m is None or m["state"] in FINAL:
         return False
-    s.update_mission(mid, state="cancelled")
+    if not s.set_state(mid, "cancelled", why, only_from=tuple(x for x in LIVE_MISSION + PAUSED + RESTARTABLE
+                                                              if x not in FINAL)):
+        return False
     _cancel_active(mid, f"stopped ({why})")
     for st in s.steps(mid):
         if st["state"] in ("pending", "running"):
@@ -311,7 +314,10 @@ def pause_all(why):
 
 
 def load():
-    """At startup: repair everything a crash / shutdown may have left half-done. -> [notes]"""
+    """At startup: repair everything a crash / shutdown may have left half-done. -> [notes]
+    Order matters: ledger (open reservations -> uncertain, at full estimate) -> approvals (mid-way -> unknown) ->
+    Places purge -> files (site swaps finished / undone) -> interrupted steps (reconciled from operations + files) ->
+    interrupted missions."""
     s = store()
     notes = []
     n = meter.settle_orphans()
@@ -331,18 +337,8 @@ def load():
             notes.append(f"Google Places content removed from {n} stored lead{'s' if n != 1 else ''}")
     except Exception as e:  # noqa: BLE001
         log.warning("missions: Places purge failed: %s", e)
-    for m in s.missions(100, states=LIVE_MISSION):
-        for st in s.steps(m["id"]):
-            if st["state"] == "running":
-                if st["idempotent"]:
-                    s.update_step(st["id"], state="pending", run_id="", error="interrupted by a restart; will run again")
-                else:
-                    s.update_step(st["id"], state="failed", run_id="", error="interrupted by a restart while running; not "
-                                                                             "repeated automatically (it may have partly "
-                                                                             "happened)")
-        s.update_mission(m["id"], state="interrupted")
-        s.event(m["id"], "Jarvis stopped while this mission was running: paused; say 'resume the mission' to continue", "warn")
-        notes.append(f"mission '{m['title']}' interrupted")
+    # 1. repair files first (a half-done site swap is finished or undone), so step reconciliation below sees the real
+    #    state of the world; 2. then decide every interrupted step from the recorded operations and the files.
     for m in s.missions(100):
         wf = WORKFLOWS.get(m["kind"])
         if wf and wf.recover and m["state"] not in ("cancelled",):
@@ -352,6 +348,29 @@ def load():
                     notes.append(note)
             except Exception as e:  # noqa: BLE001
                 log.warning("mission %s: recovery failed: %s", m["id"], e)
+    for m in s.missions(100, states=LIVE_MISSION):
+        wf = WORKFLOWS.get(m["kind"])
+        for st in s.steps(m["id"]):
+            if st["state"] != "running":
+                continue
+            if st["idempotent"]:
+                s.update_step(st["id"], state="pending", run_id="", error="interrupted by a restart; will run again")
+                continue
+            state, note = "uncertain", ("interrupted by a restart while running; its effect is unknown, so it isn't "
+                                        "repeated automatically")
+            if wf is not None and wf.reconcile is not None:
+                try:
+                    state, note = wf.reconcile(m, st)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("mission %s: reconciling %s failed: %s", m["id"], st["key"], e)
+            fields = {"state": state, "run_id": "", "error": "" if state == "completed" else note}
+            if state == "completed":
+                fields.update(ended=time.time(), evidence=note[:2000])
+            s.update_step(st["id"], **fields)
+            notes.append(f"{m['title']}: step '{st['title']}' -> {state} ({note[:120]})")
+        s.set_state(m["id"], "interrupted", "Jarvis stopped while it was running", only_from=LIVE_MISSION)
+        s.event(m["id"], "Jarvis stopped while this mission was running: paused; say 'resume the mission' to continue", "warn")
+        notes.append(f"mission '{m['title']}' interrupted")
     for note in notes:
         log.info("missions at startup: %s", note)
     return notes
@@ -382,7 +401,8 @@ def _run_all():
             _run_mission(mid)
         except Exception as e:  # noqa: BLE001 (a crash in one mission must not take down the runner)
             log.exception("mission %s crashed", mid)
-            store().update_mission(mid, state="paused", error=f"{e.__class__.__name__}: {str(e)[:200]}")
+            store().update_mission(mid, error=f"{e.__class__.__name__}: {str(e)[:200]}")
+            store().set_state(mid, "paused", f"internal error {e.__class__.__name__}")
             store().event(mid, f"paused after an internal error ({e.__class__.__name__}); see the log", "error")
 
 
@@ -426,7 +446,8 @@ def _run_mission(mid):
     m = s.mission(mid)
     wf = WORKFLOWS.get(m["kind"])
     if wf is None:
-        s.update_mission(mid, state="paused", error=f"no workflow '{m['kind']}' in this version")
+        s.update_mission(mid, error=f"no workflow '{m['kind']}' in this version")
+        s.set_state(mid, "paused", "no workflow for this kind")
         return
     s.event(mid, "running")
     while True:
@@ -451,13 +472,13 @@ def _budget_pause(mid, m, daily=False):
     """Pause for the limit that was actually hit: the mission's own budget, or the PC's daily model budget."""
     s = store()
     if daily:
-        s._exec("UPDATE missions SET state='paused_daily', updated=? WHERE id=? AND state='running'", (time.time(), mid))
+        s.set_state(mid, "paused_daily", "today's model budget used up", only_from=("running",))
         s.event(mid, "paused: today's model budget (DAILY_BUDGET_USD) is used up; the mission's own budget isn't. It can "
                      "resume after the daily budget resets", "warn")
         _announce(f"I paused the mission '{m['title']}': today's overall model budget is used up (the mission still has "
                   "budget left). It can continue tomorrow.", mid)
         return
-    s._exec("UPDATE missions SET state='paused_budget', updated=? WHERE id=? AND state='running'", (time.time(), mid))
+    s.set_state(mid, "paused_budget", "mission budget used up", only_from=("running",))
     s.event(mid, f"paused: the mission budget is used up (${m['spent_usd']:.4f} spent, ${m.get('reserved_usd') or 0:.4f} "
                  f"reserved, of ${m['budget_usd']:.2f}); raise it to continue", "warn")
     _announce(f"I paused the mission '{m['title']}': it reached its budget of ${m['budget_usd']:.2f}. Raise it if you want "
@@ -512,6 +533,7 @@ def _run_step(wf, m, st, started):
     timeout = wf.timeouts.get(st["kind"], STEP_TIMEOUT_S)
     token = runctx.Token(mid, st["key"], deadline=time.time() + timeout,
                          should_stop=lambda: _mission_should_stop(mid, started))
+    crashpoints.hit("before_operation")
     _active[mid] = token  # (registered before the claim: a stop / pause from now on cancels this run)
     if not s.claim_step(st["id"], mid, run_id, attempt):
         _active.pop(mid, None)  # (the step was cancelled / the mission stopped or paused since it was read)
@@ -553,17 +575,15 @@ def _run_step(wf, m, st, started):
     elif not isinstance(res, StepResult):
         res = StepResult(False, error="the step returned nothing")
     if res.ok:
-        if not finish(state="completed", ended=time.time(), result=res.result, evidence=res.evidence[:2000], error="",
-                      cost_usd=cost):
+        crashpoints.hit("before_db_commit")
+        # the completion, the follow-up steps and the skips are ONE transaction: never a completed step without them
+        if not s.complete_step(st["id"], run_id, {"state": "completed", "ended": time.time(), "result": res.result,
+                                                  "evidence": res.evidence[:2000], "error": "", "cost_usd": cost},
+                               adds=res.add, skip_keys=res.skip):
             if res.committed:  # (the mission was stopped meanwhile, but this step's change did happen: say so)
                 s.event(mid, f"'{st['title']}' was completed just before the stop: {res.evidence[:300]}", "warn")
             return  # (stopped meanwhile: its outcome isn't recorded as the step's, its follow-up steps aren't added)
-        for spec in res.add:
-            s.add_step(mid, spec.key, spec.kind, spec.title, spec.args, spec.depends, spec.idempotent, spec.max_attempts)
-        if res.skip:
-            for other in s.steps(mid):
-                if other["key"] in res.skip and other["state"] == "pending":
-                    s.update_step(other["id"], state="skipped", error="not needed any more")
+        crashpoints.hit("after_db_commit")
         return
     if st["idempotent"] and attempt < st["max_attempts"] and not res.final:
         wait = BACKOFF_S[min(attempt - 1, len(BACKOFF_S) - 1)]
@@ -591,10 +611,9 @@ def _finish(wf, m):
     except Exception as e:  # noqa: BLE001
         summary = f"(the summary couldn't be written: {e.__class__.__name__})"
     state = "finished_with_problems" if problems else "completed"
-    s._exec("UPDATE missions SET state=?, summary=?, updated=? WHERE id=? AND state='running'",
-            (state, summary, time.time(), mid))
-    if s.mission(mid)["state"] != state:
+    if not s.set_state(mid, state, "all steps ended", only_from=("running",)):
         return  # (paused / stopped at the last moment)
+    s.update_mission(mid, summary=summary)
     s.event(mid, f"finished ({len(steps) - len(problems)} of {len(steps)} steps done)")
     _audit("mission_finished", mid, state=state)
     _announce(f"The mission '{m['title']}' is finished. " + summary.split("\n")[0][:240], mid)

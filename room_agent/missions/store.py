@@ -14,6 +14,11 @@ Tables
     cache           small cached lookups (geocoding) with their time
     charges         the budget ledger: every paid call is RESERVED (estimate) before it's made and SETTLED after
                     (actual cost, or the full estimate when the provider's charge is uncertain)
+    operations      every side effect with a stable id: paid calls (one row per charge, created and closed in the SAME
+                    transactions as the charge), site swaps, Gmail drafts. state: running -> completed / failed /
+                    uncertain. idem_key: the same logical operation again (a retried step) finds the earlier one, so a
+                    completed paid result is reused instead of paid for twice
+    transitions     every mission state change (from, to, why, when), written with the change itself
 
 Google Places content (names, phones, addresses, coordinates, websites, status...) is never written here: only place
 ids (allowed indefinitely) and facts confirmed by a non-Google source. purge_places_content() removes any that an older
@@ -82,6 +87,17 @@ CREATE TABLE IF NOT EXISTS charges(
     actual_usd REAL, state TEXT NOT NULL, tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT '', created REAL NOT NULL, settled REAL);
 CREATE INDEX IF NOT EXISTS charges_open ON charges(state);
+CREATE TABLE IF NOT EXISTS operations(
+    id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, step_key TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL, what TEXT NOT NULL DEFAULT '', idem_key TEXT, state TEXT NOT NULL, charge_id INTEGER,
+    detail TEXT NOT NULL DEFAULT '{}', result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+    created REAL NOT NULL, updated REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS operations_mission ON operations(mission_id, state);
+CREATE UNIQUE INDEX IF NOT EXISTS operations_idem ON operations(idem_key) WHERE idem_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS transitions(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, at REAL NOT NULL, from_state TEXT NOT NULL,
+    to_state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS transitions_mission ON transitions(mission_id, id);
 """
 # columns added after the first version (added to an existing database by _migrate)
 MIGRATIONS = [
@@ -101,7 +117,7 @@ LEAD_FIELDS = ("name", "category", "address", "city", "lat", "lon", "phone", "we
                "analysis", "score", "level", "reasons", "confidence", "missing", "status", "contact_status", "notes",
                "sources", "extra", "researched")
 JSON_FIELDS = {"analysis", "reasons", "missing", "sources", "extra", "params", "args", "depends", "result", "payload",
-               "history", "problems"}
+               "history", "problems", "detail"}
 # A verified field that already has a value is not replaced by a different one: the difference is recorded instead.
 PROTECTED = ("name", "address", "phone", "website", "email")
 
@@ -189,6 +205,34 @@ class Store:
             return self._rows(f"SELECT * FROM missions WHERE state IN ({q}) ORDER BY updated DESC LIMIT ?", (*states, limit))
         return self._rows("SELECT * FROM missions ORDER BY updated DESC LIMIT ?", (limit,))
 
+    def set_state(self, mid, to, reason="", only_from=None):
+        """Change a mission's state (only from one of `only_from`, if given) and log the transition, in one
+        transaction. -> True if this call made the change."""
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            row = self.db.execute("SELECT state FROM missions WHERE id=?", (mid,)).fetchone()
+            if row is None or (only_from is not None and row["state"] not in only_from) or row["state"] == to:
+                return False
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                cur = self.db.execute("UPDATE missions SET state=?, updated=? WHERE id=? AND state=?",
+                                      (to, time.time(), mid, row["state"]))
+                if cur.rowcount != 1:
+                    self.db.rollback()
+                    return False
+                self.db.execute("INSERT INTO transitions(mission_id, at, from_state, to_state, reason) VALUES(?,?,?,?,?)",
+                                (mid, time.time(), row["state"], to, str(reason)[:300]))
+                self.db.commit()
+                return True
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                raise
+
+    def transitions(self, mid):
+        return self._rows("SELECT * FROM transitions WHERE mission_id=? ORDER BY id", (mid,))
+
     def update_mission(self, mid, **fields):
         fields["updated"] = time.time()
         self._update("missions", "id", mid, fields)
@@ -226,6 +270,39 @@ class Store:
         return self._exec("UPDATE steps SET state='running', attempts=?, started=?, run_id=?, error='' WHERE id=? AND "
                           "state='pending' AND EXISTS(SELECT 1 FROM missions WHERE id=? AND state='running')",
                           (int(attempts), time.time(), run_id, sid, mid)).rowcount == 1
+
+    def complete_step(self, sid, run_id, fields, adds=(), skip_keys=()):
+        """A step's completion, the follow-up steps it adds and the pending steps it makes unnecessary, as ONE
+        transaction (a crash can't leave a completed step whose follow-ups were never created). Only if this run still
+        owns the step. -> True if committed."""
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                sets = ", ".join(f"{k}=?" for k in fields)
+                cur = self.db.execute(f"UPDATE steps SET {sets} WHERE id=? AND run_id=? AND state='running'",
+                                      [self._encode(k, v) for k, v in fields.items()] + [sid, run_id])
+                if cur.rowcount != 1:
+                    self.db.rollback()
+                    return False
+                mid = self.db.execute("SELECT mission_id FROM steps WHERE id=?", (sid,)).fetchone()[0]
+                for spec in adds:
+                    seq = self.db.execute("SELECT COALESCE(MAX(seq), 0) FROM steps WHERE mission_id=?", (mid,)).fetchone()[0]
+                    self.db.execute("INSERT OR IGNORE INTO steps(mission_id, key, kind, title, args, depends, state, "
+                                    "idempotent, max_attempts, seq) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                    (mid, spec.key, spec.kind, spec.title, json.dumps(spec.args or {}),
+                                     json.dumps(spec.depends or []), "pending", 1 if spec.idempotent else 0,
+                                     int(spec.max_attempts), seq + 1))
+                for key in skip_keys:
+                    self.db.execute("UPDATE steps SET state='skipped', error='not needed any more' WHERE mission_id=? "
+                                    "AND key=? AND state='pending'", (mid, key))
+                self.db.commit()
+                return True
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                raise
 
     def finish_step(self, sid, run_id, **fields):
         """Record a run's outcome ONLY if that run still owns the step (it wasn't stopped / taken over meanwhile).
@@ -452,8 +529,9 @@ class Store:
                    (status, time.time(), str(result)[:500], aid))
 
     # ---------------------------------------------------------------- budget ledger
-    def reserve(self, mid, estimate_usd, what, provider="", model="", step_key=""):
-        """Reserve budget for a paid call, atomically. -> charge id, or None if it would pass the budget."""
+    def reserve(self, mid, estimate_usd, what, provider="", model="", step_key="", idem_key=None, op_id=None):
+        """Reserve budget for a paid call, atomically, together with its operation record. -> charge id, or None if it
+        would pass the budget."""
         est = max(0.0, float(estimate_usd))
         with self._lock:
             if self.db.in_transaction:  # (nothing else may be pending on this connection: commit it separately)
@@ -468,6 +546,16 @@ class Store:
                 cid = self.db.execute("INSERT INTO charges(mission_id, step_key, what, provider, model, estimate_usd, "
                                       "state, created) VALUES(?,?,?,?,?,?,?,?)",
                                       (mid, step_key, what[:200], provider, model, est, "reserved", time.time())).lastrowid
+                import uuid
+
+                if idem_key:
+                    self.db.execute("UPDATE operations SET idem_key=NULL WHERE idem_key=? AND state='failed'", (idem_key,))
+                now = time.time()
+                self.db.execute("INSERT INTO operations(id, mission_id, step_key, run_id, kind, what, idem_key, state, "
+                                "charge_id, detail, created, updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (op_id or uuid.uuid4().hex, mid, step_key, "", "paid_call", what[:200], idem_key,
+                                 "running", cid, json.dumps({"provider": provider, "model": model, "estimate_usd": est}),
+                                 now, now))
                 self.db.commit()
                 return cid
             except BaseException:
@@ -475,7 +563,7 @@ class Store:
                     self.db.rollback()  # (the reserved amount and its ledger row exist together or not at all)
                 raise
 
-    def settle(self, cid, actual_usd, tokens_in=0, tokens_out=0, state="settled", note=""):
+    def settle(self, cid, actual_usd, tokens_in=0, tokens_out=0, state="settled", note="", result=None):
         """Close a reservation: release the estimate, add what it really cost. state: settled / uncertain / released.
         -> the charge row (None if it was already closed: settling twice can't double-count)."""
         with self._lock:
@@ -485,13 +573,13 @@ class Store:
             if row is None:
                 return None
             try:
-                return self._settle_locked(row, actual_usd, tokens_in, tokens_out, state, note)
+                return self._settle_locked(row, actual_usd, tokens_in, tokens_out, state, note, result)
             except BaseException:
                 if self.db.in_transaction:
                     self.db.rollback()
                 raise
 
-    def _settle_locked(self, row, actual_usd, tokens_in, tokens_out, state, note):
+    def _settle_locked(self, row, actual_usd, tokens_in, tokens_out, state, note, result=None):
         """(caller holds the lock) Both updates in one transaction: the ledger and the mission totals agree."""
         cid = row["id"]
         actual = 0.0 if state == "released" else max(0.0, float(actual_usd))
@@ -504,8 +592,63 @@ class Store:
                         "requests=requests+?, updated=? WHERE id=?",
                         (row["estimate_usd"], actual, actual if state == "uncertain" else 0.0, int(tokens_in),
                          int(tokens_out), 0 if state == "released" else 1, time.time(), row["mission_id"]))
+        from room_agent.missions import crashpoints
+
+        crashpoints.hit("during_settlement")
+        op_state = {"settled": "completed", "released": "failed", "uncertain": "uncertain"}.get(state, state)
+        self.db.execute("UPDATE operations SET state=?, result=COALESCE(?, result), error=?, updated=? WHERE charge_id=?",
+                        (op_state, result, note[:300] if op_state != "completed" else "", time.time(), cid))
         self.db.commit()
         return dict(row)
+
+    def op(self, op_id):
+        return self._one("SELECT * FROM operations WHERE id=?", (op_id,))
+
+    def op_by_key(self, idem_key):
+        return self._one("SELECT * FROM operations WHERE idem_key=?", (idem_key,)) if idem_key else None
+
+    def ops(self, mid=None, states=None, kind=None):
+        sql, args, conds = "SELECT * FROM operations", [], []
+        if mid:
+            conds.append("mission_id=?")
+            args.append(mid)
+        if states:
+            conds.append(f"state IN ({','.join('?' * len(states))})")
+            args += list(states)
+        if kind:
+            conds.append("kind=?")
+            args.append(kind)
+        return self._rows(sql + (" WHERE " + " AND ".join(conds) if conds else "") + " ORDER BY created", args)
+
+    def op_start(self, mid, kind, what="", idem_key=None, step_key="", run_id="", detail=None):
+        """Record a side effect BEFORE it's attempted (write-ahead). -> (op row, existing): with an idem_key whose
+        earlier operation completed or is unresolved, that one is returned instead of a new one (the caller decides:
+        reuse a completed result, reconcile an uncertain one). A failed earlier attempt gives its key to the new one."""
+        import uuid
+
+        with self._lock:
+            if idem_key:
+                old = self._one("SELECT * FROM operations WHERE idem_key=?", (idem_key,))
+                if old and old["state"] != "failed":
+                    return old, True
+                if old:
+                    self._exec("UPDATE operations SET idem_key=NULL WHERE id=?", (old["id"],))
+            oid = uuid.uuid4().hex
+            now = time.time()
+            self._exec("INSERT INTO operations(id, mission_id, step_key, run_id, kind, what, idem_key, state, detail, "
+                       "created, updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       (oid, mid, step_key, run_id, kind, what[:200], idem_key, "running",
+                        json.dumps(detail or {}, default=str), now, now))
+            return self.op(oid), False
+
+    def op_finish(self, op_id, state, result=None, detail=None, error=""):
+        fields = {"state": state, "updated": time.time(), "error": str(error)[:300]}
+        if result is not None:
+            fields["result"] = result if isinstance(result, str) else json.dumps(result, default=str)
+        if detail is not None:
+            old = (self.op(op_id) or {}).get("detail") or {}
+            fields["detail"] = {**old, **detail}
+        self._update("operations", "id", op_id, fields)
 
     def open_charges(self, mid=None):
         if mid:
