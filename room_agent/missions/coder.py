@@ -119,7 +119,7 @@ def _startup_failure(text):
     return any(m in t for m in STARTUP_FAILURES)
 
 
-def _run_cli(sb, instruction):
+def _run_cli(sb, instruction, idem_key=None):
     if not config.ANTHROPIC_KEY:
         raise CoderUnavailable("the sandboxed Claude Code worker needs ANTHROPIC_API_KEY (it can't use your Claude login "
                                "from inside the sandbox)")
@@ -147,8 +147,12 @@ def _run_cli(sb, instruction):
     if config.CODER_MODEL:
         cmd += ["--model", config.CODER_MODEL]
     est = config.CODER_MAX_USD
-    with meter.paid(est, "Claude Code edit", provider="claude_code", model=config.CODER_MODEL or "default") as charge:
+    with meter.paid(est, "Claude Code edit", provider="claude_code", model=config.CODER_MODEL or "default",
+                    idem_key=idem_key) as charge:
         code, out, err = sandbox.run(cmd, sb, env, config.CODER_TIMEOUT_S, stdin_text=prompt)
+        from room_agent.missions import crashpoints
+
+        crashpoints.hit("after_generation")
         try:
             data = json.loads(out)
         except ValueError:
@@ -156,7 +160,8 @@ def _run_cli(sb, instruction):
         cost = data.get("total_cost_usd", data.get("cost_usd"))
         usage = data.get("usage") or {}
         if isinstance(cost, (int, float)):
-            charge.actual(float(cost), int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
+            charge.actual(float(cost), int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0),
+                          basis="provider_reported")
         elif code != 0 and _startup_failure(err or out):
             # evidence that no request was made: the CLI itself says it couldn't start / was misconfigured
             charge.not_billed()
@@ -168,15 +173,24 @@ def _run_cli(sb, instruction):
 
 def site_hash(files):
     """A content fingerprint of a site version ({name: bytes}): how recovery tells whether a swap took effect."""
-    h = hashlib.sha256()
-    for name in sorted(files):
-        h.update(name.encode() + b"\0" + hashlib.sha256(files[name]).digest())
-    return h.hexdigest()
+    return sitegen.files_hash(files)
 
 
 def live_hash(folder):
-    return site_hash({p.name: p.read_bytes() for p in Path(folder).iterdir()
-                      if p.is_file() and not p.name.startswith(".")}) if Path(folder).is_dir() else ""
+    return sitegen.live_hash(folder)
+
+
+def _pack(files):
+    import base64
+
+    return json.dumps({"text": json.dumps({k: base64.b64encode(v).decode() for k, v in files.items()})})
+
+
+def _unpack(result):
+    import base64
+
+    text = result.get("text") if isinstance(result, dict) else result
+    return {k: base64.b64decode(v) for k, v in json.loads(text).items()}
 
 
 def edit(folder, lead, instruction, workspace=None, idem_key=None, mission_id=None):
@@ -201,7 +215,11 @@ def edit(folder, lead, instruction, workspace=None, idem_key=None, mission_id=No
         d = done.get("detail") or {}
         return {"ok": True, "backend": d.get("backend", ""), "summary": d.get("summary", ""), "changed": d.get("changed", []),
                 "version": d.get("version", ""), "reused": True}
-    b = backend()
+    from room_agent.missions import crashpoints
+
+    result_key = f"{idem_key}:result" if idem_key else None
+    saved = store().op_by_key(result_key) if result_key else None
+    b = backend() if not (saved and saved["state"] == "completed") else (saved.get("detail") or {}).get("backend", "")
     if b not in ("anthropic", "claude_cli"):
         return {"ok": False, "backend": b, "problems": ["no coding worker is set up (set ANTHROPIC_API_KEY, or "
                                                         "CODER_BACKEND=claude_cli with Claude Code installed)"]}
@@ -209,46 +227,62 @@ def edit(folder, lead, instruction, workspace=None, idem_key=None, mission_id=No
     sb = sandbox.make(before)
     before_core = _fingerprint(config.HERE / "room_agent")
     try:
-        try:
-            summary = (_run_model(sb, instruction, f"{idem_key}:model" if idem_key else None) if b == "anthropic"
-                       else _run_cli(sb, instruction))
-        except (meter.BudgetExceeded, llm.ModelUnavailable, runctx.Cancelled, meter.OperationUncertain):
-            raise
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "backend": b, "problems": [f"{e.__class__.__name__}: {str(e)[:240]}"]}
-        runctx.check()
-        after, problems = sandbox.collect(sb, sitegen.ALLOWED_EXT, sitegen.MAX_IMAGE_BYTES)
-        if _fingerprint(config.HERE / "room_agent") != before_core:
-            problems.append("Jarvis's own files changed while the worker ran: the edit was NOT applied; check the repo "
-                            "with git status")
-            log.error("coder: Jarvis core files changed during a demo-site edit (%s)", folder)
-        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
-        for k in changed:
-            if Path(k).suffix.lower() in sitegen.IMAGE_EXT and k in before and k in after:
-                problems.append(f"'{k}': owner photos can't be changed by the worker")
-            elif Path(k).suffix.lower() in sitegen.IMAGE_EXT and k not in before:
-                problems.append(f"'{k}': the worker can't add images (no rights to them)")
-        if "index.html" not in after:
-            problems.append("the edit removed index.html")
-        if problems:
-            return {"ok": False, "backend": b, "problems": problems, "changed": changed}
-        if not changed:
-            return {"ok": False, "backend": b, "problems": ["nothing in the site changed"], "summary": summary}
+        if saved and saved["state"] == "completed" and saved["result"]:
+            # a previous attempt's checked result is stored: re-apply it, never generate (or pay) again
+            after, problems = _unpack(saved["result"]), []
+            d = saved.get("detail") or {}
+            summary, changed = d.get("summary", ""), d.get("changed", [])
+        else:
+            crashpoints.hit("before_generation")
+            try:
+                summary = (_run_model(sb, instruction, f"{idem_key}:model" if idem_key else None) if b == "anthropic"
+                           else _run_cli(sb, instruction, f"{idem_key}:cli" if idem_key else None))
+            except (meter.BudgetExceeded, llm.ModelUnavailable, runctx.Cancelled, meter.OperationUncertain):
+                raise
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "backend": b, "problems": [f"{e.__class__.__name__}: {str(e)[:240]}"]}
+            runctx.check()
+            after, problems = sandbox.collect(sb, sitegen.ALLOWED_EXT, sitegen.MAX_IMAGE_BYTES)
+            if _fingerprint(config.HERE / "room_agent") != before_core:
+                problems.append("Jarvis's own files changed while the worker ran: the edit was NOT applied; check the "
+                                "repo with git status")
+                log.error("coder: Jarvis core files changed during a demo-site edit (%s)", folder)
+            changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+            for k in changed:
+                if Path(k).suffix.lower() in sitegen.IMAGE_EXT and k in before and k in after:
+                    problems.append(f"'{k}': owner photos can't be changed by the worker")
+                elif Path(k).suffix.lower() in sitegen.IMAGE_EXT and k not in before:
+                    problems.append(f"'{k}': the worker can't add images (no rights to them)")
+            if "index.html" not in after:
+                problems.append("the edit removed index.html")
+            if problems:
+                return {"ok": False, "backend": b, "problems": problems, "changed": changed}
+            if not changed:
+                return {"ok": False, "backend": b, "problems": ["nothing in the site changed"], "summary": summary}
+            if result_key:  # the checked result, stored before anything is applied (a crash from here never pays again)
+                op, _ = store().op_start(mission_id or "", "edit_result", f"demo-site edit result for {folder.name}",
+                                         idem_key=result_key, detail={"summary": summary, "changed": changed,
+                                                                      "backend": b, "hash": site_hash(after)})
+                store().op_finish(op["id"], "completed", result=_pack(after))
         staged = sitegen.stage(workspace, folder.name, after)
         trusted_owner, _, _ = sitegen.load_owner(workspace, folder.name)  # (never the worker-editable site.json)
         problems = sitegen.check(staged, lead, trusted_owner)
         if problems:
             sitegen.discard(staged)
             return {"ok": False, "backend": b, "problems": problems, "changed": changed}
-        from room_agent.missions import crashpoints
-
         crashpoints.hit("before_site_swap")
         op = None
-        if swap_key:  # write-ahead: the swap and the version it installs, recorded before the swap
+        if swap_key:  # write-ahead: the swap, the version it replaces and the version it installs
             op, _ = store().op_start(mission_id or "", "site_swap", f"demo-site edit of {folder.name}", idem_key=swap_key,
-                                     detail={"folder": str(folder), "hash": site_hash(after), "summary": summary,
-                                             "changed": changed, "backend": b})
-        version = sitegen.swap_in(workspace, folder.name, staged, "before edit: " + instruction[:40])
+                                     detail={"folder": str(folder), "hash": site_hash(after),
+                                             "base_hash": live_hash(folder), "summary": summary, "changed": changed,
+                                             "backend": b})
+        try:
+            version = sitegen.swap_in(workspace, folder.name, staged, "before edit: " + instruction[:40])
+        except sitegen.SiteConflict as e:
+            if op is not None:
+                store().op_finish(op["id"], "failed", error="conflict: the site was edited by hand; nothing replaced")
+            return {"ok": False, "backend": b, "conflict": True, "problems": [str(e)], "changed": changed}
         crashpoints.hit("after_site_swap")
         if op is not None:
             store().op_finish(op["id"], "completed", detail={"version": str(version or "")})

@@ -862,15 +862,17 @@ class FakeGmail:
     def __init__(self, provider, account=None):
         pass
 
-    def create_draft(self, to, subject, body, reply_to=None, message_id=""):
+    def create_draft(self, to, subject, body, reply_to=None, message_id="", marker=""):
         if GM["fail"]:
             raise GM["fail"]
         GM["drafts"].append((to, subject, body))
         GM.setdefault("ids", {})[message_id] = f"d{len(GM['drafts'])}"
+        GM.setdefault("markers", {})[marker] = f"d{len(GM['drafts'])}"
         return {"id": f"d{len(GM['drafts'])}", "to": to, "subject": subject, "body": body}
 
-    def find_draft_by_message_id(self, message_id):
-        return GM.get("ids", {}).get(message_id)
+    def find_draft(self, message_id="", marker="", scan_limit=300):
+        hit = GM.get("ids", {}).get(message_id) or GM.get("markers", {}).get(marker)
+        return {"found": hit, "complete": True, "scanned": len(GM["drafts"]), "how": "fake"}
 
 
 import room_agent.integrations as integ  # noqa: E402
@@ -929,7 +931,13 @@ ok, msg = outreach.approve(aid, "test")
 t.check("approve again while unknown: refused", not ok and S.approval(aid)["status"] == "unknown")
 GM["fail"] = None
 ok, msg = outreach.retry(aid, "test")
-t.check("retry after checking Gmail: the draft is created exactly once, read back, never sent",
+t.check("retry right away: Gmail is only checked (read-only); too early to conclude 'absent', so nothing is created",
+        not ok and S.approval(aid)["status"] == "unknown" and not GM["drafts"] and ("min" in msg), msg)
+ok, msg = outreach.resolve(aid, "not_created", "test")
+t.check("manual resolution 'it's not in Gmail' -> waiting for approval again (no draft created by the resolution)",
+        ok and S.approval(aid)["status"] == "pending" and not GM["drafts"], msg)
+ok, msg = outreach.approve(aid, "test")
+t.check("a new explicit approve creates the draft exactly once, read back, never sent",
         ok and S.approval(aid)["status"] == "done" and len(GM["drafts"]) == 1
         and GM["drafts"][0][0] == "owner@draftdiner.example" and S.outreach(GMAIL_MID)[0]["status"] == "gmail_draft", msg)
 t.check("approve after done: refused (no second draft)", not outreach.approve(aid, "test")[0] and len(GM["drafts"]) == 1)

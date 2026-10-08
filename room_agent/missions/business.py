@@ -509,8 +509,13 @@ def summarize(ctx):
 
 
 def reconcile(m, st):
-    """A non-idempotent step that was running when Jarvis stopped: decide from the recorded operations (and the files),
-    never by guessing. -> (state, note)"""
+    """A non-idempotent step that was running when Jarvis stopped (or is 'uncertain'): decide from the recorded
+    operations and the files, never by guessing, and never by re-running anything. -> (state, note)
+        completed   its effect is in place
+        pending     provably not applied, and nothing with an unknown outcome is involved: safe to run (a stored, paid
+                    result is re-applied without paying again)
+        uncertain   something may have happened that can't be checked (a paid call whose answer was lost), or the site
+                    was changed by hand in between (a conflict: not re-applied over a person's edits)"""
     from room_agent.missions import coder
 
     s = store()
@@ -522,16 +527,25 @@ def reconcile(m, st):
         return "completed", "the edit was applied before Jarvis stopped (recorded)"
     if swap is not None and swap["state"] == "running":
         d = swap.get("detail") or {}
-        if d.get("hash") and coder.live_hash(d.get("folder", "")) == d["hash"]:
+        live = coder.live_hash(d.get("folder", ""))
+        if d.get("hash") and live == d["hash"]:
             s.op_finish(swap["id"], "completed", detail={"recovered": True})
             return "completed", "the edit was applied before Jarvis stopped (the live site matches the new version)"
-        s.op_finish(swap["id"], "failed", error="not applied: the live site doesn't match the new version")
-    model = s.op_by_key(key + ":model")
-    if model is None or model["state"] == "failed":
+        if d.get("base_hash") and live and live != d["base_hash"]:
+            s.op_finish(swap["id"], "failed", error="conflict: the site was changed by hand; not re-applied")
+            return "uncertain", ("the site was changed by hand while the edit was being applied; your changes were kept "
+                                 "and the edit wasn't re-applied over them (resolve the conflict, then ask again)")
+        s.op_finish(swap["id"], "failed", error="not applied: the live site is still the previous version")
+    result = s.op_by_key(key + ":result")
+    if result is not None and result["state"] == "completed":
+        return "pending", "the checked edit result is kept but wasn't applied yet; it will be applied without paying again"
+    model, cli = s.op_by_key(key + ":model"), s.op_by_key(key + ":cli")
+    paid = [o for o in (model, cli) if o is not None and o["state"] != "failed"]
+    if not paid:
         return "pending", "interrupted before anything was paid for or applied; it will run again"
-    if model["state"] == "completed" and model["result"]:
+    if model is not None and model["state"] == "completed" and model["result"]:
         return "pending", "the paid edit result is kept but wasn't applied yet; it will be applied without paying again"
-    return "uncertain", ("the edit's model call may have been billed, but its result was lost when Jarvis stopped; it "
+    return "uncertain", ("the edit's paid call may have been billed, but its result was lost when Jarvis stopped; it "
                          "isn't repeated automatically (ask for the edit again: that costs again)")
 
 

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable
 
 from room_agent import config
-from room_agent.missions import crashpoints, meter, runctx
+from room_agent.missions import crashpoints, meter, ownership, runctx
 from room_agent.missions.store import GuardedStore, store
 
 log = logging.getLogger("room-agent")
@@ -163,7 +163,9 @@ def _slug(text):
 
 
 def create(kind, params, budget_usd=None):
-    """Plan a mission and start it in the background. -> the mission row."""
+    """Plan a mission and start it in the background. -> the mission row. Raises ownership.NotOwner if another Jarvis
+    process runs this database's missions."""
+    ownership.acquire()
     wf = WORKFLOWS.get(kind)
     if wf is None:
         raise ValueError(f"no workflow called {kind}")
@@ -320,6 +322,11 @@ def load():
     interrupted missions."""
     s = store()
     notes = []
+    try:
+        ownership.acquire(wait_s=15)  # (a crashed predecessor's lock can take a moment to be released by the OS)
+    except ownership.NotOwner as e:  # (another live Jarvis owns these missions: recovering them here would corrupt them)
+        log.warning("missions: not recovered here: %s", e)
+        return [f"missions not recovered: {e}"]
     n = meter.settle_orphans()
     if n:
         notes.append(f"{n} paid call{'s' if n != 1 else ''} cut off by the shutdown counted at the full estimate")
@@ -378,6 +385,11 @@ def load():
 
 # ---------------------------------------------------------------- running
 def start_runner():
+    try:
+        ownership.acquire()
+    except ownership.NotOwner as e:
+        log.warning("missions: runner not started: %s", e)
+        return
     with _lock:
         t = _runner["thread"]
         if t is not None and t.is_alive():
@@ -535,7 +547,7 @@ def _run_step(wf, m, st, started):
                          should_stop=lambda: _mission_should_stop(mid, started))
     crashpoints.hit("before_operation")
     _active[mid] = token  # (registered before the claim: a stop / pause from now on cancels this run)
-    if not s.claim_step(st["id"], mid, run_id, attempt):
+    if not s.claim_step(st["id"], mid, run_id, attempt, owner=ownership.token() or "-"):
         _active.pop(mid, None)  # (the step was cancelled / the mission stopped or paused since it was read)
         return
     spent0 = s.mission(mid)["spent_usd"]
@@ -617,6 +629,116 @@ def _finish(wf, m):
     s.event(mid, f"finished ({len(steps) - len(problems)} of {len(steps)} steps done)")
     _audit("mission_finished", mid, state=state)
     _announce(f"The mission '{m['title']}' is finished. " + summary.split("\n")[0][:240], mid)
+
+
+# ---------------------------------------------------------------- reconciliation while running (no restart needed)
+def reconcile_now(mid=None):
+    """Re-check every unresolved item with READ-ONLY checks (files, Gmail), without restarting Jarvis. Nothing is ever
+    re-run or re-sent here; items that can't be decided stay as they are and appear in pending_actions(). -> [notes]"""
+    from room_agent.missions import outreach
+
+    s = store()
+    notes = []
+    missions = [s.mission(mid)] if mid else s.missions(200)
+    for m in [x for x in missions if x]:
+        wf = WORKFLOWS.get(m["kind"])
+        with _control:
+            for st in s.steps(m["id"]):
+                if st["state"] != "uncertain" or wf is None or wf.reconcile is None:
+                    continue
+                try:
+                    state, note = wf.reconcile(m, st)
+                except Exception as e:  # noqa: BLE001
+                    notes.append(f"{st['key']}: couldn't be checked ({e.__class__.__name__})")
+                    continue
+                if state == "completed":
+                    s.update_step(st["id"], state="completed", error="", evidence=note[:2000], ended=time.time())
+                    notes.append(f"'{st['title']}': completed ({note})")
+                elif state == "pending":
+                    # provably not applied and nothing unknown involved: it MAY run, but only when you resume / retry
+                    s.update_step(st["id"], error=f"can be retried safely: {note}")
+                    notes.append(f"'{st['title']}': can be retried safely ({note})")
+                else:
+                    notes.append(f"'{st['title']}': still uncertain ({note[:120]})")
+        for a in s.approvals(m["id"], "unknown"):
+            ok, msg = outreach.retry(a["id"], "reconcile")
+            notes.append(f"approval #{a['id']}: {msg}")
+    return notes
+
+
+def pending_actions(mid):
+    """What needs YOUR decision, with the safe choices for each (for the dashboard and voice). No secrets / payloads."""
+    from room_agent.missions import sitegen
+
+    s = store()
+    m = s.mission(mid)
+    if m is None:
+        return []
+    out = []
+    for st in s.steps(mid):
+        if st["state"] == "uncertain":
+            out.append({"type": "step", "id": st["key"], "what": st["title"], "why": st["error"][:300],
+                        "actions": ["retry", "accept"]})
+    for a in s.approvals(mid, "unknown"):
+        out.append({"type": "approval", "id": str(a["id"]), "what": a["summary"][:200], "why": (a["result"] or "")[:300],
+                    "actions": ["check", "mark_created", "mark_not_created"]})
+    for slug, pend in sitegen.pending_conflicts(Path(m["workspace"])):
+        out.append({"type": "conflict", "id": slug, "what": f"demo site {slug}",
+                    "why": "the site was edited by hand; Jarvis's newer version was set aside, not applied",
+                    "actions": ["keep_mine", "use_jarvis"]})
+    for c in s.charges(mid, 500):
+        if c["state"] == "uncertain":
+            out.append({"type": "charge", "id": str(c["id"]), "what": c["what"],
+                        "why": f"counted at the full estimate ${c['actual_usd']:.4f}: the provider may or may not have "
+                               "billed it (check the provider's usage page)", "actions": []})
+    return out
+
+
+@_controlled
+def resolve(mid, kind, item, action, via="you"):
+    """Carry out a choice from pending_actions(). Paid / external work never starts without it being chosen here, and
+    sending-type actions still need their own approval. -> (ok, message)"""
+    from room_agent.missions import outreach, sitegen
+
+    s = store()
+    m = s.mission(mid)
+    if m is None:
+        return False, "there's no such mission"
+    if kind == "step":
+        st = s.step(mid, item)
+        if st is None or st["state"] != "uncertain":
+            return False, "that step isn't waiting for a decision"
+        if m["state"] == "cancelled":
+            return False, "the mission was stopped for good"
+        if action == "retry":
+            n = s.supersede_step_ops(mid, item)
+            s.update_step(st["id"], state="pending", run_id="", attempts=0,
+                          error=f"retried by {via} (it may cost again: {n} earlier paid attempt(s) kept on record)")
+        elif action == "accept":
+            s.update_step(st["id"], state="skipped", error=f"accepted as is by {via}")
+        else:
+            return False, f"unknown action '{action}'"
+        s.event(mid, f"'{st['title']}': {action} chosen by {via}")
+        if s.set_state(mid, "running", f"{action} of '{st['title']}' chosen", only_from=RESTARTABLE):
+            start_runner()
+        state = s.mission(mid)["state"]
+        return True, ("done" + ("" if state == "running" else f"; the mission is {state}: resume it to continue"))
+    if kind == "approval":
+        try:
+            aid = int(item)
+        except (TypeError, ValueError):
+            return False, "bad approval number"
+        if action == "check":
+            return outreach.retry(aid, via)
+        if action in ("mark_created", "mark_not_created"):
+            return outreach.resolve(aid, "created" if action == "mark_created" else "not_created", via)
+        return False, f"unknown action '{action}'"
+    if kind == "conflict":
+        proj = next((p for p in s.projects(mid) if p["slug"] == item), None)
+        if proj is None:
+            return False, "no such demo site in this mission"
+        return sitegen.resolve_conflict(Path(m["workspace"]), item, action, s.lead(proj["lead_id"]))
+    return False, f"unknown item type '{kind}'"
 
 
 # ---------------------------------------------------------------- what's going on (from the stored state only)

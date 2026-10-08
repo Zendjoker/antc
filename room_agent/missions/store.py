@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS transitions(
     id INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL, at REAL NOT NULL, from_state TEXT NOT NULL,
     to_state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS transitions_mission ON transitions(mission_id, id);
+CREATE TABLE IF NOT EXISTS owner(id INTEGER PRIMARY KEY CHECK(id = 1), token TEXT NOT NULL, pid INTEGER, since REAL);
 """
 # columns added after the first version (added to an existing database by _migrate)
 MIGRATIONS = [
@@ -107,6 +108,7 @@ MIGRATIONS = [
     ("research", "ikey", "TEXT"),
     ("leads", "place_id", "TEXT NOT NULL DEFAULT ''"),
     ("approvals", "started", "REAL"),
+    ("charges", "basis", "TEXT NOT NULL DEFAULT ''"),  # provider_usage / provider_reported / configured_price / estimate
 ]
 POST_MIGRATION = """
 CREATE UNIQUE INDEX IF NOT EXISTS research_ikey ON research(ikey);
@@ -263,13 +265,26 @@ class Store:
     def update_step(self, sid, **fields):
         self._update("steps", "id", sid, fields)
 
-    def claim_step(self, sid, mid, run_id, attempts):
+    def claim_step(self, sid, mid, run_id, attempts, owner=None):
         """pending -> running for one run, in ONE statement that also requires the mission to be running: a step that
         was cancelled, or a mission stopped / paused a moment ago, can't be revived by a runner that read it earlier.
-        -> True if this run owns the step now."""
-        return self._exec("UPDATE steps SET state='running', attempts=?, started=?, run_id=?, error='' WHERE id=? AND "
-                          "state='pending' AND EXISTS(SELECT 1 FROM missions WHERE id=? AND state='running')",
-                          (int(attempts), time.time(), run_id, sid, mid)).rowcount == 1
+        owner (the engine passes it): the fencing token - only the process that currently owns the missions database
+        (missions/ownership.py) can claim. -> True if this run owns the step now."""
+        sql = ("UPDATE steps SET state='running', attempts=?, started=?, run_id=?, error='' WHERE id=? AND "
+               "state='pending' AND EXISTS(SELECT 1 FROM missions WHERE id=? AND state='running')")
+        args = [int(attempts), time.time(), run_id, sid, mid]
+        if owner is not None:
+            sql += " AND EXISTS(SELECT 1 FROM owner WHERE id=1 AND token=?)"
+            args.append(owner)
+        return self._exec(sql, args).rowcount == 1
+
+    def set_owner(self, token, pid):
+        """The new fencing token (ownership.acquire): any earlier owner's claims stop working from now on."""
+        self._exec("INSERT INTO owner(id, token, pid, since) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                   "token=excluded.token, pid=excluded.pid, since=excluded.since", (token, pid, time.time()))
+
+    def owner(self):
+        return self._one("SELECT * FROM owner WHERE id=1")
 
     def complete_step(self, sid, run_id, fields, adds=(), skip_keys=()):
         """A step's completion, the follow-up steps it adds and the pending steps it makes unnecessary, as ONE
@@ -563,7 +578,7 @@ class Store:
                     self.db.rollback()  # (the reserved amount and its ledger row exist together or not at all)
                 raise
 
-    def settle(self, cid, actual_usd, tokens_in=0, tokens_out=0, state="settled", note="", result=None):
+    def settle(self, cid, actual_usd, tokens_in=0, tokens_out=0, state="settled", note="", result=None, basis=""):
         """Close a reservation: release the estimate, add what it really cost. state: settled / uncertain / released.
         -> the charge row (None if it was already closed: settling twice can't double-count)."""
         with self._lock:
@@ -573,20 +588,21 @@ class Store:
             if row is None:
                 return None
             try:
-                return self._settle_locked(row, actual_usd, tokens_in, tokens_out, state, note, result)
+                return self._settle_locked(row, actual_usd, tokens_in, tokens_out, state, note, result, basis)
             except BaseException:
                 if self.db.in_transaction:
                     self.db.rollback()
                 raise
 
-    def _settle_locked(self, row, actual_usd, tokens_in, tokens_out, state, note, result=None):
+    def _settle_locked(self, row, actual_usd, tokens_in, tokens_out, state, note, result=None, basis=""):
         """(caller holds the lock) Both updates in one transaction: the ledger and the mission totals agree."""
         cid = row["id"]
         actual = 0.0 if state == "released" else max(0.0, float(actual_usd))
         self.db.execute("BEGIN IMMEDIATE")
-        self.db.execute("UPDATE charges SET state=?, actual_usd=?, tokens_in=?, tokens_out=?, note=?, settled=? "
+        basis = basis or {"uncertain": "estimate", "released": "none"}.get(state, "")
+        self.db.execute("UPDATE charges SET state=?, actual_usd=?, tokens_in=?, tokens_out=?, note=?, settled=?, basis=? "
                         "WHERE id=? AND state='reserved'", (state, actual, int(tokens_in), int(tokens_out), note[:300],
-                                                            time.time(), cid))
+                                                            time.time(), basis, cid))
         self.db.execute("UPDATE missions SET reserved_usd=MAX(0, reserved_usd-?), spent_usd=spent_usd+?, "
                         "uncertain_usd=uncertain_usd+?, tokens_in=tokens_in+?, tokens_out=tokens_out+?, "
                         "requests=requests+?, updated=? WHERE id=?",
@@ -640,6 +656,14 @@ class Store:
                        (oid, mid, step_key, run_id, kind, what[:200], idem_key, "running",
                         json.dumps(detail or {}, default=str), now, now))
             return self.op(oid), False
+
+    def supersede_step_ops(self, mid, key):
+        """The user chose to retry a step whose earlier paid operation is uncertain: that operation keeps its record
+        (and its charge), but releases its idempotency key so the new attempt isn't blocked by it. -> how many."""
+        return self._exec("UPDATE operations SET idem_key=NULL, error=error || ' (superseded by a retry the user chose)', "
+                          "updated=? WHERE mission_id=? AND idem_key IS NOT NULL AND state IN ('uncertain','running') AND "
+                          "(idem_key LIKE ? OR idem_key LIKE ?)",
+                          (time.time(), mid, f"%:{mid}:{key}:%", f"%:{mid}:{key}")).rowcount
 
     def op_finish(self, op_id, state, result=None, detail=None, error=""):
         fields = {"state": state, "updated": time.time(), "error": str(error)[:300]}

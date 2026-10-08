@@ -220,8 +220,15 @@ def mission_detail(mid):
                          for o in s.outreach(mid)],
             "approvals": [{k: a[k] for k in ("id", "lead_id", "action", "summary", "status", "result")}
                           for a in s.approvals(mid)],
-            "charges": [{k: c[k] for k in ("what", "provider", "estimate_usd", "actual_usd", "state", "note", "created")}
+            "charges": [{**{k: c[k] for k in ("id", "what", "provider", "estimate_usd", "actual_usd", "state", "note",
+                                               "created")},
+                         "basis": c.get("basis") or ("estimate" if c["state"] == "uncertain" else "")}
                         for c in s.charges(mid, 50)],
+            # operations: ids, kinds, states and reasons only (no payloads, results, keys or message contents)
+            "operations": [{k: o[k] for k in ("id", "kind", "what", "state", "error", "created", "updated")}
+                           for o in s.ops(mid)][-60:],
+            "attention": engine.pending_actions(mid),
+            "owner": __import__("room_agent.missions.ownership", fromlist=["info"]).info(),
             "events": [{k: e[k] for k in ("at", "level", "text")} for e in s.events(mid, 60)]}
 
 
@@ -254,6 +261,13 @@ def _mission_action(what, body):
         elif m and m["state"] == "paused_daily":
             msg += "; still paused by today's overall model budget"
         return {"ok": True, "message": msg + "."}
+    if what == "mission_reconcile":
+        notes = engine.reconcile_now(mid)
+        return {"ok": True, "message": ("Checked: " + "; ".join(notes[:4])) if notes else "Checked: nothing changed."}
+    if what == "mission_resolve":
+        ok, msg = engine.resolve(mid, str(body.get("item_type") or ""), str(body.get("item_id") or ""),
+                                 str(body.get("action") or ""), "dashboard")
+        return {"ok": ok, "message": msg}
     if what == "mission_stop":
         return {"ok": engine.stop(mid, "stopped from the dashboard"), "message": "Stopped; the work so far is kept."}
     if what == "mission_demos":

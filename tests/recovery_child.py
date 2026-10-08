@@ -82,15 +82,32 @@ def install_fakes():
         def _all(self):
             return json.loads(drafts_file.read_text(encoding="utf-8")) if drafts_file.exists() else []
 
-        def create_draft(self, to, subject, body, reply_to=None, message_id=""):
+        def create_draft(self, to, subject, body, reply_to=None, message_id="", marker=""):
             drafts = self._all()
-            drafts.append({"id": f"d{len(drafts) + 1}", "to": to, "subject": subject, "message_id": message_id})
+            # FAKE_GMAIL_REWRITE_MSGID=1: Gmail replaces the Message-ID (the marker header survives)
+            stored_mid = "<gmail-rewritten@mail.gmail.com>" if os.environ.get("FAKE_GMAIL_REWRITE_MSGID") == "1" else message_id
+            drafts.append({"id": f"d{len(drafts) + 1}", "to": to, "subject": subject, "message_id": stored_mid,
+                           "marker": marker, "at": time.time()})
             drafts_file.parent.mkdir(parents=True, exist_ok=True)
             drafts_file.write_text(json.dumps(drafts), encoding="utf-8")
             return {"id": drafts[-1]["id"], "to": to, "subject": subject, "body": body}
 
         def find_draft_by_message_id(self, message_id):
-            return next((d["id"] for d in self._all() if d["message_id"] == message_id), None)
+            # FAKE_GMAIL_INDEX_LAG_S: the SEARCH index only shows drafts older than this (Gmail's indexing delay)
+            lag = float(os.environ.get("FAKE_GMAIL_INDEX_LAG_S", "0"))
+            return next((d["id"] for d in self._all() if d["message_id"] == message_id and time.time() - d["at"] >= lag),
+                        None)
+
+        def find_draft(self, message_id="", marker="", scan_limit=300):
+            hit = self.find_draft_by_message_id(message_id) if message_id else None
+            if hit:
+                return {"found": hit, "complete": True, "scanned": 0, "how": "search"}
+            drafts = self._all()  # (the scan reads the drafts themselves: no index lag)
+            for d in drafts[:scan_limit]:
+                if (marker and d.get("marker") == marker) or (message_id and d["message_id"] == message_id):
+                    return {"found": d["id"], "complete": True, "scanned": len(drafts), "how": "scan"}
+            return {"found": None, "complete": len(drafts) <= scan_limit, "scanned": min(len(drafts), scan_limit),
+                    "how": "scan"}
 
     integ.provider = lambda pid: NS(can=lambda service, level: True)
     gmailmod.GmailService = FakeGmail
@@ -171,6 +188,37 @@ def edit_setup(mid, ws):
     return {"edit": {"project_id": proj["id"], "instruction": "tighten the footer", "sig": "x"}}
 
 
+CLI = {"runs": 0, "versions": 0}
+
+
+def install_cli_fakes():
+    """The Claude Code worker with its PROCESS layer faked (the real one is never started): '--version' answers, an
+    edit run writes the edited file into the sandbox copy and reports its cost, like the CLI's JSON output."""
+    from room_agent import config
+    from room_agent.missions import coder, sandbox
+
+    config.CODER_BACKEND = "claude_cli"
+    config.CODER_MAX_USD = 0.25
+    config.ANTHROPIC_KEY = config.ANTHROPIC_KEY or "sk-ant-test-not-real"
+    runs_file = Path(config.MISSIONS_DIR) / "fake_cli_runs.txt"  # (counts edit runs across the child and the parent)
+    coder.shutil.which = lambda name, *a, **k: "C:/fake/claude.exe"
+    sandbox.git_bash = lambda: "C:/fake/Git/bin/bash.exe"
+
+    def fake_run(cmd, sb, env, timeout, stdin_text=None):
+        if cmd[-1] == "--version":
+            CLI["versions"] += 1
+            return 0, "2.0.0 (Claude Code)", ""
+        CLI["runs"] += 1
+        with open(runs_file, "a", encoding="utf-8") as f:
+            f.write("run\n")
+        css = Path(sb) / "site" / "styles.css"
+        css.write_text(css.read_text(encoding="utf-8") + "\n/* edited by the CLI recovery test */\n", encoding="utf-8")
+        return 0, json.dumps({"result": "edited", "total_cost_usd": 0.0425,
+                              "usage": {"input_tokens": 4000, "output_tokens": 900}}), ""
+
+    sandbox.run = fake_run
+
+
 SCENARIOS = {
     "quick2": lambda: make_mission([("a", "quick", True, []), ("b", "quick", True, ["a"])], "two quick steps"),
     "crash_mid": lambda: make_mission([("x", "crash_mid", True, []), ("y", "quick", True, ["x"])], "idempotent mid-crash"),
@@ -179,6 +227,8 @@ SCENARIOS = {
     "fanout": lambda: make_mission([("f", "fanout", True, [])], "fan-out"),
     "paid": lambda: make_mission([("p", "paid", True, [])], "paid call"),
     "edit": lambda: make_mission([("edit", "edit", False, [])], "site edit", setup=edit_setup),
+    "cli_edit": lambda: (install_cli_fakes(), make_mission([("edit", "edit", False, [])], "cli site edit",
+                                                           setup=edit_setup))[1],
 }
 
 
@@ -211,6 +261,13 @@ if __name__ == "__main__":
     install_fakes()
     register()
     name = sys.argv[1]
+    if name == "own":  # (hold the missions database's ownership until killed)
+        from room_agent.missions import ownership
+
+        ownership.acquire()
+        print(f"OWNED {os.getpid()}", flush=True)
+        time.sleep(120)
+        os._exit(0)
     if name == "gmail":
         gmail_scenario()
         sys.exit(0)

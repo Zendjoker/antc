@@ -64,9 +64,13 @@ class _Charge:
         self.id, self.estimate = cid, estimate
         self._actual = None
         self.result = None  # (what the provider returned, kept with the settlement when the call has an idem_key)
+        self.basis = ""
 
-    def actual(self, usd, tokens_in=0, tokens_out=0):
+    def actual(self, usd, tokens_in=0, tokens_out=0, basis="provider_usage"):
+        """basis - where the figure comes from: provider_usage (the provider's token counts x Jarvis's price table),
+        provider_reported (a cost the provider / tool reported), configured_price (a configured per-request price)."""
         self._actual = (max(0.0, float(usd or 0.0)), int(tokens_in or 0), int(tokens_out or 0))
+        self.basis = basis
 
     def not_billed(self):
         """The provider answered and it's known not to be billed (e.g. a 4xx rejection)."""
@@ -121,7 +125,7 @@ def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True,
             s.settle(cid, 0, state="released", note=f"not billed: {e.__class__.__name__}")
         elif c._actual is not None:  # (the provider answered with usage; something after it failed)
             usd, tin, tout = c._actual
-            s.settle(cid, usd, tin, tout, note=f"error after the call: {e.__class__.__name__}")
+            s.settle(cid, usd, tin, tout, note=f"error after the call: {e.__class__.__name__}", basis=c.basis)
         else:
             s.settle(cid, est, state="uncertain", note=f"{e.__class__.__name__}: the provider may have charged; "
                                                      "counted at the full estimate")
@@ -133,7 +137,8 @@ def paid(estimate_usd, what, provider="", model="", mission_id=None, daily=True,
         s.settle(cid, 0, state="released", note="not billed")
     else:
         usd, tin, tout = c._actual
-        row = s.settle(cid, usd, tin, tout, result=json.dumps({"text": c.result}) if c.result is not None else None)
+        row = s.settle(cid, usd, tin, tout, result=json.dumps({"text": c.result}) if c.result is not None else None,
+                       basis=c.basis)
         if row and usd > est * 1.05 + 1e-6:
             log.warning("mission %s: %s cost $%.5f, above its estimate $%.5f (estimate too low?)", mid, what, usd, est)
             s.event(mid, f"{what} cost ${usd:.4f}, more than its ${est:.4f} estimate", "warn")

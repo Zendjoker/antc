@@ -451,7 +451,10 @@
     if (m.abandoned_runs) sum.append(el("div", "m-errors", `${m.abandoned_runs} stopped step still finishing a request (it can't make further changes)`));
     if (d.charges && d.charges.length) {
       const det = el("details", "m-ledger"), sm = el("summary", null, `Budget ledger (${d.charges.length} paid calls)`);
-      det.append(sm, list(d.charges.map(c => `${c.what}: ${c.state}${c.actual_usd != null ? `, $${c.actual_usd.toFixed(4)}` : ""} (estimate $${c.estimate_usd.toFixed(4)})${c.note ? ` · ${c.note}` : ""}`)));
+      const BASIS = { provider_usage: "provider's token counts x price table", provider_reported: "cost reported by the provider",
+                      configured_price: "configured price (no cost from the provider)", estimate: "LOCAL ESTIMATE (outcome uncertain)",
+                      none: "not billed" };
+      det.append(sm, list(d.charges.map(c => `${c.what}: ${c.state}${c.actual_usd != null ? `, $${c.actual_usd.toFixed(4)}` : ""} (reserved $${c.estimate_usd.toFixed(4)}) · ${BASIS[c.basis] || "—"}${c.note ? ` · ${c.note}` : ""}`)));
       sum.append(det);
     }
 
@@ -516,6 +519,43 @@
       bt.append(mBtn("Open preview", "window", { do: "mission_preview", project_id: p.id }));
       r.append(el("b", null, p.lead), el("div", "m-path", p.path), bt);
       pb.append(r);
+    }
+
+    // needs your decision (uncertain steps, unknown Gmail drafts, hand-edit conflicts, estimated charges)
+    const ACTION_LABEL = { retry: "Retry (may cost again)", accept: "Accept as is", check: "Check Gmail again",
+                           mark_created: "It's in Gmail", mark_not_created: "It's not in Gmail",
+                           keep_mine: "Keep my edits", use_jarvis: "Use Jarvis's version" };
+    const at = $("#mission-attention");
+    at.innerHTML = "";
+    const items = d.attention || [];
+    $("#mission-attention-tag").textContent = items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "None";
+    const atHead = el("div", "m-actions");
+    atHead.append(mBtn("Check now (read-only)", "refresh", { do: "mission_reconcile" }));
+    at.append(atHead);
+    if (!items.length) at.append(el("div", "m-none", "Nothing needs your decision."));
+    for (const x of items) {
+      const r = el("div", "m-item");
+      r.append(el("b", null, `${x.type} ${x.id}: ${x.what}`), el("div", "m-path", x.why));
+      if (x.actions.length) {
+        const bt = el("div", "m-actions");
+        x.actions.forEach(a => bt.append(mBtn(ACTION_LABEL[a] || a, null, { do: "mission_resolve", item_type: x.type, item_id: x.id, action: a },
+                                               a === "retry" || a === "use_jarvis" ? "danger" : "")));
+        r.append(bt);
+      }
+      at.append(r);
+    }
+    // operations (ids, kinds, states, reasons: no payloads)
+    const ob = $("#mission-ops");
+    ob.innerHTML = "";
+    const ops = d.operations || [];
+    $("#mission-ops-tag").textContent = `${ops.length}${d.owner && !d.owner.owner ? " · not the owner process" : ""}`;
+    if (!ops.length) ob.append(el("div", "m-none", "No operations yet."));
+    for (const o of ops.slice().reverse()) {
+      const r = el("div", "m-step");
+      r.append(tag(o.state, { completed: "green", failed: "", uncertain: "amber", running: "blue" }[o.state]),
+               el("span", "m-name", `${o.kind}: ${o.what}`), el("span", "m-meta", o.id.slice(0, 12)));
+      if (o.error) r.append(el("div", `m-ev ${o.state === "uncertain" ? "warn" : ""}`, o.error));
+      ob.append(r);
     }
 
     // outreach drafts

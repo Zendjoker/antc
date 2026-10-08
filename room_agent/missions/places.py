@@ -106,7 +106,7 @@ def _send(method, url, body, field_mask, cost, what):
             raise PlacesError(f"Google Places refused the request ({r.status})")
         if not r.ok:  # (server error / timeout / dropped connection: counted at the full estimate, see meter.paid)
             raise PlacesError(f"Google Places didn't answer properly ({r.error})")
-        charge.actual(cost)  # (Places has no usage numbers in the response: the configured per-request price)
+        charge.actual(cost, basis="configured_price")  # (Places reports no cost: the configured per-request price)
     runctx.check()
     try:
         return r.json()

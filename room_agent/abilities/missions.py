@@ -33,6 +33,10 @@ MISSION_INTENT = re.compile(r"\b(missions?|research(ing)?|leads?|prospects?|demo
 DEMO_INTENT = re.compile(r"\b(demos?|sites?|websites?|previews?|mock-?ups?)\b", re.I)
 APPROVE_INTENT = re.compile(r"\b(approv\w*|reject\w*|retry|drafts?|go ahead with (number|#)?\s*\d+)\b", re.I)
 STOP_INTENT = re.compile(r"\bmissions?\b", re.I)  # (a permanent stop: never inferred from "research" / "stop")
+CHECK_INTENT = re.compile(r"\b(check|reconcile|uncertain|unknown|unresolved|attention|problems?|stuck|conflicts?|"
+                          r"needs? (my )?decision)\b", re.I)
+RESOLVE_INTENT = re.compile(r"\b(retry|accept|keep (my|mine)|my edits|use (jarvis|your)|it'?s (there|not there)|"
+                            r"in gmail|not in gmail|mark|resolve)\b", re.I)
 MONEY_INTENT = re.compile(r"(\$\s?\d|\b\d+(\.\d+)?\s*(dollars?|bucks|usd|cents?)\b|\bbudget\b|\bspend\b)", re.I)
 register_group(Group("missions", HINTS, lambda: _live(), "background missions",
                      "long jobs that run in the background: finding businesses without a good website, researching "
@@ -479,6 +483,55 @@ tool("decide_mission_approval", "Approve, reject or retry one waiting item by it
 tool("export_mission_leads", "Save a mission's leads as a CSV (or JSON) file in its folder.",
      params({**MID, "format": {"type": "string", "enum": ["csv", "json"]}}), _export, group="missions",
      verification="internal", verified_by="the file is checked on disk")
+
+
+ACTION_WORDS = {"retry": "run it again (it may cost again)", "accept": "accept it as it is (it won't be re-run)",
+                "check": "check Gmail again (read-only)", "mark_created": "record it as created (you saw it in Gmail)",
+                "mark_not_created": "record it as NOT created (it isn't in Gmail; creating it then needs a new approval)",
+                "keep_mine": "keep your hand edits (Jarvis's version is discarded)",
+                "use_jarvis": "use Jarvis's version (your edits are kept as an older version)"}
+
+
+def _check(args):
+    m = _mission(args)
+    if m is None:
+        return "OK: there are no missions."
+    notes = _engine().reconcile_now(m["id"])
+    items = _engine().pending_actions(m["id"])
+    lines = [f"#{i + 1} {x['type']} {x['id']}: {_clean(x['what'], 80)} - {_clean(x['why'], 140)}"
+             + (f" [choices: {', '.join(x['actions'])}]" if x["actions"] else "") for i, x in enumerate(items)]
+    head = ("checked (read-only): " + "; ".join(_clean(n, 120) for n in notes[:4]) + ". ") if notes else ""
+    if not items:
+        return f"OK: {head}nothing needs their decision."
+    return f"OK: {head}needs their decision: " + " | ".join(lines)
+
+
+def _resolve(args):
+    m = _mission(args)
+    if m is None:
+        return "FAILED: there's no mission."
+    ok, msg = _engine().resolve(m["id"], args.get("item_type", ""), str(args.get("item_id", "")), args.get("action", ""),
+                                "voice")
+    return ("OK: " if ok else "FAILED: ") + msg
+
+
+def _describe_resolve(args):
+    return f"{args.get('item_type', 'item')} {args.get('item_id', '')}: " + ACTION_WORDS.get(args.get("action", ""),
+                                                                                          str(args.get("action", "")))
+
+
+tool("check_mission_problems", "Re-check the mission's unresolved items (read-only checks of files and Gmail; nothing is "
+     "re-run or re-sent) and list what needs their decision: uncertain steps, Gmail drafts with an unknown outcome, "
+     "hand-edit conflicts, charges counted at their estimate.", params(MID), _check, group="missions",
+     intent=CHECK_INTENT, verification="internal", verified_by="each item is re-read from the records / files / Gmail")
+tool("resolve_mission_item", "Carry out the user's decision on one item from check_mission_problems (retry / accept a "
+     "step, check / mark a Gmail draft created or not, keep their edits / use Jarvis's version). Always asks first.",
+     params({**MID, "item_type": {"type": "string", "enum": ["step", "approval", "conflict"]},
+             "item_id": {"type": "string"},
+             "action": {"type": "string", "enum": list(ACTION_WORDS)}}, ["item_type", "item_id", "action"]),
+     _resolve, group="missions", risk=Risk.SENSITIVE, intent=RESOLVE_INTENT, describe=_describe_resolve,
+     confirm_keys=["item_type", "item_id", "action"], verification="internal",
+     verified_by="the item's new state is read back from the records")
 
 
 def _context(user_text):

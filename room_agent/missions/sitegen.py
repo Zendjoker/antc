@@ -499,10 +499,107 @@ def _rename(src, dst, tries=6):
             time.sleep(0.5)
 
 
-def swap_in(workspace, s, staged, why):
-    """Make `staged` the live site: current -> .versions/<s>/<time>, staged -> current. -> the version folder (or None)."""
+# ---------------------------------------------------------------- content fingerprints and hand-edit conflicts
+class SiteConflict(Exception):
+    """The live site was changed by a person since Jarvis's last version: it isn't overwritten."""
+
+    def __init__(self, s, pending):
+        super().__init__(f"the demo site '{s}' was changed by hand since Jarvis last updated it; your changes were kept "
+                         f"and Jarvis's new version was set aside ({Path(pending).name}): choose 'keep my edits' or "
+                         "'use Jarvis's version'")
+        self.slug, self.pending = s, Path(pending)
+
+
+def files_hash(files):
+    """A content fingerprint of a site version ({name: bytes})."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for name in sorted(files):
+        h.update(name.encode() + b"\0" + hashlib.sha256(files[name]).digest())
+    return h.hexdigest()
+
+
+def live_hash(folder):
+    folder = Path(folder)
+    if not folder.is_dir():
+        return ""
+    return files_hash({p.name: p.read_bytes() for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")})
+
+
+def _state_file(workspace, s):
+    return sites_dir(workspace) / ".versions" / s / "state.json"
+
+
+def known_hash(workspace, s):
+    """The fingerprint of the last version JARVIS put in place ("" for a site from before this was recorded)."""
+    try:
+        return json.loads(_state_file(workspace, s).read_text(encoding="utf-8")).get("known_hash", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _set_known(workspace, s, h):
+    f = _state_file(workspace, s)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps({"known_hash": h, "at": time.time()}), encoding="utf-8")
+    tmp.replace(f)
+
+
+def hand_edited(workspace, s):
+    """True if the live site differs from the last version Jarvis installed (someone edited it)."""
+    known = known_hash(workspace, s)
+    live = sites_dir(workspace) / s
+    return bool(known) and live.exists() and live_hash(live) != known
+
+
+def pending_conflicts(workspace):
+    """[(slug, pending folder)] new versions set aside because the live site had been edited by hand."""
+    d = sites_dir(workspace) / ".pending"
+    if not d.exists():
+        return []
+    return [(p.name.rsplit("-", 1)[0], p) for p in sorted(d.iterdir()) if p.is_dir() and (p / ".complete").exists()]
+
+
+def resolve_conflict(workspace, s, choice, lead):
+    """choice 'keep_mine': the hand-edited site stays and becomes the new baseline; Jarvis's set-aside version is
+    deleted. 'use_jarvis': Jarvis's version goes live; the hand-edited one is kept in .versions (nothing is lost).
+    -> (ok, message)"""
+    pend = [p for slug, p in pending_conflicts(workspace) if slug == s]
+    live = sites_dir(workspace) / s
+    if choice == "keep_mine":
+        _set_known(workspace, s, live_hash(live))
+        for p in pend:
+            shutil.rmtree(p, ignore_errors=True)
+        return True, "kept your edits; they're now the version Jarvis works from"
+    if choice == "use_jarvis":
+        if not pend:
+            return False, "there's no set-aside version to use"
+        latest = pend[-1]
+        owner, _, _ = load_owner(workspace, s)
+        problems = check(latest, lead, owner)
+        if problems:
+            return False, "the set-aside version no longer passes the checks: " + "; ".join(problems)
+        swap_in(workspace, s, latest, "hand edits (kept)", allow_conflict=True)
+        for p in pend[:-1]:
+            shutil.rmtree(p, ignore_errors=True)
+        return True, "Jarvis's version is live; your hand-edited version is kept in the site's versions"
+    return False, f"unknown choice '{choice}'"
+
+
+def swap_in(workspace, s, staged, why, allow_conflict=False):
+    """Make `staged` the live site: current -> .versions/<s>/<time>, staged -> current. -> the version folder (or None).
+    If the live site was edited by hand since Jarvis's last version, nothing is replaced: the staged version is moved to
+    sites/.pending/ and SiteConflict is raised (unless allow_conflict: the user chose Jarvis's version; the hand-edited
+    one is still kept in .versions)."""
     runctx.check()
     live = sites_dir(workspace) / s
+    if not allow_conflict and hand_edited(workspace, s):
+        pend = sites_dir(workspace) / ".pending" / f"{s}-{uuid.uuid4().hex[:8]}"
+        pend.parent.mkdir(parents=True, exist_ok=True)
+        _rename(staged, pend)
+        raise SiteConflict(s, pend)
     vdir = sites_dir(workspace) / ".versions" / s
     vdir.mkdir(parents=True, exist_ok=True)
     version = None
@@ -524,6 +621,7 @@ def swap_in(workspace, s, staged, why):
     (live / ".complete").unlink(missing_ok=True)
     if version is not None:
         (version / "WHY.txt").write_text(why, encoding="utf-8")
+    _set_known(workspace, s, live_hash(live))
     return version
 
 
@@ -541,8 +639,21 @@ def recover(workspace):
         for d in sorted(staging.iterdir()):
             s = d.name.rsplit("-", 1)[0]
             if (d / ".complete").exists() and not (root / s).exists():
+                prev = sorted((p for p in (root / ".versions" / s).iterdir() if p.is_dir()), key=lambda p: p.name) \
+                    if (root / ".versions" / s).exists() else []
+                known = known_hash(workspace, s)
+                if prev and known and live_hash(prev[-1]) != known:
+                    # the version being replaced had been edited by hand: put it back, set Jarvis's aside (a conflict)
+                    _rename(prev[-1], root / s)
+                    pend = root / ".pending" / d.name
+                    pend.parent.mkdir(parents=True, exist_ok=True)
+                    _rename(d, pend)
+                    done.append(f"{s}: an interrupted update would have replaced hand edits: your version was put back, "
+                                "Jarvis's was set aside (conflict)")
+                    continue
                 _rename(d, root / s)
                 (root / s / ".complete").unlink(missing_ok=True)
+                _set_known(workspace, s, live_hash(root / s))
                 done.append(f"{s}: finished an interrupted update")
             else:
                 shutil.rmtree(d, ignore_errors=True)
@@ -587,7 +698,10 @@ def build(lead, workspace, overrides=None):
     if problems:
         discard(staged)
         return sites_dir(workspace) / s, problems
-    swap_in(workspace, s, staged, "before rebuild")
+    try:
+        swap_in(workspace, s, staged, "before rebuild")
+    except SiteConflict as e:  # (hand edits on the live site: kept; the rebuild waits in .pending for a decision)
+        return sites_dir(workspace) / s, [str(e)]
     return sites_dir(workspace) / s, []
 
 

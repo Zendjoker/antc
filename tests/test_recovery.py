@@ -33,7 +33,7 @@ DRAFTS = rc.install_fakes()
 rc.register()
 
 from room_agent import config  # noqa: E402
-from room_agent.missions import coder, engine, outreach, sitegen  # noqa: E402
+from room_agent.missions import coder, engine, outreach, ownership, sitegen  # noqa: E402
 from room_agent.missions.store import store  # noqa: E402
 from tests.harness import Checker  # noqa: E402
 
@@ -44,6 +44,7 @@ print(f"isolated: MISSIONS_DB={config.MISSIONS_DB}")
 
 def crash(scenario, point):
     """Run the scenario in a child process that dies at `point`. -> (exit code, mission id, approval id, output)"""
+    ownership.release()  # (this process stops being "the running Jarvis" while the child plays it)
     env = dict(os.environ, JARVIS_CRASH_AT=point, PYTHONIOENCODING="utf-8")
     p = subprocess.run([sys.executable, str(CHILD), scenario], env=env, capture_output=True, text=True, timeout=180,
                        cwd=str(ROOT))
@@ -251,9 +252,19 @@ restart()
 drafts = json.loads(DRAFTS.read_text(encoding="utf-8"))
 DRAFTS.write_text(json.dumps(drafts[:-1]), encoding="utf-8")  # (as if Gmail never got it)
 ok, msg = outreach.retry(aid, "test")
+t.check("Gmail has no such draft, but the attempt is recent: 'wait' - nothing created, still unknown",
+        not ok and S.approval(aid)["status"] == "unknown" and len(json.loads(DRAFTS.read_text(encoding="utf-8"))) == len(drafts) - 1,
+        msg)
+outreach.RECONCILE_MIN_AGE_S = 0  # (as if the attempt were old enough to be listed)
+ok, msg = outreach.retry(aid, "test")
+t.check("old enough + a complete scan finds nothing: 'absent' -> waiting for approval again; still NOTHING created",
+        ok and S.approval(aid)["status"] == "pending" and len(json.loads(DRAFTS.read_text(encoding="utf-8"))) == len(drafts) - 1,
+        msg)
+ok, msg = outreach.approve(aid, "test")
 drafts = json.loads(DRAFTS.read_text(encoding="utf-8"))
-t.check("when Gmail confirms the draft does NOT exist, retry creates it exactly once", ok
-        and S.approval(aid)["status"] == "done" and sum(1 for d in drafts if f"-{aid}-" in d["message_id"]) == 1, (msg, drafts[-2:]))
+t.check("only a new explicit approve creates it - exactly once", ok and S.approval(aid)["status"] == "done"
+        and sum(1 for d in drafts if f"-{aid}-" in d["message_id"]) == 1, (msg, drafts[-2:]))
+outreach.RECONCILE_MIN_AGE_S = 600
 
 # =============================================================================================== cancellation
 print("\n7. Cancellation after a crash")

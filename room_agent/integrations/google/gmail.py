@@ -157,10 +157,12 @@ class GmailService:
         return _b64d(data.get("data", "")).decode("utf-8", "replace")[:1500]
 
     # ----- drafts and sending (gmail.compose)
-    def _mime(self, to, subject, body, in_reply_to="", references="", cc="", message_id=""):
+    def _mime(self, to, subject, body, in_reply_to="", references="", cc="", message_id="", marker=""):
         msg = EmailMessage()
         if message_id:
-            msg["Message-ID"] = message_id  # (lets a caller find this exact draft again: find_draft_by_message_id)
+            msg["Message-ID"] = message_id  # (lets a caller find this exact draft again: find_draft)
+        if marker:
+            msg["X-Jarvis-Operation"] = marker  # (a second, custom identifier, in case Gmail rewrites the Message-ID)
         msg["To"] = to
         if cc:
             msg["Cc"] = cc
@@ -178,12 +180,48 @@ class GmailService:
                 "subject": m["subject"], "body": m["body"]}
 
     def find_draft_by_message_id(self, message_id):
-        """The id of the draft carrying this Message-ID, or None (reconciling a draft whose creation was cut off)."""
+        """The id of the draft carrying this Message-ID, or None (a search: subject to Gmail's indexing delay)."""
         res = self._get("drafts", q=f"rfc822msgid:{message_id}", maxResults=5)
         drafts = res.get("drafts") or []
         return drafts[0]["id"] if drafts else None
 
-    def create_draft(self, to, subject, body, reply_to=None, message_id=""):
+    def find_draft(self, message_id="", marker="", scan_limit=300):
+        """Look for a draft Jarvis created, two ways (for reconciling a creation whose answer was lost):
+            1. a search by Message-ID (fast, but search results can lag behind new drafts)
+            2. a scan of the drafts themselves (drafts.list + each message's headers), matching the X-Jarvis-Operation
+               marker or the Message-ID - not dependent on the search index, and robust to a rewritten Message-ID
+        -> {"found": draft id or None, "complete": True if every draft was scanned (so "not found" means absent),
+            "scanned": n}"""
+        if message_id:
+            try:
+                hit = self.find_draft_by_message_id(message_id)
+            except Exception:  # noqa: BLE001 (the scan below decides)
+                hit = None
+            if hit:
+                return {"found": hit, "complete": True, "scanned": 0, "how": "search"}
+        token, scanned = None, 0
+        want_mid = (message_id or "").strip("<>").lower()
+        while scanned < scan_limit:
+            params = {"maxResults": 100}
+            if token:
+                params["pageToken"] = token
+            page = self._get("drafts", **params)
+            for d in page.get("drafts") or []:
+                scanned += 1
+                mid = (d.get("message") or {}).get("id")
+                if not mid:
+                    continue
+                m = self._get(f"messages/{mid}", format="metadata", metadataHeaders=["Message-ID", "X-Jarvis-Operation"])
+                h = {x["name"].lower(): x["value"] for x in (m.get("payload") or {}).get("headers", [])}
+                if (marker and h.get("x-jarvis-operation", "") == marker) or \
+                        (want_mid and h.get("message-id", "").strip("<>").lower() == want_mid):
+                    return {"found": d["id"], "complete": True, "scanned": scanned, "how": "scan"}
+            token = page.get("nextPageToken")
+            if not token:
+                return {"found": None, "complete": True, "scanned": scanned, "how": "scan"}
+        return {"found": None, "complete": False, "scanned": scanned, "how": "scan (stopped at the limit)"}
+
+    def create_draft(self, to, subject, body, reply_to=None, message_id="", marker=""):
         """reply_to: the message being answered (same thread, proper reply headers). message_id: an explicit
         Message-ID header (so the draft can be found again if the answer to this request is lost)."""
         thread, irt, refs = None, "", ""
@@ -191,7 +229,8 @@ class GmailService:
             to = to or reply_to["reply_to"] or f"{reply_to['from_name']} <{reply_to['from_email']}>"
             subject = subject or (reply_to["subject"] if reply_to["subject"].lower().startswith("re:") else "Re: " + reply_to["subject"])
             thread, irt, refs = reply_to["thread_id"], reply_to["message_id"], reply_to["references"]
-        body_json = {"message": {"raw": self._mime(to, subject or "(no subject)", body, irt, refs, message_id=message_id)}}
+        body_json = {"message": {"raw": self._mime(to, subject or "(no subject)", body, irt, refs, message_id=message_id,
+                                                   marker=marker)}}
         if thread:
             body_json["message"]["threadId"] = thread
         d = self.session.call("POST", f"{BASE}/drafts", json_body=body_json, scope_hint="gmail.compose")
