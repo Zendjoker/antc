@@ -216,7 +216,7 @@ Nothing else (router, prompt, claim check) needs editing.
   everything back). `python -m tests apps media` runs only the suites with those words in the name.
 - `python tests/scenarios.py` runs about 50 natural-language requests against the real model (costs a little).
 - Voice: `python -m tests.voice_audition` makes A/B clips (previous vs new delivery; ElevenLabs too when a key is set),
-  `... serve` opens a blind listening page on http://127.0.0.1:8770, `... score` unblinds your ratings.
+  `... serve` opens a blind listening page on http://127.0.0.1:8773, `... score` unblinds your ratings.
   `python -m tests.tts_bench` measures ElevenLabs models, HTTP vs WebSocket, normalization and seeds (`--selftest`: no key).
   `python -m tests.speech_latency <label>` measures time to first sound with the real model (actions are simulated).
   None of these change anything on the PC.
