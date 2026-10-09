@@ -142,6 +142,13 @@ t.check("offered times: 'can't 7PM, but we can do 8PM' -> 20:00; 'we can do 7:30
         errand.offered_times(e, "We can't 7PM, but we can do a 8PM.") == ["20:00"]
         and errand.offered_times(e, "Okay, we can do 7:30.") == ["19:30"]
         and errand.offered_times(e, "We have a table for 8 people") == [])
+t.check("spoken times: '830', '8 30', 'eight thirty', 'half past seven', 'quarter to nine' -> times; a phone number "
+        "isn't", errand.offered_times(e, "I have 830. Do you think it's good?") == ["20:30"]
+        and errand.offered_times(e, "we can do 8 30") == ["20:30"] and errand.offered_times(e, "how about eight thirty") == ["20:30"]
+        and errand.offered_times(e, "half past seven works") == ["19:30"]
+        and errand.offered_times(e, "quarter to nine") == ["20:45"] and errand.offered_times(e, "call 415 555 0199") == [],
+        [errand.offered_times(e, x) for x in ("I have 830.", "we can do 8 30", "how about eight thirty", "half past seven",
+                                             "quarter to nine", "call 415 555 0199")])
 t.check("another day is noticed ('tomorrow', 'Saturday')", errand.other_day(e, "We can do 7 tomorrow")
         and not errand.other_day(e, "Friday at 7 is fine"))
 t.check("'calling for my boss, Adam Azzouz' in the plain fallback opening",
@@ -327,7 +334,31 @@ twiml, said, ended = run_errand(e, ["Hi", "We only have 8:45.", "No, that's all.
 t.check("'want me to lock it in?' for a time outside the brief: thanks, no need to hold it - nothing booked or held",
         e.status == "needs_you" and "no need to hold" in " ".join(said).lower() and not e.agreed_time, (said, e.status))
 
-print("\n6. Wrong number")
+print("\n6. Who they are")
+errand.OPEN_WAIT_S = 0.2
+sent = []
+e = brief()
+s = errand.ErrandSession(e, lambda text, last: sent.append(text))
+time.sleep(0.6)
+errand.OPEN_WAIT_S = 60
+s.answer("Hello?")
+t.check("'is this Luigi's?' - 'Hello?': no yes yet, so it asks again (no request yet)",
+        "confirmed who they are" in " ".join(sent[-3:]) and "table" not in " ".join(sent[-3:]), sent)
+s.answer("Yes, this is Luigi's.")
+t.check("...a yes: now it says what it's calling about", "start of the conversation" in " ".join(sent[-3:]), sent[-3:])
+s.answer("Are you sure you found the right number?")
+t.check("'are you sure you have the right number?' -> 'I think so, trying to reach Luigi's, is that you?'",
+        "trying to reach Luigi's" in " ".join(sent[-3:]), sent[-3:])
+QUEUE[:] = [{"status": "declined", "say": "Oh, 830 is outside the time we asked for, so that won't work."}]
+e = brief()
+s = errand.ErrandSession(e, lambda text, last: sent.append(text))
+s.opened = s.introduced = True
+sent.clear()
+s.answer("Let me check the book for you.")
+t.check("the model wanting to end the call ('that won't work') when they never said there's nothing: it keeps the "
+        "conversation going instead", "won't work" not in " ".join(sent) and e.status == "calling", (sent, e.status))
+
+print("\n7. Wrong number")
 errand.THINK = fake_think
 errand.OPEN_WAIT_S = 0.2
 sent = []

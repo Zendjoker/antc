@@ -194,6 +194,12 @@ def echo_of(heard, said, run=4):
     return any(tuple(h[i:i + run]) in grams for i in range(len(h) - run + 1))
 
 
+CONFIRM_ID = re.compile(r"\b(yes|yeah|yep|yup|speaking|this is|you('ve)? reached|correct|that'?s (right|us|me)|"
+                        r"it is|sure is|how can i help|what can i do for you)\b", re.I)
+RIGHT_NUMBER = re.compile(r"\b(right number|who are you (looking|trying|calling)|who did you (want|call)|"
+                          r"who('s| is) this for)\b", re.I)
+FULL = re.compile(r"\b(fully booked|booked up|no (tables?|availability|room|space)|nothing (available|left|at all)|"
+                  r"can'?t (fit|take|seat)|we'?re (full|closed)|closed (on|that))\b", re.I)
 GOODBYE = re.compile(r"\b(bye|goodbye|good night|take care|have a (good|great|nice)|you too|talk (to you )?soon|"
                      r"see you|thank(s| you)|alright then|okay then|sounds good|perfect)\b", re.I)
 SYSTEM = """You're on a phone call with a restaurant, booking ONE table for your boss. The person on the line is ALWAYS
@@ -234,11 +240,41 @@ TIME_SAID = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:(a\.?m\.?|p\.?m\.?)|o'?cl
                        r"tables?|pax|:))", re.I)
 
 
+WORD_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+            "ten": 10, "eleven": 11, "twelve": 12}
+MINUTE_WORDS = {"fifteen": "15", "thirty": "30", "forty five": "45", "forty-five": "45", "forty": "40", "twenty": "20",
+                "ten": "10", "fifty": "50"}
+TIME_CUE = r"(?:have|do|at|around|got|is|about|how about|what about|until|from|only)"
+
+
+def spoken_times(text):
+    """Times as speech recognition writes them -> "H:MM": "830" / "8 30" / "eight thirty" / "half past eight" /
+    "quarter to nine". (A bare 3-4 digit number counts only after a time word, so a phone number isn't a time.)"""
+    t = " " + str(text or "") + " "
+    t = re.sub(r"\bhalf past (\w+)", lambda m: f"{WORD_NUM.get(m.group(1).lower(), m.group(1))}:30", t, flags=re.I)
+    t = re.sub(r"\bquarter past (\w+)", lambda m: f"{WORD_NUM.get(m.group(1).lower(), m.group(1))}:15", t, flags=re.I)
+    t = re.sub(r"\bquarter (?:to|till) (\w+)", lambda m: (f"{int(WORD_NUM.get(m.group(1).lower(), m.group(1))) - 1}:45"
+               if str(WORD_NUM.get(m.group(1).lower(), m.group(1))).isdigit() else m.group(0)), t, flags=re.I)
+    for w, mm in sorted(MINUTE_WORDS.items(), key=lambda x: -len(x[0])):
+        t = re.sub(rf"\b({'|'.join(WORD_NUM)})[ -]{w}\b", lambda m, mm=mm: f"{WORD_NUM[m.group(1).lower()]}:{mm}", t,
+                   flags=re.I)
+    t = re.sub(rf"\b({'|'.join(WORD_NUM)})\s+(o'?clock|p\.?m\.?|a\.?m\.?)",
+               lambda m: f"{WORD_NUM[m.group(1).lower()]} {m.group(2)}", t, flags=re.I)
+    t = re.sub(rf"\b{TIME_CUE}\s+({'|'.join(WORD_NUM)})\b(?!\s*(?:people|persons|guests|of you|seats|tables?))",
+               lambda m: m.group(0)[:m.start(1) - m.start(0)] + str(WORD_NUM[m.group(1).lower()]), t, flags=re.I)
+    t = re.sub(r"\b(\d{1,2}) (00|15|30|45)\b", r"\1:\2", t)
+    t = re.sub(rf"(\b{TIME_CUE}\s+)(1[0-2]|[1-9])([0-5]\d)\b(?!\s*(?:people|persons|guests|dollars))", r"\1\2:\3", t,
+               flags=re.I)
+    t = re.sub(r"\b(1[0-2]|[1-9])([0-5]\d)\s*(p\.?m\.?|a\.?m\.?)", r"\1:\2 \3", t, flags=re.I)
+    return t.strip()
+
+
 def offered_times(e, text):
     """Times the restaurant offered ("8PM", "7:30 pm", "8 o'clock"), as HH:MM; an hour without am/pm is read as
     evening when the brief is in the evening (a dinner booking)."""
     out = []
     evening = (_minutes(e.time_from) or 0) >= 12 * 60
+    text = spoken_times(text)
     for m in TIME_SAID.finditer(text or ""):
         if re.search(r"\b(can'?t|cannot|not|no|don'?t|isn'?t|unavailable|booked up|full)\b[^.,;]{0,15}$",
                      (text or "")[max(0, m.start() - 25):m.start()], re.I):
@@ -398,6 +434,7 @@ class ErrandSession:
         self.opened = False    # (it has said something)
         self.introduced = False  # (it has said who it's calling for and what it wants)
         self.asked_identity = False  # (it asked "is this Luigi's?" first)
+        self.identity_asks = 0
         self._hung = False
         self._close_no = 0
         self._rng = random.Random(errand.id)
@@ -467,6 +504,20 @@ class ErrandSession:
                 self.introduced = True
                 return self._close("", "Oh, I'm so sorry - wrong number! Have a good night.", "failed",
                                    {"why": "wrong number: they said it isn't " + e.business}, use_model=False)
+            first_word = re.escape(e.business.split()[0].rstrip("'s").lower())
+            confirmed = CONFIRM_ID.search(str(text)) or re.search(rf"\b{first_word}", str(text).lower())
+            if self.asked_identity and not self.introduced and not confirmed and self.identity_asks < 2:
+                self.identity_asks += 1  # (no yes yet - "Hello?" isn't one: ask again, warmly)
+                self.opened = True
+                return self._speak(f"They answered '{str(text)[:60]}' but haven't confirmed who they are. Warmly ask "
+                                   f"again if this is {e.business} - just that, nothing else yet.",
+                                   f"Hi! Sorry - is this {e.business}?", sentences=1, words=15)
+            if RIGHT_NUMBER.search(str(text)) and not e.agreed_time:
+                self.asked_identity, self.introduced = True, False  # (a "no" next means the wrong number)
+                self.identity_asks = 2
+                return self._speak(f"They're not sure you have the right number. Say you think so - you're trying to "
+                                   f"reach {e.business} - and ask if that's them.",
+                                   f"I think so - I'm trying to reach {e.business}. Is that you?", sentences=2, words=25)
             self.opened = True
             directive, fallback, close = self._decide(text)
             if not self.introduced:
@@ -573,6 +624,11 @@ class ErrandSession:
                                    "needs_you", {"offered": booking, "why": why})
         if status == "booked" and not (CONFIRMED.search(str(text)) and e.agreed_time):
             status = "talking"  # (nothing confirmed by them on a time code accepted: keep talking)
+        if status == "declined" and not FULL.search(str(text)):
+            gen.close()  # (they never said there's nothing: no flat "that won't work" - keep the conversation going)
+            return self._speak(f"Keep it going kindly: ask a short friendly question, e.g. whether they have anything "
+                               f"else around {e.spoken_window()} {e.when()}.",
+                               f"Do you have anything else around {e.spoken_window().replace(' and ', ' or ')}?")
         if status in ("declined", "needs_you", "goodbye"):
             words = self._stream_words(gen)
             return self._closed_with(words, {"goodbye": "no_deal"}.get(status, status),
