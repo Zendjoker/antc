@@ -106,9 +106,10 @@ tool("open_app", "Open (launch) an app on this Windows PC, e.g. 'open Spotify', 
      verify=lambda a, b, c: c["running"], undo=_undo_open, undo_if=lambda b, c: not b["running"],
      reflex=[(r"(?:open|launch|start|fire up|pull up|bring up)\s+(?:up\s+)?" + APP_WORDS, {})], reflex_check=known_app,
      **common)
-tool("close_app", "Close (quit) an app on this PC, e.g. 'close Spotify', 'quit Discord', 'close it'.",
+tool("close_app", "Close (quit) an app on this PC, e.g. 'close Spotify', 'quit Discord', 'close it'. A browser closes "
+     "with all its windows and tabs: for one tab use close_tab.",
      params({"app_name": APP_NAME, "confidence": CONFIDENCE}, ["app_name"]), _call("close_app", "app_name"),
-     subject=app_arg, event="app.closed", observe=_state, verify=lambda a, b, c: not c["running"],
+     subject=app_arg, event="app.closed", observe=_state, verify=lambda a, b, c: not c["running"], scope="app",
      expect=lambda a, b: {"running": False}, risk=Risk.CONFIRM, min_confidence=0.7,
      reflex=[(r"(?:close|quit|exit)\s+" + APP_WORDS, {"confidence": 0.95})], reflex_check=known_app,
      **common)  # (closing can't be undone)

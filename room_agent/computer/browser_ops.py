@@ -409,6 +409,47 @@ def navigate(hwnd, key, action, tab=""):
     return f"OK: went {action}; now on \"{_short(st['title'], b)}\" ({browsers.host(st['url'])})."
 
 
+def close_tab(hwnd, key, which=""):
+    """Close ONE tab: the one showing, or the one whose title matches `which` ("the YouTube tab"). Never the window or
+    the browser: the last tab of a window isn't closed (that would close the window). Verified by the tab count dropping
+    by one."""
+    if interrupted():
+        return "FAILED: stopped: they interrupted."
+    b = browsers.KNOWN[key]
+    tabs = uia.tabs(hwnd)
+    if not tabs:
+        return f"FAILED: couldn't read {b.name}'s tabs, so nothing was closed."
+    if len(tabs) == 1:
+        return (f"FAILED: that's the only tab in this {b.name} window, and closing it would close the window. Nothing was "
+                f"closed. Ask if they want {b.name} closed.")
+    if str(which or "").strip():
+        scored = sorted(((_score(n, which), n, el, sel) for n, el, sel in tabs), key=lambda c: -c[0])
+        if scored[0][0] < 0.5:
+            return (f"FAILED: no {b.name} tab matches \"{which}\", nothing was closed. Open tabs: "
+                    + "; ".join(n[:40] for _, n, _, _ in scored[:8]) + ".")
+        if scored[1][0] == scored[0][0]:
+            return f"NEEDS: which tab: \"{scored[0][1][:40]}\" or \"{scored[1][1][:40]}\"? Nothing was closed."
+        _, name, el, selected = scored[0]
+        if not selected and not uia.invoke(el):
+            return f"FAILED: couldn't select the \"{name[:60]}\" tab, so nothing was closed."
+    else:
+        name = next((n for n, _, sel in tabs if sel), "") or browsers.title_of(hwnd)
+    if not winput.focus_window(hwnd) or winput.foreground() != hwnd:
+        return f"FAILED: couldn't bring {b.name} to the front, so nothing was pressed and no tab was closed."
+    winput.hotkey("ctrl+w")
+    deadline = time.time() + 3
+    while time.time() < deadline and not interrupted():
+        now = uia.tabs(hwnd)
+        if len(now) == len(tabs) - 1:
+            st = _state(hwnd)
+            desk.saw_page(key, hwnd, st["url"], st["title"])
+            return (f"OK: closed the \"{_short(name, b)[:60]}\" tab in {b.name}; {len(now)} tab"
+                    f"{'' if len(now) == 1 else 's'} left, now on \"{_short(st['title'], b)}\".")
+        time.sleep(0.2)
+    return (f"UNKNOWN: not confirmed: pressed Ctrl+W in {b.name}, but the tab is still there (the page may be asking "
+            "to leave). Don't say it closed.")
+
+
 def go_here(hwnd, key, url):
     """Load `url` in the tab that's showing now (their 'here' / 'in this tab', or a search on the site they're on):
     through the address bar, checked by the address changing to it."""

@@ -37,6 +37,34 @@ AFFIRM = _re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok(ay)?|do it|go ahead|go for 
                      r"yes please)\b", _re.I)
 NEGATE = _re.compile(r"\b(no|nope|don'?t|do not|wait|stop|cancel|hold on|not yet|never ?mind)\b", _re.I)
 PRONOUNS = {"it", "that", "the app", "that app", "same app", "the program"}
+# A yes / no to "should I <action>?" in plain speech: anywhere in a short answer, after any lead-in ("Oh my god, yes.",
+# "I said yes"), the last part deciding ("yes... wait, no" is a no).
+YES_WORDS = _re.compile(r"\b(yes|yeah|yep|yup|sure|ok(ay)?|do it|go ahead|go for it|of course|please do|absolutely|"
+                        r"definitely|correct|confirm(ed)?|i'?m sure|that'?s (right|fine|good)|sounds good)\b", _re.I)
+NO_WORDS = _re.compile(r"\b(no|nope|nah|don'?t|do not|wait|hold on|not (now|yet)|never ?mind|leave it|forget it|"
+                       r"stop|cancel)\b", _re.I)
+
+
+def said_yes(text, cap=None, what=""):
+    """Is their answer a clear yes to the question about `cap` (described as `what`)? Only a short answer counts, and
+    never a question. For an action that IS a stop / cancel, its own verb isn't a no ("Yes, cancel the mission for
+    good."), and saying the action again is a yes ("Cancel the mission."); picking the option the question offered
+    ("for good") is one too."""
+    t = " ".join(str(text or "").split())
+    if not t or "?" in t or len(t.split()) > 12:
+        return False
+    own = set(_re.findall(r"[a-z]+", (getattr(cap, "name", "") or "").lower())[:1])
+    own |= set(_re.findall(r"^\W*([a-z]+)", str(what or "").lower()))
+    clauses = [c for c in _re.split(r"[.;!]+|,?\s*\b(?:but|actually)\b|,\s*(?=wait\b)", t) if c and c.strip()]
+    last = clauses[-1] if clauses else t
+    if any(m.group(0).lower() not in own for m in NO_WORDS.finditer(last)):
+        return False
+    if YES_WORDS.search(t):
+        return True
+    if own and any(_re.search(rf"\b{v}\b", t, _re.I) for v in own) and (
+            cap is None or cap.intent is None or cap.intent.search(t)):
+        return True  # (they said the action itself)
+    return bool(_re.search(r"\bfor good\b|\bpermanently\b", t, _re.I) and "for good" in str(what or "").lower())
 
 
 @dataclass
@@ -275,6 +303,16 @@ def _execute(name, args):
     if not available:
         return _finish("REFUSED", _result(name, args, f"UNAVAILABLE: {name} isn't available right now (that feature is off, "
                                                       "not connected or not built)."))
+    narrower = _wider_than_asked(cap, args)
+    if narrower:  # 2a. never a broader action than they asked for ("close the tab" must not close all of Chrome)
+        result = _result(name, args, narrower)
+        result.error_code = "constraint"
+        return _finish("REFUSED", result)
+    nothing = _nothing_to_do(cap, args)
+    if nothing:  # 2a'. nothing to act on (no mission to cancel): say so; nobody is asked to confirm doing nothing
+        if rt.pending is not None and rt.pending.get("confirm") and rt.pending["tool"] == name:
+            pending.cancel("nothing to do")
+        return _finish(name, _result(name, args, nothing))
     p = rt.pending
     awaiting_yes = bool(p is not None and p.get("confirm") and p["tool"] == name)
     if (cap.intent is not None and not awaiting_yes and not cap.intent.search(rt.turn_text or "")
@@ -435,6 +473,41 @@ def _execute(name, args):
     return _finish(name, result)
 
 
+TAB_ASK = _re.compile(r"\btabs?\b", _re.I)
+WHOLE_APP = r"\b(?:close|quit|exit|kill|shut(?:\s+down)?)\s+(?:the\s+|all\s+of\s+)?(?:whole\s+|entire\s+)?(?:{})\b(?!\s+tabs?\b)"
+
+
+def _wider_than_asked(cap, args):
+    """-> the refusal when this call would act on more than their words asked for, else "". A request about a tab
+    (understand.TurnIntent scope 'tab', or 'tab' in their words) can't be done by closing the whole app, unless
+    their words also say to close that app itself ("close the tab and quit Spotify")."""
+    if cap.scope not in ("app", "window"):
+        return ""
+    words = rt.turn_text or ""
+    intent = getattr(rt.turn, "intent", None)
+    if not (getattr(intent, "scope", None) == "tab" or TAB_ASK.search(words)):
+        return ""
+    target = str(args.get("app_name") or args.get("app") or args.get("window") or "").strip()
+    names = [_re.escape(w) for w in [target.lower(), *target.lower().split()] if len(w) > 2] + ["browser", "app"]
+    if _re.search(WHOLE_APP.format("|".join(names)), words, _re.I):
+        return ""
+    return (f"FAILED: not done: they asked about a TAB; {cap.name} would close all of {target or 'the app'} (every window "
+            "and tab). Use close_tab; if it can't close the tab, tell them plainly - never close the whole app for a "
+            "tab request.")
+
+
+def _nothing_to_do(cap, args):
+    """Capability.precheck: its "OK: nothing to ..." text when there's nothing to act on, else "" (a broken check never
+    blocks the action: the tool still runs its own checks)."""
+    if not cap.precheck:
+        return ""
+    try:
+        return cap.precheck(dict(args)) or ""
+    except Exception as e:  # noqa: BLE001
+        log.debug("precheck of %s failed: %s", cap.name, e)
+        return ""
+
+
 def _confirmed(name, args=None, cap=None):
     """A yes counts only if: it was asked on an earlier turn, about this exact action, and the user's own words now say
     yes (never because the model thinks it's probably wanted)."""
@@ -442,7 +515,11 @@ def _confirmed(name, args=None, cap=None):
     text = rt.turn_text or ""
     if not (p and p.get("confirm") and p["tool"] == name and p["turn"] < rt.turn_no):
         return False
-    if not AFFIRM.search(text) or NEGATE.search(text):
+    try:
+        what = cap.describe(args) if cap is not None and cap.describe and args is not None else ""
+    except Exception:  # noqa: BLE001
+        what = ""
+    if not said_yes(text, cap, what):
         return False
     if args is not None:
         keys = (cap.confirm_keys if cap and cap.confirm_keys else [k for k in p.get("args", {}) if k != "confidence"])

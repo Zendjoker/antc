@@ -52,6 +52,10 @@ PREFIX = (r"^\W*(?:(?:actually|no|nope|oh|okay|ok|and|also|wait|sorry|um+|uh+|th
 SEP = r"(?:\s+(?:to|is|as|should be|will be|would be)\s+|\s*[:=]\s*|\s+)"
 FILLER = re.compile(r"^\W*(?:(?:it'?s|it is|that'?s|that is|make it|let'?s say|maybe|um+|uh+|ok(?:ay)?|so)[\s,]+)+", re.I)
 CANCELLED = ["Okay, cancelled.", "Sure, forget it.", "Okay, dropped it.", "No problem, I won't."]
+# A short no to a yes/no question about an action ("No.", "Nope, leave it", "not now")
+NO_ANSWER = re.compile(r"^\W*(?:(?:oh|um+|uh+|well|jarvis)[\s,.!]+)*(?:no|nope|nah|don'?t|do not|not (?:now|yet)|"
+                       r"no thanks?|never ?mind|leave it|forget it)\b", re.I)
+HOLD = re.compile(r"\b(?:wait|hold on|hang on|one sec(?:ond)?|a sec(?:ond)?|let me think)\b", re.I)  # (not a no: later)
 
 
 class Decision:
@@ -353,11 +357,24 @@ def on_utterance(text):
     if not p:
         return None
     t = text.strip()
+    if p.confirm:  # a yes/no about running it: the executor's confirmation rules take a yes ("Cancel the mission." to
+        from room_agent.actions import core  # "cancel it for good?" is one, not a "never mind")
+        from room_agent.actions.executor import said_yes
+
+        cap = core.get(p.capability)
+        try:
+            what = cap.describe(p.collected) if cap is not None and cap.describe else ""
+        except Exception:  # noqa: BLE001
+            what = ""
+        if said_yes(t, cap, what):
+            return None
+        if CANCEL.match(t) or (len(t.split()) <= 6 and "?" not in t and NO_ANSWER.match(t) and not HOLD.search(t)):
+            cancel(f"they said {t!r}")
+            return Decision(reply="Okay, I won't.")  # (never "cancelled": nothing was done)
+        return None
     if CANCEL.match(t):
         cancel(f"they said {t!r}")
         return Decision(reply=random.choice(CANCELLED))
-    if p.confirm:
-        return None  # a yes/no about running it: the executor's confirmation rules handle the answer
     if p.candidate:
         return _answer_to_candidate(p, t)
     hit = _cue(p, t)

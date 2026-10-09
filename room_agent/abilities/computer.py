@@ -57,7 +57,10 @@ register_group(Group("browser", BROWSER_HINTS, _recent, "web browsers",
     "- 'Open the second one' / 'click the first result' refers to the results on the CURRENT page: call browser_click "
     "with number=2. Don't guess from memory what's on the page; read it (browser_read_page) when you need to know.",
     "- Don't narrate each click. Never speak URLs aloud: say the site name.",
-    "- A FAILED / 'not confirmed' result means you must not say it worked."]))
+    "- A FAILED / 'not confirmed' result means you must not say it worked.",
+    "- 'Close the tab' / 'close this tab' / 'close the YouTube tab' = close_tab. close_app quits the WHOLE browser with "
+    "every tab: only when they ask to close or quit the browser itself. If a tab can't be closed, say so; never close "
+    "the browser instead."]))
 register_group(Group("screen", SCREEN_HINTS, lambda: False, "seeing the screen", "only when asked; not private windows",
                      lambda: IS_WINDOWS and config.SCREEN_VISION != "off", rules=[
     "- Only call analyze_screen when they ask about what's on their screen right now. For a web page prefer "
@@ -245,7 +248,7 @@ def _nav(args):
 
 
 tool("browser_navigate", "In the browser: go back, go forward, refresh / reload, open a new (empty) tab, or switch to an "
-     "open tab by what's on it ('switch to my YouTube tab'). Never closes tabs.",
+     "open tab by what's on it ('switch to my YouTube tab'). To close a tab use close_tab.",
      params({"action": {"type": "string", "enum": ["back", "forward", "refresh", "new_tab", "switch_tab"]},
              "tab": {"type": "string", "description": "switch_tab: what the tab is ('YouTube', 'Gmail', 'the docs')"},
              "browser": BROWSER_ARG}, ["action"]),
@@ -255,6 +258,27 @@ tool("browser_navigate", "In the browser: go back, go forward, refresh / reload,
              (r"(?:open\s+)?(?:a\s+)?(?:new|another)\s+tab", {"action": "new_tab"}),
              (r"(?:switch|go)\s+to\s+(?:my\s+|the\s+)?(?P<tab>[\w .'-]{2,40}?)\s+tab", {"action": "switch_tab"})],
      reflex_check=_browser_in_play, reflex_say=_spoken)
+
+
+def _close_tab(args):
+    key, hwnd, problem = _window(args)
+    if problem:
+        return problem
+    return _ops().close_tab(hwnd, key, args.get("tab", ""))
+
+
+tool("close_tab", "Close ONE browser tab: the one showing, or one by what's on it ('close the YouTube tab'). Never the "
+     "whole browser, never its last tab.",
+     params({"tab": {"type": "string", "description": "Optional: what the tab is ('YouTube'); leave out for the one showing"},
+             "browser": BROWSER_ARG}),
+     _close_tab, group="browser", scope="tab", claim=["browser", "tab"], event="browser.tab_closed",
+     intent=re.compile(r"\b(close|shut|exit|kill|get rid of|x out)\b", re.I), verification="internal",
+     verified_by="the window's tab count dropped by one",
+     reflex=[(r"(?:close|shut)\s+(?:this|the|that|my|current|active)?\s*tab", {}),
+             (r"(?:close|shut)\s+(?:the|my)\s+(?P<tab>[\w .'-]{2,30}?)\s+tab", {})],
+     reflex_check=_browser_in_play, reflex_say=lambda r: "Closed the tab.")
+register_claim("tab", r"\b(closed|shut)\b.{0,20}\btabs?\b|\btabs?\b.{0,20}\b(is|are|'s)\s+(now\s+)?(closed|gone)\b",
+               verified_by=("close_tab",))
 
 
 # ---------------------------------------------------------------- reading
