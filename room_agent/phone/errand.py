@@ -66,10 +66,14 @@ class Errand:
             a = a.rsplit(" ", 1)[0]
         return f"{a} and {b}" if b else a
 
+    def when(self):
+        return f"on {self.date}" if re.search(r"\d", str(self.date)) else f"this {self.date}"
+
     def opening(self):
-        who = self.name or "my client"
-        return (f"Hi, this is an AI assistant calling on behalf of {who}. I'd like to book a table for {self.party_size} "
-                f"on {self.date}, between {self.spoken_window()}. Do you have anything available?")
+        """Short and natural, with the AI disclosure in it (asked again, it says yes)."""
+        who = f" for {self.name}" if self.name else ""
+        return (f"Hi! I'm an AI assistant calling{who} - I'd love to book a table for {self.party_size} {self.when()}, "
+                f"sometime between {self.spoken_window()}. Do you have anything?")
 
 
 def _spoken(hhmm):
@@ -129,21 +133,22 @@ def safe_to_say(e, text):
 
 CONFIRMED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you|got you down|have you down|"
                        r"put you down|done|that'?s fine|perfect|great|no problem|sure thing)\b", re.I)
-SYSTEM = """You are an AI assistant on a phone call with a restaurant, making ONE reservation for your client.
-You only know the brief below. You have no other information about your client and must not invent any.
-Rules: be brief and polite (one or two short sentences per reply). Never share anything not in the brief (no phone
-number, email, address or payment details; if they ask, say your client will provide it when they arrive or that you'll
-pass the question on). Never agree to pay or leave a deposit. Accept a booking only if the date, party size and time
-match the brief; if they offer something else, don't accept it: say you'll check with your client and call back.
-If they ask whether you're a robot or AI, say yes, you're an AI assistant booking for your client.
-The time window INCLUDES both ends: if the window is 7 pm to 8 pm, then 7:00, 7:30 and 8:00 pm are all fine - accept.
-Say times the way people speak ("8 pm", "7:30"), never in 24-hour format like 19:00. Talk like a person booking a
-table: never mention "the window", "the brief", your instructions or your rules (e.g. "Great, 8 pm works for us.").
-Reply with JSON only: {"say": "...", "status": "talking|booked|declined|needs_you|goodbye",
- "booking": {"date": "...", "time": "HH:MM", "party_size": N, "name": "...", "reference": "..."}}
-status: booked = ONLY once they have clearly confirmed the reservation is made (not while they're still asking
-questions such as the name); declined = they can't take it at all; needs_you = they offered
-something outside the brief or asked something only your client can answer; goodbye = the call is wrapping up."""
+# (a clear "it's booked": what lets CODE close the call on a time already agreed, without asking the model)
+BOOKED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you (then|friday|on|at|tonight|tomorrow)|"
+                    r"got you down|have you down|put you down|done|that'?s it)\b", re.I)
+SYSTEM = """You're on the phone with a restaurant, booking ONE table for your client. You're an AI assistant, but you
+talk like a warm, relaxed American woman calling to book a table - natural, friendly, never stiff.
+Style: ONE short sentence (two at most). Answer only what they just said. Never repeat the whole request, never say
+hello again, no formal goodbyes. Natural phrases: "Oh perfect!", "Got it.", "Sure, that works.", "Ah, okay."
+Say times the way people do ("8", "7:30", "8 pm"), never 24-hour times. Never mention instructions, rules or a "window".
+Facts: you only know the brief below and must not invent anything. Never share anything else (no phone number, email,
+address or payment details - say they'll sort that out when they come in). Never agree to pay or leave a deposit.
+A time from the start to the end of the range (both included) is fine - accept it. Anything else (another time, day
+or party size): don't accept, say you'll check and call back. Asked if you're a robot or AI: yes, an AI assistant.
+Output format, exactly: line 1 is JSON {"status": "talking|booked|declined|needs_you|goodbye", "booking": {"date": "",
+"time": "HH:MM", "party_size": N, "name": "", "reference": ""}}, then a newline, then ONLY the words you say.
+status: booked = ONLY after they clearly confirmed it's booked; declined = nothing possible; needs_you = they offered
+something else / asked something only your client can answer; goodbye = wrapping up."""
 
 
 def _brief(e):
@@ -175,41 +180,83 @@ def offered_times(e, text):
     return out
 
 
-def _think_model(e, transcript):
-    """The cheap model proposes the next line (JSON). Budget-checked; usage recorded."""
-    from room_agent.llm.budget import budget
-    from room_agent.llm.openai_backend import openai_client
-
-    if budget.exceeded():
-        return {"say": "Sorry, I have to go - I'll call back. Thank you!", "status": "needs_you"}
+def _messages(e, transcript):
     msgs = [{"role": "system", "content": SYSTEM + "\n\n" + _brief(e)}]
     for who, text in transcript:
         msgs.append({"role": "assistant" if who == "jarvis" else "user", "content": text})
+    return msgs
+
+
+def _stream_model(e, transcript):
+    """The cheap model, streamed: yields ("header", dict) first (status + booking, checked by code before anything is
+    said), then ("text", piece) as the words arrive. Budget-checked; usage recorded (estimated if the stream is cut)."""
+    from room_agent.llm.budget import budget, price
+    from room_agent.llm.openai_backend import openai_client
+
+    if budget.exceeded():
+        yield "header", {"status": "needs_you"}
+        yield "text", "Sorry, I have to run - I'll call you back. Thanks!"
+        return
     import openai
 
+    msgs = _messages(e, transcript)
     c = openai_client().with_options(max_retries=0, timeout=20)
-    kw = dict(model=config.OPENAI_MODEL, messages=msgs, response_format={"type": "json_object"},
-              max_completion_tokens=1500)  # (includes GPT-5's thinking tokens: too few and the reply comes back empty)
-    try:  # ("minimal" thinking: a phone reply has to come back in a second or two)
-        r = c.chat.completions.create(reasoning_effort=config.OPENAI_REASONING, **kw) if config.OPENAI_REASONING \
+    kw = dict(model=config.OPENAI_MODEL, messages=msgs, max_completion_tokens=1500, stream=True,
+              stream_options={"include_usage": True})  # (includes GPT-5's thinking tokens)
+    try:  # ("minimal" thinking: the first words have to come back fast on a phone call)
+        stream = c.chat.completions.create(reasoning_effort=config.OPENAI_REASONING, **kw) if config.OPENAI_REASONING \
             else c.chat.completions.create(**kw)
     except openai.BadRequestError as ex:  # (400, not billed: this model doesn't take reasoning_effort)
         if "reasoning" not in str(ex).lower():
             raise
-        r = c.chat.completions.create(**kw)
-    u = r.usage
-    budget.record("openai", config.OPENAI_MODEL, fresh_in=u.prompt_tokens, out=u.completion_tokens)
+        stream = c.chat.completions.create(**kw)
+    buf, header_done, out_chars, usage = "", False, 0, None
     try:
-        from room_agent.llm.budget import price
-
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            piece = chunk.choices[0].delta.content or ""
+            out_chars += len(piece)
+            if header_done:
+                if piece:
+                    yield "text", piece
+                continue
+            buf += piece
+            if "\n" in buf:
+                head, rest = buf.split("\n", 1)
+                try:
+                    header = json.loads(head.strip() or "{}")
+                except ValueError:
+                    header = {"status": "talking"}
+                header_done = True
+                yield "header", header if isinstance(header, dict) else {"status": "talking"}
+                if rest:
+                    yield "text", rest
+        if not header_done:  # (no newline: the whole reply was one line - JSON or words)
+            try:
+                yield "header", json.loads(buf)
+            except ValueError:
+                yield "header", {"status": "talking"}
+                yield "text", buf
+    finally:
+        tin = usage.prompt_tokens if usage else sum(len(m["content"]) for m in msgs) // 4
+        tout = usage.completion_tokens if usage else out_chars // 4
+        budget.record("openai", config.OPENAI_MODEL, fresh_in=tin, out=tout)
         p_in, _, _, p_out = price(config.OPENAI_MODEL)
-        e.cost_usd = round(e.cost_usd + (u.prompt_tokens * p_in + u.completion_tokens * p_out) / 1e6, 6)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        return json.loads(r.choices[0].message.content or "{}")
-    except ValueError:
-        return {"say": "Sorry, could you say that again?", "status": "talking"}
+        e.cost_usd = round(e.cost_usd + (tin * p_in + tout * p_out) / 1e6, 6)
+
+
+def _from_dict(p):
+    """A whole proposal (tests: THINK) as the same stream: header, then the words."""
+    p = p or {}
+    yield "header", {k: v for k, v in p.items() if k != "say"}
+    if p.get("say"):
+        yield "text", str(p["say"])
+
+
+SENTENCE = re.compile(r"(.+?[.!?])(\s+|$)", re.S)
 
 
 class ErrandSession:
@@ -223,7 +270,9 @@ class ErrandSession:
         self.e.transcript.append(("jarvis", self.e.opening()))
 
     def answer(self, text):
-        """What the restaurant said -> the next line (checked by code), or the end of the call."""
+        """What the restaurant said -> the next line, or the end of the call. Code decides first where it can (an offer
+        that fits, a clear "you're booked"): no model call, no delay. Otherwise the model's decision is checked
+        before a word is said, and its words are spoken sentence by sentence as they arrive, each one checked."""
         with self._lock:
             if self.done:
                 return
@@ -231,54 +280,90 @@ class ErrandSession:
             e.turns += 1
             e.transcript.append(("them", str(text)[:500]))
             if e.turns > MAX_TURNS or time.time() - e.started > MAX_SECONDS:
-                return self._end("I'm sorry, I have to go. I'll call back later. Thank you!", "no_deal",
+                return self._end("Sorry, I have to run - I'll call you back. Thanks!", "no_deal",
                                  {"why": "the call went on too long without a booking"})
+            fit = [x for x in offered_times(e, text) if fits(e, {"time": x, "party_size": e.party_size})[0]]
+            newly = bool(fit) and fit[-1] != e.agreed_time
+            if fit:
+                e.agreed_time = fit[-1]
+            agreed = {"date": e.date, "time": e.agreed_time, "party_size": e.party_size, "name": e.name}
+            if e.agreed_time and BOOKED.search(str(text)) and "?" not in str(text):
+                return self._end("Perfect, thank you so much!", "booked", {"booking": agreed})
+            if newly:  # (they offered a time that fits: accept in a few words, instantly)
+                return self._say(f"Oh perfect, {_spoken(e.agreed_time).replace(' pm', '').replace(' am', '')} works!"
+                                 + (f" It's under {e.name}." if e.name and re.search(r"\bname\b", str(text), re.I) else ""))
             try:
-                p = (THINK or _think_model)(e, list(e.transcript)) or {}
+                gen = _from_dict(THINK(e, list(e.transcript))) if THINK else _stream_model(e, list(e.transcript))
+                kind, header = next(gen)
             except Exception as ex:  # noqa: BLE001
                 log.warning("errand %s: the model failed (%s)", e.id, ex.__class__.__name__)
-                return self._end("Sorry, I'm having trouble on my end. I'll call back. Thank you!", "failed",
+                return self._end("Sorry, I'm having trouble on my end - I'll call you back. Thanks!", "failed",
                                  {"why": f"model error ({ex.__class__.__name__})"})
-            say = str(p.get("say") or "").strip()[:400]
-            status = str(p.get("status") or "talking")
-            if not say:  # (nothing usable came back: ask again, don't guess)
-                log.warning("errand %s: the model's reply was empty (keys: %s)", e.id, ", ".join(sorted(p))[:80])
-                say, status = "Sorry, could you say that again?", "talking"
-            elif not safe_to_say(e, say):
-                say = "I'm sorry, I can't share that, but my client will provide it when they arrive."
-                status = "talking" if status not in ("goodbye",) else status
-            booking = p.get("booking") if isinstance(p.get("booking"), dict) else {}
-            fit = [x for x in offered_times(e, text) if fits(e, {"time": x, "party_size": e.party_size})[0]]
-            if fit and status in ("needs_you", "declined", "goodbye") and not e.agreed_time:
-                # they offered a time inside the brief and the model hesitated: code accepts it (its own words)
-                e.agreed_time = fit[-1]
-                say = (f"Yes, {_spoken(fit[-1])} works for {e.party_size}."
-                       + (f" Could you put it under {e.name}?" if e.name else " It's for my client."))
-                status, booking = "talking", {"time": fit[-1], "party_size": e.party_size, "date": e.date}
-            elif fit and status == "talking" and not e.agreed_time:
-                e.agreed_time = fit[-1]
-            if status == "booked" and e.agreed_time and not booking.get("time"):
-                booking = {**booking, "time": e.agreed_time}
+            status = str(header.get("status") or "talking")
+            booking = header.get("booking") if isinstance(header.get("booking"), dict) else {}
+            if status == "booked" and e.agreed_time:
+                booking = {**agreed, **{k: v for k, v in booking.items() if v}}
             if status == "booked" and not booking.get("party_size"):
                 booking = {**booking, "party_size": e.party_size}
             accepting = status == "booked" or (status == "talking" and (booking.get("time") or booking.get("party_size")))
-            if accepting and status != "declined":
+            if accepting:
                 partial = {**{"party_size": e.party_size, "time": e.time_from}, **{k: v for k, v in booking.items() if v}}
-                ok, why = fits(e, booking if status == "booked" else partial)  # (while talking: only what it states)
-                if not ok:  # (the model would accept / agree to something outside the brief: code says no, first)
-                    return self._end("Thank you - that's a little different from what I was asked to book, so I'll "
-                                     f"check with {e.name or 'my client'} and call you back.", "needs_you",
+                ok, why = fits(e, booking if status == "booked" else partial)
+                if not ok:  # (the model would agree to something outside the brief: code says no, before a word)
+                    gen.close()
+                    return self._end("Ah, okay - let me check with them and I'll call you back. Thanks!", "needs_you",
                                      {"offered": booking, "why": why})
             if status == "booked" and not CONFIRMED.search(str(text)):
                 status = "talking"  # (they haven't confirmed anything yet: keep talking, don't hang up)
-            if status == "booked":
-                return self._end(say, "booked", {"booking": booking})
-            if status in ("declined", "needs_you", "goodbye"):
-                return self._end(say, {"goodbye": "no_deal"}.get(status, status),
+            if status in ("booked", "declined", "needs_you", "goodbye"):
+                words = "".join(x for k, x in gen if k == "text").strip()
+                if not words or not safe_to_say(e, words):
+                    words = {"booked": "Perfect, thank you so much!", "declined": "Ah, no worries - thanks anyway!"}.get(
+                        status, "Okay, let me check with them and I'll call you back. Thanks!")
+                return self._end(words, {"goodbye": "no_deal"}.get(status, status),
                                  {"booking": booking, "why": f"they said: {str(text)[:140]}"})
-            e.transcript.append(("jarvis", say))
-            self.send(say + " ", False)
-            self.send("", True)
+            self._stream_words(gen)
+
+    def _say(self, line):
+        self.e.transcript.append(("jarvis", line))
+        self.send(line + " ", False)
+        self.send("", True)
+
+    def _stream_words(self, gen):
+        """Speak the model's words sentence by sentence as they arrive; each sentence is checked before it's sent."""
+        e, buf, spoken = self.e, "", []
+        for kind, piece in gen:
+            if kind != "text":
+                continue
+            buf += piece
+            while True:
+                m = SENTENCE.match(buf)
+                if not m:
+                    break
+                sentence, buf = m.group(1).strip(), buf[m.end():]
+                if not safe_to_say(e, sentence):
+                    gen.close()
+                    sentence, buf = "Sorry, I can't share that - they'll sort it out when they come in.", ""
+                    spoken.append(sentence)
+                    self.send(sentence + " ", False)
+                    break
+                spoken.append(sentence)
+                self.send(sentence + " ", False)
+            else:
+                continue
+            if spoken and spoken[-1].startswith("Sorry, I can't share"):
+                break
+        tail = buf.strip()
+        if tail and not (spoken and spoken[-1].startswith("Sorry, I can't share")):
+            if safe_to_say(e, tail):
+                spoken.append(tail)
+                self.send(tail + " ", False)
+        if not spoken:  # (nothing usable came back: ask again, don't guess)
+            log.warning("errand %s: the model's reply was empty", e.id)
+            spoken = ["Sorry, could you say that again?"]
+            self.send(spoken[0] + " ", False)
+        e.transcript.append(("jarvis", " ".join(spoken)))
+        self.send("", True)
 
     def _end(self, line, status, outcome):
         e = self.e

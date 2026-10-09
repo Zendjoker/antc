@@ -120,13 +120,19 @@ async def voice(request):
     reason = request.query.get("reason", "")
     greeting = (PENDING.get(reason) or {}).get("greeting") or GREETINGS[int(time.time()) % len(GREETINGS)]
     voice_attrs = ""
-    if config.PHONE_TTS_PROVIDER:
-        voice_attrs += f" ttsProvider={quoteattr(config.PHONE_TTS_PROVIDER)}"
-    if config.PHONE_VOICE:
-        voice_attrs += f" voice={quoteattr(config.PHONE_VOICE)}"
+    errand_call = ((PENDING.get(reason) or {}).get("item") or {}).get("kind") == "errand"
+    provider = config.ERRAND_TTS_PROVIDER if errand_call else config.PHONE_TTS_PROVIDER
+    voice_id = config.ERRAND_VOICE if errand_call else config.PHONE_VOICE
+    if provider:
+        voice_attrs += f" ttsProvider={quoteattr(provider)}"
+    if voice_id:
+        voice_attrs += f" voice={quoteattr(voice_id)}"
+    if errand_call:  # (only real speech interrupts it, not its own voice echoing back or background noise)
+        voice_attrs += (' interruptSensitivity="low" welcomeGreetingInterruptible="none" ignoreBackchannel="true"')
     relay = _public(request, ws=True).split("/twilio/")[0] + "/twilio/relay"
+    interrupt = "speech" if errand_call else "true"
     return _twiml(f"<Connect><ConversationRelay url={quoteattr(relay)} welcomeGreeting={quoteattr(greeting)}"
-                  f' interruptible="true"{voice_attrs}>'
+                  f' interruptible="{interrupt}"{voice_attrs}>'
                   f'<Parameter name="reason" value={quoteattr(reason)}/></ConversationRelay></Connect>')
 
 
