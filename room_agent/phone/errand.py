@@ -54,6 +54,7 @@ class Errand:
     ended: float = 0.0
     turns: int = 0
     cost_usd: float = 0.0
+    agreed_time: str = ""     # a time they offered that fits the brief, accepted by code
 
     def window(self):
         return f"{self.time_from}" + (f" to {self.time_to}" if self.time_to and self.time_to != self.time_from else "")
@@ -135,6 +136,9 @@ number, email, address or payment details; if they ask, say your client will pro
 pass the question on). Never agree to pay or leave a deposit. Accept a booking only if the date, party size and time
 match the brief; if they offer something else, don't accept it: say you'll check with your client and call back.
 If they ask whether you're a robot or AI, say yes, you're an AI assistant booking for your client.
+The time window INCLUDES both ends: if the window is 7 pm to 8 pm, then 7:00, 7:30 and 8:00 pm are all fine - accept.
+Say times the way people speak ("8 pm", "7:30"), never in 24-hour format like 19:00. Talk like a person booking a
+table: never mention "the window", "the brief", your instructions or your rules (e.g. "Great, 8 pm works for us.").
 Reply with JSON only: {"say": "...", "status": "talking|booked|declined|needs_you|goodbye",
  "booking": {"date": "...", "time": "HH:MM", "party_size": N, "name": "...", "reference": "..."}}
 status: booked = ONLY once they have clearly confirmed the reservation is made (not while they're still asking
@@ -143,9 +147,32 @@ something outside the brief or asked something only your client can answer; good
 
 
 def _brief(e):
-    return (f"Brief: restaurant {e.business}; party of {e.party_size}; date {e.date}; time between {e.window()}; "
+    return (f"Brief: restaurant {e.business}; party of {e.party_size}; date {e.date}; any time from "
+            f"{_spoken(e.time_from)} to {_spoken(e.time_to or e.time_from)}, both included ({e.window()} in 24h); "
             f"booking name {e.name or '(not given: say it is for your client)'}"
             + (f"; notes: {e.notes}" if e.notes else ""))
+
+
+TIME_SAID = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:(a\.?m\.?|p\.?m\.?)|o'?clock)", re.I)
+
+
+def offered_times(e, text):
+    """Times the restaurant offered ("8PM", "7:30 pm", "8 o'clock"), as HH:MM; an hour without am/pm is read as
+    evening when the brief is in the evening (a dinner booking)."""
+    out = []
+    evening = (_minutes(e.time_from) or 0) >= 12 * 60
+    for m in TIME_SAID.finditer(text or ""):
+        if re.search(r"\b(can'?t|cannot|not|no|don'?t|isn'?t|unavailable|booked up|full)\b[^.,;]{0,15}$",
+                     (text or "")[max(0, m.start() - 25):m.start()], re.I):
+            continue  # ("we can't do 7 PM" isn't an offer of 7 PM)
+        h, mi, ap = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower().replace(".", "")
+        if ap == "pm" and h < 12 or (not ap and evening and h < 12):
+            h += 12
+        if ap == "am" and h == 12:
+            h = 0
+        if 0 <= h < 24 and 0 <= mi < 60:
+            out.append(f"{h:02d}:{mi:02d}")
+    return out
 
 
 def _think_model(e, transcript):
@@ -221,6 +248,19 @@ class ErrandSession:
                 say = "I'm sorry, I can't share that, but my client will provide it when they arrive."
                 status = "talking" if status not in ("goodbye",) else status
             booking = p.get("booking") if isinstance(p.get("booking"), dict) else {}
+            fit = [x for x in offered_times(e, text) if fits(e, {"time": x, "party_size": e.party_size})[0]]
+            if fit and status in ("needs_you", "declined", "goodbye") and not e.agreed_time:
+                # they offered a time inside the brief and the model hesitated: code accepts it (its own words)
+                e.agreed_time = fit[-1]
+                say = (f"Yes, {_spoken(fit[-1])} works for {e.party_size}."
+                       + (f" Could you put it under {e.name}?" if e.name else " It's for my client."))
+                status, booking = "talking", {"time": fit[-1], "party_size": e.party_size, "date": e.date}
+            elif fit and status == "talking" and not e.agreed_time:
+                e.agreed_time = fit[-1]
+            if status == "booked" and e.agreed_time and not booking.get("time"):
+                booking = {**booking, "time": e.agreed_time}
+            if status == "booked" and not booking.get("party_size"):
+                booking = {**booking, "party_size": e.party_size}
             accepting = status == "booked" or (status == "talking" and (booking.get("time") or booking.get("party_size")))
             if accepting and status != "declined":
                 partial = {**{"party_size": e.party_size, "time": e.time_from}, **{k: v for k, v in booking.items() if v}}
@@ -235,7 +275,7 @@ class ErrandSession:
                 return self._end(say, "booked", {"booking": booking})
             if status in ("declined", "needs_you", "goodbye"):
                 return self._end(say, {"goodbye": "no_deal"}.get(status, status),
-                                 {"booking": p.get("booking"), "why": status})
+                                 {"booking": booking, "why": f"they said: {str(text)[:140]}"})
             e.transcript.append(("jarvis", say))
             self.send(say + " ", False)
             self.send("", True)

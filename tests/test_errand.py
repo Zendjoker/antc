@@ -172,6 +172,16 @@ twiml, said, ended = run_errand(e, ["7:30 works. What name should I put it under
 t.check("'booked' is accepted only after THEY confirm (a question about the name isn't a confirmation)",
         said[0] == "Under Adam, please." and len(said) == 2 and e.status == "booked", (said, e.status))
 
+t.check("offered times are read by code: 'can't 7PM, but we can do 8PM' -> 20:00 offered, 19:00 not",
+        errand.offered_times(brief(), "We can't 7PM, but we can do a 8PM.") == ["20:00"])
+script({"say": "My client asked between 19:00 and 20:00; I'll check and call back.", "status": "needs_you"},
+       {"say": "Thank you!", "status": "booked", "booking": {"party_size": 4}})
+e = brief()
+twiml, said, ended = run_errand(e, ["We can't do 7PM, but we can do 8PM. Does that sound good?", "Great, you're booked."])
+t.check("they offer 8 pm (the window's end) and the model hesitates: code accepts it in plain words, then it's booked "
+        "at 20:00", said[0].startswith("Yes, 8 pm works for 4") and e.status == "booked"
+        and e.outcome["booking"]["time"] == "20:00", (said, e.status, e.outcome))
+
 script(*[{"say": "Could you repeat that?", "status": "talking"}] * 30)
 errand.MAX_TURNS = 3
 e = brief()
