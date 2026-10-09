@@ -41,7 +41,8 @@ class FakeTwilio:
         raise AssertionError("an errand must never change the number's settings")
 
 
-errand.CLOSE_WAIT_S = 0.3  # (it waits for their goodbye before hanging up; short in tests)
+errand.CLOSE_WAIT_S = 0.05  # (it waits for their goodbye before hanging up; short in tests)
+errand.WORDS_PER_S = 1000  # (lines "finish playing" instantly in tests)
 TW = FakeTwilio()
 server.twilio = lambda: TW
 server.start()
@@ -98,11 +99,14 @@ async def call(reason, prompts):
                     pass
                 if ended:
                     break
-            try:
-                msg = await asyncio.wait_for(ws.receive(), 2)
-                ended = ended or msg.type != aiohttp.WSMsgType.TEXT or json.loads(msg.data).get("type") == "end"
-            except asyncio.TimeoutError:
-                pass
+            deadline = time.time() + 5  # (keep listening: a goodbye line may come before the call ends)
+            while not ended and time.time() < deadline:
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), max(0.1, deadline - time.time()))
+                except asyncio.TimeoutError:
+                    break
+                if msg.type != aiohttp.WSMsgType.TEXT or json.loads(msg.data).get("type") == "end":
+                    ended = True
     return twiml, said, ended
 
 
@@ -150,8 +154,8 @@ script({"say": "Sure, 9pm works, see you then!", "status": "booked",
 e = brief()
 twiml, said, ended = run_errand(e, ["We can do 7 tomorrow?", "Okay, we only have 9pm on Friday, is that okay?"])
 t.check("the model tried to accept 9pm (outside 7-8): code refused, said it'll check with them, nothing booked",
-        e.status == "needs_you" and "check with Adam" in said[-1] and "9pm works" not in " ".join(said) and ended,
-        (e.status, said))
+        e.status == "needs_you" and "check with Adam" in said[-1] and "9pm works" not in " ".join(said) and ended
+        and "Friday" in said[0] and not e.agreed_time, (e.status, said))
 t.check("...they're told it needs their decision", "needs your decision" in SMS[-1] and "Nothing was booked" in SMS[-1],
         SMS[-2:])
 
@@ -214,6 +218,17 @@ twiml, said, ended = run_errand(e, ["We can do 8.", "Okay you're all set.", "Bye
 errand.CLOSE_WAIT_S = 0.3
 t.check("it doesn't hang up on them: after its closing line it answers their 'bye', then the call ends",
         e.status == "booked" and len(said) == 3 and "bye" in said[2].lower() and ended, (said, ended))
+t.check("...it waits for its closing line to be SPOKEN before the goodbye window starts (a long line, a long wait)",
+        errand.speak_time("Aw, okay, no problem at all! Let me check with Adam if 8:30 works, and I'll call you right "
+                          "back. Thank you so much for your help!") > 0.6)
+sent = []
+e = brief()
+s = errand.ErrandSession(e, lambda text, last: sent.append(text), hang_up=lambda: sent.append("<END>"))
+s._end("Perfect, thanks so much!", "booked", {"booking": {"time": "19:30", "party_size": 4}})
+time.sleep(2.5)
+words = [x.strip() for x in sent if x.strip()]
+t.check("no answer to its closing line: it still says a friendly bye, THEN hangs up (never silence)",
+        len(words) >= 3 and "bye" in words[-2].lower() and words[-1] == "<END>", words)
 
 
 def boom(e, tr):

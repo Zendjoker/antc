@@ -32,7 +32,13 @@ from room_agent import config
 log = logging.getLogger("room-agent")
 MAX_TURNS = 16
 MAX_SECONDS = 360
-CLOSE_WAIT_S = 6.0  # after its closing line it waits this long for their "bye" before hanging up (never cuts them off)
+CLOSE_WAIT_S = 6.0  # after its closing line is SPOKEN it waits this long for their "bye" (never cuts them off)
+WORDS_PER_S = 2.6   # how fast the phone voice speaks (to know when a line has finished playing)
+
+
+def speak_time(line):
+    """Roughly how long the phone voice takes to say `line` (seconds)."""
+    return 0.6 + len(str(line).split()) / WORDS_PER_S
 THINK = None  # tests: (errand, transcript) -> proposal dict; None = the cheap model (OPENAI_MODEL)
 ACTIVE = {}   # errand id -> Errand (in this process)
 _lock = threading.Lock()
@@ -152,6 +158,18 @@ BOOKED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you (
                     r"got you down|have you down|put you down|done|that'?s it)\b", re.I)
 REFERENCE = re.compile(r"\b(?:ref(?:erence)?|confirmation)(?:\s+(?:number|code|no\.?))?(?:\s+is)?\s*[:#]?\s*"
                        r"([A-Z]*\d[A-Z0-9-]{0,11})\b", re.I)
+DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def other_day(e, text):
+    """Did they name a day that isn't the one asked for ("tomorrow", "Saturday")? -> that day's words, or "" """
+    low, want = str(text or "").lower(), str(e.date or "").lower()
+    for d in DAYS + ("tomorrow", "tonight", "today", "next week", "weekend"):
+        if re.search(rf"\b{d}\b", low) and d not in want:
+            return d
+    return ""
+
+
 NOTHING_ELSE = re.compile(r"\b(no|nope|sorry|that'?s (all|it)|all we have|only|nothing (else)?|fully booked|"
                           r"booked up|unfortunately)\b", re.I)
 HOLD = re.compile(r"\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|moment|minute)|"
@@ -332,6 +350,16 @@ class ErrandSession:
             if HOLD.search(str(text)) and not offered_times(e, text):
                 return self._say(self._pick(["Sure, take your time!", "Of course, no rush!", "Yeah, no problem!"]))
             offered = offered_times(e, text)
+            wrong_day = other_day(e, text)
+            if wrong_day and not e.agreed_time:  # (another day is never accepted: ask about the day they want, once)
+                if not e.alt_asked:
+                    e.alt_asked += 1
+                    e.last_offer = offered[-1] if offered else ""
+                    return self._say(f"Ah, we're actually hoping for {e.date} - do you have anything then, sometime "
+                                     f"between {e.spoken_window()}?")
+                return self._end(f"Aw, okay, no problem at all! Let me check with {e.first()} and I'll call you right "
+                                 "back. Thank you so much for your help!", "needs_you",
+                                 {"why": f"they offered {wrong_day} instead of {e.date}"})
             fit = [x for x in offered if fits(e, {"time": x, "party_size": e.party_size})[0]]
             if not offered and e.alt_asked and e.last_offer and not e.agreed_time and NOTHING_ELSE.search(str(text)):
                 off = e.last_offer  # (asked for something closer, and they have nothing else)
@@ -407,12 +435,29 @@ class ErrandSession:
         return self._rng.choice(options)
 
     def _hang_up_now(self, line=""):
+        """Say `line` (a goodbye), let it be HEARD, then hang up."""
+        if self._hung:
+            return
         if line:
             self.e.transcript.append(("jarvis", line))
             self.send(line + " ", False)
             self.send("", True)
+            self.done = True
+            self._hung = True
+            threading.Timer(speak_time(line) + 0.5, self._finally_hang_up).start()
+            return
         self.done = True
-        if self.hang_up and not self._hung:
+        self._finally_hang_up()
+
+    def _no_reply_bye(self):
+        """They didn't answer its closing line: a friendly bye, not silence."""
+        if not self._hung:
+            self._hang_up_now(self._pick(["Okay, bye-bye!", "Alright, bye now!", "Okay, bye!"]))
+
+    def _finally_hang_up(self):
+        self.done = True
+        if self.hang_up and not getattr(self, "_ended_line", False):
+            self._ended_line = True
             self._hung = True
             try:
                 self.hang_up()
@@ -470,7 +515,7 @@ class ErrandSession:
         self.send(line + " ", False)
         self.send("", True)
         finish(e)
-        threading.Timer(CLOSE_WAIT_S, self._hang_up_now).start()
+        threading.Timer(speak_time(line) + CLOSE_WAIT_S, self._no_reply_bye).start()
 
     def closed(self):
         """The line dropped / they hung up before an outcome."""
