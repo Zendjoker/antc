@@ -19,5 +19,7 @@ Already done: Twilio is set up in `.env`, your number is verified, and `PHONE_TU
    - it says it's an AI assistant and has no tools or access to your data
    - it shares only the brief, never a phone number, email or payment details
    - it accepts only a booking inside your date, party size and time window; anything else is "I'll check and call back"
-4. The outcome is texted to you and saved in `errands.json`. Your calendar isn't changed.
-5. Calling real businesses isn't built yet: only your own number is ever called.
+4. The model (`ERRAND_MODEL`, default `gpt-5` at minimal thinking, ~1-2c a call) runs the conversation; code only
+   checks the hard limits above before each sentence is spoken. `ERRAND_MODEL=claude-sonnet-5-5` also works (slower).
+5. The outcome is texted to you and saved in `errands.json`. Your calendar isn't changed.
+6. Calling real businesses isn't built yet: only your own number is ever called.

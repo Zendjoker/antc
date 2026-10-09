@@ -288,6 +288,10 @@ ERRAND_TTS_PROVIDER = os.getenv("ERRAND_TTS_PROVIDER", "ElevenLabs").strip()  # 
 # sounds less flat. Alternatives: Sarah EXAVITQu4vr4xnSDxMaL, Rachel 21m00Tcm4TlvDq8ikWAM; or Google en-US-Chirp3-HD-Aoede
 ERRAND_VOICE = os.getenv("ERRAND_VOICE", "cgSgspJ2msm6clMCkdW9-flash_v2_5-1.0_0.45_0.8").strip()
 ERRAND_SPEECH_MODEL = os.getenv("ERRAND_SPEECH_MODEL", "nova-3-general").strip()  # Deepgram speech recognition
+# The model that runs an errand call's conversation (code only checks the hard limits). gpt-5 at "minimal" thinking:
+# first words in ~1s, much better judgment than gpt-5-mini (~2-5c a call). claude-* works too (Sonnet: ~2-3s, slower).
+ERRAND_MODEL = os.getenv("ERRAND_MODEL", "gpt-5").strip()
+ERRAND_REASONING = os.getenv("ERRAND_REASONING", "minimal").strip()  # OpenAI models only (blank = model default)
 ERRANDS_FILE = Path(os.getenv("ERRANDS_FILE", HERE / "errands.json"))  # errand calls (phone/errand.py): outcomes
 VIP_SENDERS = [s.strip().lower() for s in os.getenv("VIP_SENDERS", "").split(",") if s.strip()]  # emails worth a call
 SMS_DAILY_LIMIT = int(os.getenv("SMS_DAILY_LIMIT", "20"))  # texts to your phone per day (each one costs a little)

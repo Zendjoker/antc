@@ -1,8 +1,8 @@
 """Errand calls (phone/errand.py): Jarvis phones a restaurant for you in a restricted mode. Offline: the real phone
 server on a local port, a simulated Twilio (signed webhook + ConversationRelay WebSocket), a fake model.
 
-The fake model "says" whatever code asked for (so each test sees the DECISION code made), or plays scripted replies
-for the turns where the model decides itself.
+The model runs the conversation; a fake model plays scripted replies (status + booking + words), so each test sees
+what CODE does with them: the hard limits (bookings outside the brief, leaks, echo, goodbye, limits).
 
 Run:  .venv\\Scripts\\python -m tests.test_errand
 """
@@ -51,17 +51,19 @@ TW = FakeTwilio()
 server.twilio = lambda: TW
 server.start()
 time.sleep(0.5)
-QUEUE = []  # the model's own proposals for turns where code made no decision
+QUEUE = []  # the model's replies, in order
+SEEN = []   # what the model was given each time: (transcript length, the note code added)
 
 
 def fake_think(e, transcript):
-    d = getattr(e, "_directive", "")
-    if d:  # (code decided: the fake "says" the decision, as one sentence)
-        return {"status": "talking", "say": d.replace(". ", "; ").rstrip(".") + "."}
+    SEEN.append((len(transcript), getattr(e, "_note", "")))
     return QUEUE.pop(0) if QUEUE else {"status": "talking", "say": "Mm-hm, got it."}
 
 
 errand.THINK = fake_think
+FINISHED = []  # errand ids, each time an outcome is texted + saved
+_finish = errand.finish
+errand.finish = lambda e: FINISHED.append(e.id) or _finish(e)
 
 
 def brief(**k):
@@ -128,34 +130,48 @@ def run_errand(e, prompts):
 
 
 # =============================================================================================== 1. the rules
-print("\n1. Rules enforced by code")
+print("\n1. Hard limits enforced by code")
 e = brief()
 t.check("a booking that fits the brief is accepted", errand.fits(e, {"time": "19:30", "party_size": 4, "date": "Friday"})[0])
 t.check("outside the time range -> not accepted", not errand.fits(e, {"time": "21:00", "party_size": 4})[0])
 t.check("both ends of the range count (8:00 for 7-8)", errand.fits(e, {"time": "20:00", "party_size": 4})[0])
 t.check("a different party size / another day -> not accepted", not errand.fits(e, {"time": "19:30", "party_size": 6})[0]
-        and not errand.fits(e, {"time": "19:30", "party_size": 4, "date": "Saturday"})[0])
+        and not errand.fits(e, {"time": "19:30", "party_size": 4, "date": "Saturday"})[0]
+        and not errand.fits(e, {"time": "19:30", "party_size": 4, "date": "tomorrow"})[0])
 for bad in ("Sure, his number is 415 555 0199.", "You can email adam@example.com", "My card number is 4111 1111 1111 1111",
             "We can pay the deposit now"):
     t.check(f"never said: {bad[:40]!r}", not errand.safe_to_say(e, bad))
-t.check("offered times: 'can't 7PM, but we can do 8PM' -> 20:00; 'we can do 7:30' -> 19:30; 'a table for 8' -> none",
+t.check("times as said / transcribed: 'can't 7PM, but 8PM' -> 20:00; '830', 'eight thirty', 'half past seven'; "
+        "'a table for 8 people' and a phone number aren't times",
         errand.offered_times(e, "We can't 7PM, but we can do a 8PM.") == ["20:00"]
-        and errand.offered_times(e, "Okay, we can do 7:30.") == ["19:30"]
-        and errand.offered_times(e, "We have a table for 8 people") == [])
-t.check("spoken times: '830', '8 30', 'eight thirty', 'half past seven', 'quarter to nine' -> times; a phone number "
-        "isn't", errand.offered_times(e, "I have 830. Do you think it's good?") == ["20:30"]
-        and errand.offered_times(e, "we can do 8 30") == ["20:30"] and errand.offered_times(e, "how about eight thirty") == ["20:30"]
+        and errand.offered_times(e, "I have 830. Do you think it's good?") == ["20:30"]
+        and errand.offered_times(e, "how about eight thirty") == ["20:30"]
         and errand.offered_times(e, "half past seven works") == ["19:30"]
-        and errand.offered_times(e, "quarter to nine") == ["20:45"] and errand.offered_times(e, "call 415 555 0199") == [],
-        [errand.offered_times(e, x) for x in ("I have 830.", "we can do 8 30", "how about eight thirty", "half past seven",
-                                             "quarter to nine", "call 415 555 0199")])
-t.check("another day is noticed ('tomorrow', 'Saturday')", errand.other_day(e, "We can do 7 tomorrow")
-        and not errand.other_day(e, "Friday at 7 is fine"))
-t.check("'calling for my boss, Adam Azzouz' in the plain fallback opening",
+        and errand.offered_times(e, "We have a table for 8 people") == []
+        and errand.offered_times(e, "call 415 555 0199") == [])
+for ok_line in ("Oh, 7:30 is perfect!", "Perfect, 7:30 for 4 people under Adam.", "Great, see you Friday at 8!",
+                "Hmm, 9 is a bit late for us - anything closer to 8?", "Great, I'll check with Adam if 9 works.",
+                "Perfect, a table for 4 then."):
+    t.check(f"its words may say: {ok_line!r}", not errand.agrees_outside(e, ok_line), errand.agrees_outside(e, ok_line))
+for bad_line in ("Great, 9 works!", "Perfect, we'll take 8:30.", "Sounds good, see you Saturday!",
+                 "Perfect, eight thirty it is."):
+    t.check(f"its words may NOT agree to: {bad_line!r}", errand.agrees_outside(e, bad_line))
+t.check("'calling for my boss, Adam Azzouz' in the plain opening (used only if the model can't be reached)",
         "calling for my boss, Adam Azzouz" in brief(name="Adam Azzouz", relation="boss").opening())
+t.check("the model is given the brief and who it's calling for; no script ('Right now' directives are gone)",
+        "your boss: boss, Adam Azzouz" in errand._brief(brief(name="Adam Azzouz", relation="boss"))
+        and "Right now" not in errand.SYSTEM and "accepting" in errand.SYSTEM)
 
 # =============================================================================================== 2. calls
 print("\n2. Calls through the real phone server (simulated Twilio)")
+SMS.clear()
+QUEUE[:] = [
+    {"status": "talking", "say": "Hi! I'm calling for my boss, Adam Azzouz - I'm an AI assistant. Any chance of a table "
+                                 "for 4 this Friday, around 7 or 8?"},
+    {"status": "accepting", "booking": {"time": "19:30", "party_size": 4, "date": "Friday"}, "say": "Oh, 7:30 is perfect!"},
+    {"status": "booked", "booking": {"time": "19:30", "party_size": 4, "date": "Friday", "name": "Adam Azzouz"},
+     "say": "Perfect, 7:30 for 4 under Adam Azzouz. Thank you so much!"},
+    {"status": "goodbye", "say": "Bye now!"}]
 e = brief(name="Adam Azzouz", relation="boss")
 twiml, said, ended = run_errand(e, ["Luigi's, hi! How are you doing?", "We can do 7:30.", "Great, you're booked for 7:30.",
                                     "Okay, bye!"])
@@ -166,65 +182,92 @@ t.check("no scripted greeting: it waits for the restaurant to answer (no welcome
         and 'voice="cgSgspJ2msm6clMCkdW9-flash_v2_5-1.0_0.45_0.8"' in twiml and "Azzouz" in twiml
         and 'speechModel="nova-3-general"' in twiml
         and 'interruptible="speech"' in twiml and 'interruptSensitivity="low"' in twiml, twiml)
-t.check("its first words answer how they picked up, then who it's calling for and why, and that it's an AI",
-        "react naturally" in said[0] and "your boss, Adam Azzouz" in said[0] and "AI" in said[0] and "Friday" in said[0],
-        said[0])
-t.check("an offer inside the brief (7:30): code accepts it (the model words it)", "7:30" in said[1]
-        and "works perfectly" in said[1], said[1])
-t.check("their confirmation: booked, repeated back; their 'bye' gets a goodbye; then the call ends",
-        e.status == "booked" and e.outcome["booking"]["time"] == "19:30" and "repeat it back" in said[2]
-        and "goodbye" in said[3].lower() and ended, (e.status, said, ended))
-t.check("the outcome is texted to them (calendar NOT changed) and saved", SMS and "Booked at Luigi's" in SMS[-1]
-        and json.loads(config.ERRANDS_FILE.read_text())[-1]["status"] == "booked", SMS[-1:])
+t.check("the model's words are what's said (it leads the conversation; its first reply may be 3 sentences)",
+        "Adam Azzouz" in said[0] and "7:30 is perfect" in said[1], said)
+t.check("booked when they confirmed (checked: inside the brief); their 'bye' gets a bye; then the call ends",
+        e.status == "booked" and e.outcome["booking"]["time"] == "19:30" and e.outcome["booking"]["party_size"] == 4
+        and "Bye now" in said[3] and ended and e.over, (e.status, e.outcome, said, ended))
+t.check("the outcome is texted once (calendar NOT changed) and saved", FINISHED.count(e.id) == 1 and "Booked at Luigi's" in SMS[-1]
+        and json.loads(config.ERRANDS_FILE.read_text())[-1]["status"] == "booked", SMS)
 
+SEEN.clear()
+QUEUE[:] = [{"status": "talking", "say": "Hi! Any chance of a table for 4 this Friday, around 7 or 8?"},
+            {"status": "accepting", "booking": {"time": "21:00", "party_size": 4}, "say": "Sure, 9 works great!"},
+            {"status": "talking", "say": "Hmm, 9 is a little late for us - anything closer to 8?"}]
 e = brief()
-twiml, said, ended = run_errand(e, ["Hello?", "We only have 9PM.", "No, sorry, that's all we have.", "Bye."])
-t.check("an offer outside the brief: first it asks for something closer (not a flat no)", "late" in said[1]
-        and "closer" in said[1] and "Don't accept" in said[1], said[1])
-t.check("...nothing else: it says it'll check with Adam, warmly; 'needs your decision'; nothing booked",
-        e.status == "needs_you" and "check with Adam" in said[2] and "Nothing was booked" in SMS[-1], (e.status, said))
+twiml, said, ended = run_errand(e, ["Hi, Luigi's.", "We only have 9PM."])
+t.check("the model agreeing to something outside the brief (9 pm): never said; it's told why and answers again",
+        "9 works" not in " ".join(said) and "closer to 8" in said[1] and "Code check" in SEEN[-1][1]
+        and "9 is outside 7 and 8 pm" in SEEN[-1][1], (said, SEEN[-1:]))
 
-QUEUE[:] = [{"status": "booked", "booking": {"time": "21:00", "party_size": 4}, "say": "Sure, 9 works, see you!"}]
+QUEUE[:] = [{"status": "talking", "say": "Hi! Any chance of a table for 4 this Friday?"},
+            {"status": "booked", "booking": {"time": "21:00", "party_size": 4}, "say": "Great, see you at 9!"},
+            {"status": "booked", "booking": {"time": "21:00", "party_size": 4}, "say": "Great, see you at 9!"}]
 e = brief()
-twiml, said, ended = run_errand(e, ["Hi, Luigi's.", "Yeah we can squeeze you in, you're booked."])
-t.check("the model wanting to accept something outside the brief: refused by code before a word of it is said",
-        e.status == "needs_you" and "9 works" not in " ".join(said) and "Don't accept" in " ".join(said), (e.status, said))
+twiml, said, ended = run_errand(e, ["Hi, Luigi's.", "Yeah we can squeeze you in at 9, you're booked."])
+t.check("...insisting twice: still never said; it'll check with Adam; 'needs your decision', nothing booked",
+        e.status == "needs_you" and "see you at 9" not in " ".join(said) and "check with Adam" in said[1],
+        (e.status, said))
 
-QUEUE[:] = [{"status": "talking", "say": "Sure, his number is 415 555 0199."}]
+QUEUE[:] = [{"status": "talking", "say": "Hi! A table for 4 this Friday?"},
+            {"status": "talking", "say": "Perfect, 7:30 for four please."},
+            {"status": "booked", "booking": {"party_size": 4}, "say": "Thank you so much!"}]
+e = brief()
+twiml, said, ended = run_errand(e, ["Hi, Luigi's.", "Sure, how about 7:30?", "You're all set, see you Friday."])
+t.check("'booked' without a time in the decision (seen live): the time they offered is used, if it fits",
+        e.status == "booked" and e.outcome["booking"]["time"] == "19:30", (e.status, e.outcome, said))
+
+QUEUE[:] = [{"status": "talking", "say": "Hi! Any chance of a table for 4 this Friday?"},
+            {"status": "talking", "say": "Great, 9 works for us! Thanks so much."}]
+e = brief()
+twiml, said, ended = run_errand(e, ["Hi, Luigi's.", "We have 9."])
+t.check("words that agree to 9 pm while the decision said 'talking': stopped before they're said",
+        "9 works" not in " ".join(said) and "check with Adam" in said[1], said)
+
+QUEUE[:] = [{"status": "talking", "say": "Hi!"}, {"status": "talking", "say": "Sure, his number is 415 555 0199."}]
 e = brief()
 twiml, said, ended = run_errand(e, ["Hi!", "Can I get a phone number for the booking?"])
 t.check("a leak in the model's words is blocked before it's spoken", "0199" not in " ".join(said)
         and "can't share" in said[1], said)
 
+QUEUE[:] = [{"status": "talking", "say": "Hi! A table for 4 this Friday, around 7 or 8?"},
+            {"status": "needs_you", "say": "Aw, okay - I'll check with Adam and call you right back. Thanks!"},
+            {"status": "accepting", "booking": {"time": "20:00", "party_size": 4}, "say": "Oh, 8 is perfect!"},
+            {"status": "booked", "booking": {"time": "20:00", "party_size": 4}, "say": "Amazing, thank you!"},
+            {"status": "goodbye", "say": "Bye!"}]
 e = brief()
-twiml, said, ended = run_errand(e, ["Hi", "We only have 9PM.", "Nope, that's it.", "Oh wait, actually we can do 8!",
-                                    "Great, you're all set.", "Bye!"])
-t.check("it never hangs up on them: after its closing words they kept talking, the conversation reopened, 8 was "
-        "accepted and booked", e.status == "booked" and e.outcome["booking"]["time"] == "20:00" and ended, (e.status, said))
+twiml, said, ended = run_errand(e, ["Hi", "Nope, only 9.", "Oh wait, actually we can do 8!", "Great, you're all set.",
+                                    "Bye!"])
+t.check("it never hangs up on them: after its wrap-up they kept talking, the conversation went on, 8 was booked; "
+        "one text, with the final outcome", e.status == "booked" and e.outcome["booking"]["time"] == "20:00" and ended
+        and FINISHED.count(e.id) == 1 and "Booked" in SMS[-1], (e.status, said, SMS[-2:]))
 
-e = brief(name="Adam Azzouz", relation="boss")
-twiml, said, ended = run_errand(e, ["Hi", "We have 8:30.", "Call your boss and let him know."])
-t.check("'call your boss and let him know' -> agrees warmly to check with Adam; it's the host, not its boss",
-        e.status == "needs_you" and "check with Adam" in " ".join(said[2:]), (said, e.status))
-
+QUEUE[:] = [{"status": "talking", "say": "Hi! A table for 4 this Friday?"},
+            {"status": "goodbye", "say": "Oh, sure!"},
+            {"status": "talking", "say": "It's under Adam."}]
 e = brief()
-twiml, said, ended = run_errand(e, ["Hi", "Hold on one second.", "Okay, 7:30 works.", "You're all set."])
-t.check("'hold on' -> patient; then 7:30 accepted and booked", "hold" in said[1] and e.status == "booked", (said, e.status))
+twiml, said, ended = run_errand(e, ["Hi", "Thanks - what name is it under?", "Got it."])
+t.check("the model wanting to end the call while they're asking something: the call goes on", len(said) >= 3 and "under Adam" in said[2], (e.status, said))
 
+QUEUE[:] = [{"status": "talking", "say": "Hi! A table for 4 this Friday?"},
+            {"status": "needs_you", "say": "Okay, I'll check with Adam and call you back. Thanks!"}]
 e = brief()
-twiml, said, ended = run_errand(e, ["Hi", "We can do 7 tomorrow.", "No, nothing on Friday, sorry."])
-t.check("another day is never accepted: it asks about Friday, then says it'll check", "Friday" in said[1]
-        and e.status == "needs_you" and not e.agreed_time, (said, e.status))
-
-e = brief()
-twiml, said, ended = run_errand(e, ["Hi", "We only have 9.", "No."])
-t.check("no answer to its closing words: it still says a friendly bye, then the call ends (never silence)",
+twiml, said, ended = run_errand(e, ["Hi", "We only have 9."])
+t.check("no answer to its wrap-up: it still says a friendly bye, then the call ends (never silence)",
         e.status == "needs_you" and "bye" in said[-1].lower() and ended, (said, ended))
 
+QUEUE[:] = [{"status": "wrong_number", "say": "Oh, I'm so sorry - wrong number! Have a good night."},
+            {"status": "goodbye", "say": "Bye!"}]
+e = brief()
+twiml, said, ended = run_errand(e, ["Hello? No, this is Mike's Garage.", "No worries, bye."])
+t.check("a wrong number: an apology, recorded as failed (wrong number); the call ends", e.status == "failed"
+        and "wrong number" in e.outcome["why"] and ended, (e.status, e.outcome, said))
+
 errand.MAX_TURNS = 3
+QUEUE.clear()
 e = brief()
 twiml, said, ended = run_errand(e, ["hello?"] * 5)
-errand.MAX_TURNS = 16
+errand.MAX_TURNS = 20
 t.check("a call going nowhere ends after MAX_TURNS, politely, nothing booked", e.status == "no_deal" and ended, e.status)
 
 
@@ -236,14 +279,15 @@ errand.THINK = boom
 e = brief()
 twiml, said, ended = run_errand(e, ["Hi, Luigi's!", "So what can I do for you?"])
 errand.THINK = fake_think
-t.check("the model failing: a plain fallback line instead (never silence); then 'failed' recorded",
+t.check("the model failing: a plain line instead (never silence); then 'failed' recorded",
         said[0] == e.opening() and e.status == "failed", (said, e.status))
 
 e = brief()
 errand.start(e)
 asyncio.run(call(TW.calls[-1]["url"].split("reason=")[1], ["Hello?"]))
 time.sleep(0.5)
-t.check("they hang up before an outcome: recorded (not left 'calling')", e.status in ("no_deal", "failed"), e.status)
+t.check("they hang up before an outcome: recorded (not left 'calling'); the call is over",
+        e.status in ("no_deal", "failed") and e.over, e.status)
 
 form = {"Direction": "outbound-api", "To": "+15550000000", "From": config.TWILIO_NUMBER}
 
@@ -259,25 +303,32 @@ t.check("a call to any other number is rejected by the server (only their own ph
         "<Reject/>" in asyncio.run(other_number()))
 
 # =============================================================================================== 3. nobody speaks
-print("\n3. If nobody speaks first, it starts the call itself")
+print("\n3. If nobody speaks first, the model starts the call itself")
 errand.OPEN_WAIT_S = 0.2
+SEEN.clear()
+QUEUE[:] = [{"status": "talking", "say": "Hi there! Is this Luigi's?"}]
 sent = []
 e = brief()
 s = errand.ErrandSession(e, lambda text, last: sent.append(text))
 time.sleep(0.6)
 errand.OPEN_WAIT_S = 60
-t.check("after a few seconds of silence: a hello and 'is this Luigi's?' (not the whole request)",
-        any("is Luigi's" in x or "this is Luigi's" in x for x in sent), sent)
+t.check("after a few seconds of silence the model is asked (nothing said yet) and its hello is spoken",
+        SEEN and SEEN[0][0] == 0 and "Is this Luigi's?" in " ".join(sent), (SEEN, sent))
+t.check("...it's told the call just connected", "nobody has spoken yet" in errand._messages(e, [])[-1]["content"])
 
 # =============================================================================================== 4. streaming
 print("\n4. The model's words are streamed sentence by sentence; its decision is checked before any word")
 from types import SimpleNamespace as NS  # noqa: E402
 
+import room_agent.llm.client as anthropic_mod  # noqa: E402
 import room_agent.llm.openai_backend as oai  # noqa: E402
+
+ASKED = []
 
 
 def fake_stream(*pieces):
     def create(**kw):
+        ASKED.append(kw)
         out = [NS(choices=[NS(delta=NS(content=p))], usage=None) for p in pieces]
         return iter(out + [NS(choices=[], usage=NS(prompt_tokens=300, completion_tokens=40))])
     client = NS(with_options=lambda **k: NS(chat=NS(completions=NS(create=create))))
@@ -287,14 +338,17 @@ def fake_stream(*pieces):
 errand.THINK = None
 sent = []
 e = brief()
+e.transcript[:] = [("jarvis", "Hi, is this Luigi's?"), ("them", "Yes."), ("jarvis", "A table for 4 this Friday?")]
 s = errand.ErrandSession(e, lambda text, last: sent.append((text, last)))
-s.opened = s.introduced = True
+s.opened = True
 fake_stream('{"status": "talking"}\n', "Got it, ", "four people. ", "Do you have ", "anything around 7?")
 s.answer("Hi, how many people?")
 words = [x for x, last in sent if x.strip()]
 t.check("header first, then the words go out sentence by sentence as they arrive",
         words == ["Got it, four people. ", "Do you have anything around 7? "] and sent[-1] == ("", True), sent)
-t.check("...usage recorded (the call's cost is tracked)", e.cost_usd > 0)
+t.check("...the errand model is used (ERRAND_MODEL, minimal thinking), and usage is recorded",
+        ASKED[-1]["model"] == config.ERRAND_MODEL == "gpt-5" and ASKED[-1].get("reasoning_effort") == "minimal"
+        and e.cost_usd > 0, (ASKED[-1]["model"], e.cost_usd))
 sent.clear()
 fake_stream('{"status": "talking"}\n', "Oh nice. ", "That sounds lovely. ", "I mean it, really. ", "Anyway, Friday?")
 s.answer("We just redid the patio!")
@@ -306,6 +360,13 @@ s.answer("Can I get a phone number?")
 words = " ".join(x for x, last in sent)
 t.check("a sentence that would leak a number is stopped mid-stream; nothing after it is said",
         "0123" not in words and "can't share" in words and "Anything else" not in words, words)
+sent.clear()
+fake_stream('{"status": "accepting", "booking": {"time": "21:00", "party_size": 4}}\n', "9 works, ", "thank you!")
+QUEUE[:] = []
+s.answer("We have 9.")
+words = " ".join(x for x, last in sent)
+t.check("a streamed decision to accept 9 pm: not a word of it is said (the model is asked again)",
+        "9 works" not in words, words)
 t.check("the decision is split off however the model lays it out (own line, same line, missing); never spoken",
         errand.split_header('{"status": "talking", "booking": {"time": "19:00"}} Sorry, 7 or 7:30?')[:2]
         == ({"status": "talking", "booking": {"time": "19:00"}}, "Sorry, 7 or 7:30?")
@@ -322,52 +383,49 @@ t.check("a decision on the same line as the words (seen on a live call) is NEVER
 t.check("...and a stray data fragment inside the words is removed", "{" not in errand._natural(
     'Sure {"status":"talking"} thing.') and "status" not in errand._natural('Sure "status": "talking", thing.'))
 
-print("\n5. Echo, holds, details")
+
+class FakeClaudeStream:
+    def __init__(self, pieces):
+        self.text_stream = iter(pieces)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get_final_message(self):
+        return NS(usage=NS(input_tokens=500, output_tokens=30))
+
+
+CLAUDE = []
+anthropic_mod.client = lambda: NS(messages=NS(stream=lambda **kw: CLAUDE.append(kw) or FakeClaudeStream(
+    ['{"status": "talking"}\n', "Sure, take ", "your time!"])))
+config.ERRAND_MODEL = "claude-sonnet-5-5"
+sent.clear()
+before = e.cost_usd
+s.answer("Hold on one second.")
+config.ERRAND_MODEL = "gpt-5"
+words = " ".join(x for x, last in sent)
+t.check("ERRAND_MODEL=claude-*: Claude runs the call (system prompt apart, turns alternate, starting with them)",
+        "Sure, take your time!" in words and CLAUDE and "Brief:" in CLAUDE[-1]["system"]
+        and CLAUDE[-1]["messages"][0]["role"] == "user"
+        and all(a["role"] != b["role"] for a, b in zip(CLAUDE[-1]["messages"], CLAUDE[-1]["messages"][1:]))
+        and e.cost_usd > before, (words, CLAUDE[-1]["messages"] if CLAUDE else None))
+
+print("\n5. Echo")
 t.check("its own words picked up by their microphone are recognized as an echo, their own words aren't",
         errand.echo_of("Hello? Hi there. Is this Luigi", "Hi there - is this Luigi's Trattoria?")
         and not errand.echo_of("Yes, Luigi's, how can I help?", "Hi there - is this Luigi's Trattoria?")
         and not errand.echo_of("So what can I do for you?", brief().opening())
         and not errand.echo_of("Hi, Luigi's here!", "Hi there - is this Luigi's Trattoria?"))
 errand.THINK = fake_think
-e = brief()
-twiml, said, ended = run_errand(e, ["Hi", "We only have 8:45.", "No, that's all.", "You want me to lock it in?", "Okay bye"])
-t.check("'want me to lock it in?' for a time outside the brief: thanks, no need to hold it - nothing booked or held",
-        e.status == "needs_you" and "no need to hold" in " ".join(said).lower() and not e.agreed_time, (said, e.status))
-
-print("\n6. Who they are")
-errand.OPEN_WAIT_S = 0.2
+SEEN.clear()
+QUEUE[:] = [{"status": "talking", "say": "Hi there - is this Luigi's Trattoria?"}, {"status": "talking", "say": "Great!"}]
 sent = []
 e = brief()
 s = errand.ErrandSession(e, lambda text, last: sent.append(text))
-time.sleep(0.6)
-errand.OPEN_WAIT_S = 60
 s.answer("Hello?")
-t.check("'is this Luigi's?' - 'Hello?': no yes yet, so it asks again (no request yet)",
-        "confirmed who they are" in " ".join(sent[-3:]) and "table" not in " ".join(sent[-3:]), sent)
-s.answer("Yes, this is Luigi's.")
-t.check("...a yes: now it says what it's calling about", "start of the conversation" in " ".join(sent[-3:]), sent[-3:])
-s.answer("Are you sure you found the right number?")
-t.check("'are you sure you have the right number?' -> 'I think so, trying to reach Luigi's, is that you?'",
-        "trying to reach Luigi's" in " ".join(sent[-3:]), sent[-3:])
-QUEUE[:] = [{"status": "declined", "say": "Oh, 830 is outside the time we asked for, so that won't work."}]
-e = brief()
-s = errand.ErrandSession(e, lambda text, last: sent.append(text))
-s.opened = s.introduced = True
-sent.clear()
-s.answer("Let me check the book for you.")
-t.check("the model wanting to end the call ('that won't work') when they never said there's nothing: it keeps the "
-        "conversation going instead", "won't work" not in " ".join(sent) and e.status == "calling", (sent, e.status))
-
-print("\n7. Wrong number")
-errand.THINK = fake_think
-errand.OPEN_WAIT_S = 0.2
-sent = []
-e = brief()
-s = errand.ErrandSession(e, lambda text, last: sent.append(text), hang_up=lambda: sent.append("<END>"))
-time.sleep(0.6)
-errand.OPEN_WAIT_S = 60
-s.answer("No.")
-time.sleep(0.6)
-t.check("'is this Luigi's?' - 'No.' -> an apology for the wrong number, no request, the call ends",
-        e.status == "failed" and "wrong number" in " ".join(sent) and "table" not in " ".join(sent[1:]), sent)
+s.answer("Hello? Hi there. Is this Luigi")
+t.check("an echo of its own line is ignored (the model isn't even asked)", len(SEEN) == 1 and e.turns == 1, (SEEN, e.turns))
 t.done("ERRAND CALL TESTS")

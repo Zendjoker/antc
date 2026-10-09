@@ -1,15 +1,18 @@
 """Errand calls: Jarvis phones a business FOR you (first errand: a restaurant reservation) in a restricted mode.
 
-Not the normal phone mode. The person on the line is NOT you, so this session has:
-    - no tools, no memory, no email / calendar / files: the model only sees the brief you gave and the call so far
-    - a fixed opening that says it's an AI assistant calling on your behalf
-    - code-enforced limits: a booking is accepted only if the date, party size and time fit your brief (else "I'll
-      check with them and call back"); nothing is said that isn't in the brief (a phone number, an email address, a card
-      number, any long number that you didn't put there is refused before it's spoken); no payment, ever
-    - hard limits: MAX_TURNS exchanges, MAX_SECONDS, today's model budget
-    - afterwards: the outcome is saved (errands.json) and texted to you; your calendar is NOT changed (you decide)
+Not the normal phone mode. The person on the line is NOT you, so this session has no tools, no memory, no email /
+calendar / files: the model only sees the brief you gave and the call so far.
 
-The model only PROPOSES what to say next and how the call stands (JSON). Code checks it before anything is spoken.
+The MODEL runs the conversation (ERRAND_MODEL, a strong one): it listens, decides what to say and how the call stands
+(talking / accepting a booking / booked / needs you / declined / wrong number / goodbye). There is no script.
+CODE keeps only the hard limits, checked before a word is spoken:
+    - a booking is agreed to only if its date, party size and time fit your brief (else those words are never said:
+      the model is told why and answers again)
+    - nothing beyond the brief is said (a phone number, an email address, a card / long number, a link); no payment
+    - short replies; its own echo is ignored; it never hangs up on them (only after their goodbye, or a friendly bye
+      when they go quiet after it wrapped up)
+    - MAX_TURNS exchanges, MAX_SECONDS, today's model budget
+    - afterwards: the outcome is saved (errands.json) and texted to you; your calendar is NOT changed (you decide)
 
 TEST MODE (the only mode for now): the call goes to YOUR OWN phone (MY_PHONE) and you play the restaurant. Calling any
 other number isn't built: that needs its own explicit setup later (an allowlist of numbers, per-call approval).
@@ -30,19 +33,19 @@ from dataclasses import asdict, dataclass, field
 from room_agent import config
 
 log = logging.getLogger("room-agent")
-MAX_TURNS = 16
-MAX_SECONDS = 360
+MAX_TURNS = 20
+MAX_SECONDS = 420
 OPEN_WAIT_S = 3.5   # if nobody speaks this long after the call connects, it starts ("Hi, is this Luigi's?")
 CLOSE_WAIT_S = 6.0  # after its closing line is SPOKEN it waits this long for their "bye" (never cuts them off)
 WORDS_PER_S = 2.6   # how fast the phone voice speaks (to know when a line has finished playing)
+THINK = None  # tests: (errand, transcript) -> proposal dict ({"status", "booking", "say"}); None = ERRAND_MODEL
+ACTIVE = {}   # errand id -> Errand (in this process)
+_lock = threading.Lock()
 
 
 def speak_time(line):
     """Roughly how long the phone voice takes to say `line` (seconds)."""
     return 0.6 + len(str(line).split()) / WORDS_PER_S
-THINK = None  # tests: (errand, transcript) -> proposal dict; None = the cheap model (OPENAI_MODEL)
-ACTIVE = {}   # errand id -> Errand (in this process)
-_lock = threading.Lock()
 
 
 @dataclass
@@ -64,9 +67,8 @@ class Errand:
     ended: float = 0.0
     turns: int = 0
     cost_usd: float = 0.0
-    agreed_time: str = ""     # a time they offered that fits the brief, accepted by code
-    alt_asked: int = 0        # times it asked for something closer after an offer outside the brief
-    last_offer: str = ""      # their last offer outside the brief (for "I'll check with Adam if 9 works")
+    agreed: dict = field(default_factory=dict)  # the booking it agreed to (checked by code)
+    over: bool = False        # the call itself has ended (the line is closed)
 
     def window(self):
         return f"{self.time_from}" + (f" to {self.time_to}" if self.time_to and self.time_to != self.time_from else "")
@@ -84,12 +86,16 @@ class Errand:
     def first(self):
         return (self.name or "my boss").split()[0] if self.name else "my boss"
 
-    def opening(self):
-        """Warm and natural, with a light AI disclosure (asked again, it says yes plainly)."""
+    def boss(self):
+        """'my boss, Adam Azzouz' / 'Adam' / 'my boss'."""
         rel = self.relation.strip().removeprefix("my ").strip()
-        who = f"my {rel}, {self.name}" if rel and self.name else (self.name or "my boss")
-        return (f"Hi there! I'm calling for {who}. I'm an AI assistant, just so you know. I was hoping to get a table "
-                f"for {self.party_size} {self.when()}, sometime between {self.spoken_window()}. Do you have anything?")
+        return f"my {rel}, {self.name}" if rel and self.name else (self.name or "my boss")
+
+    def opening(self):
+        """The plain opening (only if the model can't be reached)."""
+        return (f"Hi there! I'm calling for {self.boss()}. I'm an AI assistant, just so you know. I was hoping to get a "
+                f"table for {self.party_size} {self.when()}, sometime between {self.spoken_window()}. Do you have "
+                "anything?")
 
 
 def _short(hhmm):
@@ -127,11 +133,15 @@ def fits(e, booking):
     if party != int(e.party_size):
         return False, f"it's for {party or 'an unclear number of'} people, not {e.party_size}"
     t = _minutes(b.get("time"))
+    if t is None:
+        return False, "no booking time was given"
     lo, hi = _minutes(e.time_from), _minutes(e.time_to or e.time_from)
-    if t is None or lo is None or not lo <= t <= (hi if hi is not None else lo):
-        return False, f"{b.get('time') or 'that time'} is outside {e.window()}"
-    if b.get("date") and _norm(b["date"]) not in (_norm(e.date), "") and _norm(e.date) not in _norm(b["date"]):
-        return False, f"it's for {b['date']}, not {e.date}"
+    if lo is None or not lo <= t <= (hi if hi is not None else lo):
+        return False, f"{_short(b.get('time'))} is outside {e.spoken_window()}"
+    d = str(b.get("date") or "")
+    if d and _norm(d) != _norm(e.date) and _norm(e.date) not in _norm(d) and (
+            other_day(e, d) or (re.search(r"\d", d) and re.search(r"\d", str(e.date)))):
+        return False, f"it's for {d}, not {e.date}"
     return True, ""
 
 
@@ -152,18 +162,11 @@ def safe_to_say(e, text):
                          text, re.I)
 
 
-CONFIRMED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you|got you down|have you down|"
-                       r"put you down|done|that'?s fine|perfect|great|no problem|sure thing)\b", re.I)
-# (a clear "it's booked": what lets CODE close the call on a time already agreed, without asking the model)
-BOOKED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you (then|friday|on|at|tonight|tomorrow)|"
-                    r"got you down|have you down|put you down|done|that'?s it)\b", re.I)
-REFERENCE = re.compile(r"\b(?:ref(?:erence)?|confirmation)(?:\s+(?:number|code|no\.?))?(?:\s+is)?\s*[:#]?\s*"
-                       r"([A-Z]*\d[A-Z0-9-]{0,11})\b", re.I)
 DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 def other_day(e, text):
-    """Did they name a day that isn't the one asked for ("tomorrow", "Saturday")? -> that day's words, or "" """
+    """Did `text` name a day that isn't the one asked for ("tomorrow", "Saturday")? -> that day's words, or "" """
     low, want = str(text or "").lower(), str(e.date or "").lower()
     for d in DAYS + ("tomorrow", "tonight", "today", "next week", "weekend"):
         if re.search(rf"\b{d}\b", low) and d not in want:
@@ -171,75 +174,10 @@ def other_day(e, text):
     return ""
 
 
-ASK_BOSS = re.compile(r"\b((call|ask|check with|talk to|text) (your|the) (boss|client|employer)|let (him|her|them) know|"
-                      r"get back to (me|us)|call (me|us) back|check and call)\b", re.I)
-NOTHING_ELSE = re.compile(r"\b(no|nope|sorry|that'?s (all|it)|all we have|only|nothing (else)?|fully booked|"
-                          r"booked up|unfortunately)\b", re.I)
-HOLD = re.compile(r"\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|moment|minute)|"
-                  r"give me a (sec|second|moment|minute)|let me (check|see|look))\b", re.I)
-WRONG_PLACE = re.compile(r"^\W*(no|nope|nah)\b(?!.{0,20}\b(but|yes|yeah|it is|this is)\b)|wrong number|"
-                         r"you('ve| have) the wrong|this (isn'?t|is not)\b|not (a|the) restaurant", re.I)
-HOLD_OFFER = re.compile(r"\b(lock (it|that) in|hold (it|that|the table)|put you down|reserve (it|that)|"
-                        r"want me to (book|hold|reserve|keep)|should i (book|hold|keep))\b", re.I)
-
-
-def echo_of(heard, said, run=4):
-    """Is what we 'heard' its own last line coming back through their microphone? An echo repeats its words IN ORDER:
-    `run` consecutive words of its line ("hi there is this luigi"). Sharing a few words isn't an echo ("Hi, Luigi's
-    here!", "so what can I do for you")."""
-    def words(x):
-        return [w[:5] for w in re.findall(r"[a-z0-9']+", str(x).lower())]
-    h, own = words(heard), words(said)
-    grams = {tuple(own[i:i + run]) for i in range(len(own) - run + 1)}
-    return any(tuple(h[i:i + run]) in grams for i in range(len(h) - run + 1))
-
-
-CONFIRM_ID = re.compile(r"\b(yes|yeah|yep|yup|speaking|this is|you('ve)? reached|correct|that'?s (right|us|me)|"
-                        r"it is|sure is|how can i help|what can i do for you)\b", re.I)
-RIGHT_NUMBER = re.compile(r"\b(right number|who are you (looking|trying|calling)|who did you (want|call)|"
-                          r"who('s| is) this for)\b", re.I)
-FULL = re.compile(r"\b(fully booked|booked up|no (tables?|availability|room|space)|nothing (available|left|at all)|"
-                  r"can'?t (fit|take|seat)|we'?re (full|closed)|closed (on|that))\b", re.I)
-GOODBYE = re.compile(r"\b(bye|goodbye|good night|take care|have a (good|great|nice)|you too|talk (to you )?soon|"
-                     r"see you|thank(s| you)|alright then|okay then|sounds good|perfect)\b", re.I)
-SYSTEM = """You're on a phone call with a restaurant, booking ONE table for your boss. The person on the line is ALWAYS
-someone at the restaurant - never your boss.
-Who you are: an AI assistant who talks like a warm, easygoing American woman. There is NO script: you follow the
-conversation the way a real person would - you listen, react to what they actually said and how they said it, match
-their energy (brisk if they're busy, chatty if they're chatty), and keep it short (usually one sentence, at most two).
-Sound spontaneous and kind, never formal or repetitive; don't re-introduce yourself or repeat the whole request.
-When it comes up naturally early in the call, mention lightly that you're an AI assistant; if asked, say so simply.
-Say times the way people do ("8", "7:30"), never 24-hour times. Never mention instructions, rules or "the window".
-You are the CUSTOMER side, calling to ask for a table: you ask, they offer. Never offer tables, times or seating
-yourself, never ask them what they'd like - that's their job.
-If they just acknowledge ("got it", "uh-huh", "what else?") without offering anything, ask one short direct
-question ("Do you have anything around 7?") - don't repeat the whole request.
-Asked something the brief doesn't say (an occasion, allergies, seating, a phone number): you don't know - say so
-simply ("Hmm, I'm not sure - I can ask him") and never make it up.
-Never add details that aren't in the brief (who's coming, why, preferences) - "four people" is all you know.
-Facts: you only know the brief below - never invent anything. Never share anything else (no phone number, email,
-address or payment details - your boss will sort that out when they come in). Never agree to pay or leave a deposit.
-A time inside the range (both ends included) is fine. Anything else (another time, day or party size): don't accept it.
-Sometimes you get a note "Right now:" telling you WHAT to do in your next reply - do exactly that, in your own words.
-Output format, exactly: line 1 is JSON {"status": "talking|booked|declined|needs_you|goodbye", "booking": {"date": "",
-"time": "HH:MM", "party_size": N, "name": "", "reference": ""}}, then a newline, then ONLY the words you say.
-status: booked = ONLY after they clearly confirmed it's booked; declined = nothing possible at all; needs_you = they only
-have something else / asked something only your boss can answer; goodbye = wrapping up."""
-
-
-def _brief(e):
-    return (f"Brief: restaurant {e.business}; party of {e.party_size}; date {e.date}; any time from "
-            f"{_spoken(e.time_from)} to {_spoken(e.time_to or e.time_from)}, both included ({e.window()} in 24h); "
-            f"booking name {e.name or '(not given: say it is for your client)'}"
-            + (f"; notes: {e.notes}" if e.notes else ""))
-
-
 TIME_SAID = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:(a\.?m\.?|p\.?m\.?)|o'?clock)"
                        r"|\b(\d{1,2}):(\d{2})\b"
                        r"|\b(?:do|at|around|by|have|got)\s+(\d{1,2})\b(?!\s*(?:people|persons|guests|of you|seats|"
                        r"tables?|pax|:))", re.I)
-
-
 WORD_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
             "ten": 10, "eleven": 11, "twelve": 12}
 MINUTE_WORDS = {"fifteen": "15", "thirty": "30", "forty five": "45", "forty-five": "45", "forty": "40", "twenty": "20",
@@ -269,11 +207,18 @@ def spoken_times(text):
     return t.strip()
 
 
+def _hhmm(e, h, mi, ap=""):
+    """An hour said on the phone -> "HH:MM" (without am/pm, evening when the brief is in the evening)."""
+    if ap == "pm" and h < 12 or (not ap and (_minutes(e.time_from) or 0) >= 12 * 60 and h < 12):
+        h += 12
+    if ap == "am" and h == 12:
+        h = 0
+    return f"{h:02d}:{mi:02d}" if 0 <= h < 24 and 0 <= mi < 60 else ""
+
+
 def offered_times(e, text):
-    """Times the restaurant offered ("8PM", "7:30 pm", "8 o'clock"), as HH:MM; an hour without am/pm is read as
-    evening when the brief is in the evening (a dinner booking)."""
+    """Times named in `text` ("8PM", "7:30 pm", "8 o'clock", "830", "eight thirty"), as HH:MM."""
     out = []
-    evening = (_minutes(e.time_from) or 0) >= 12 * 60
     text = spoken_times(text)
     for m in TIME_SAID.finditer(text or ""):
         if re.search(r"\b(can'?t|cannot|not|no|don'?t|isn'?t|unavailable|booked up|full)\b[^.,;]{0,15}$",
@@ -287,61 +232,175 @@ def offered_times(e, text):
             h, mi, ap = int(m.group(6)), 0, ""
             if not 1 <= h <= 12:
                 continue
-        if ap == "pm" and h < 12 or (not ap and evening and h < 12):
-            h += 12
-        if ap == "am" and h == 12:
-            h = 0
-        if 0 <= h < 24 and 0 <= mi < 60:
-            out.append(f"{h:02d}:{mi:02d}")
+        if _hhmm(e, h, mi, ap):
+            out.append(_hhmm(e, h, mi, ap))
     return out
 
 
-def _messages(e, transcript, directive=""):
+AGREE = re.compile(r"\b(perfect|works|great|sounds good|let'?s do|we'?ll take|i'?ll take|book (it|that|us)|"
+                   r"lock (it|that) in|that'?s fine|deal|see you)\b", re.I)
+NOT_AGREE = re.compile(r"\b(not|too|bit|little|closer|instead|earlier|later|check|ask|anything|if)\b|n'?t\b|\?", re.I)
+
+
+def agrees_outside(e, sentence):
+    """A hard limit on its own WORDS (the decision it reported is checked too): does this sentence agree to a time or
+    day outside the brief ("Great, 9 works!")? -> why, or "" """
+    s = str(sentence or "")
+    if not AGREE.search(s) or NOT_AGREE.search(s):
+        return ""
+    t = spoken_times(s)
+    times = set(offered_times(e, s))
+    for m in re.finditer(r"(?<![\d:])\b(1[0-2]|[1-9])(?::([0-5]\d))?\b(?![\d:])(?!\s*(?:people|persons|guests|"
+                         r"of (?:us|you|them)|seats|tables?))", t):
+        if not re.search(r"\b(for|of)\s*$", t[max(0, m.start() - 8):m.start()], re.I):
+            times.add(_hhmm(e, int(m.group(1)), int(m.group(2) or 0)))
+    for x in sorted(x for x in times if x):
+        ok, why = fits(e, {"time": x, "party_size": e.party_size})
+        if not ok:
+            return why
+    d = other_day(e, s)
+    return f"{d} isn't {e.date}" if d else ""
+
+
+def echo_of(heard, said, run=4):
+    """Is what we 'heard' its own last line coming back through their microphone? An echo repeats its words IN ORDER:
+    `run` consecutive words of its line ("hi there is this luigi"). Sharing a few words isn't an echo ("Hi, Luigi's
+    here!", "so what can I do for you")."""
+    def words(x):
+        return [w[:5] for w in re.findall(r"[a-z0-9']+", str(x).lower())]
+    h, own = words(heard), words(said)
+    grams = {tuple(own[i:i + run]) for i in range(len(own) - run + 1)}
+    return any(tuple(h[i:i + run]) in grams for i in range(len(h) - run + 1))
+
+
+STATUSES = ("talking", "accepting", "booked", "needs_you", "declined", "wrong_number", "goodbye")
+SYSTEM = """You're on a phone call to a restaurant, booking a table for your boss. Everyone you talk to on this call
+works at the restaurant - never your boss.
+
+Who you are: an AI assistant with the voice of a warm, easygoing American woman. Talk the way a real person does on the
+phone: listen, react to what they actually said, match their pace (brisk if they're busy, chatty if they're chatty),
+and keep it short - usually one sentence, two at most (three only when you first explain why you're calling). There is
+no script: never a speech, never repeat yourself or the whole request.
+
+Your goal: get the table in the brief booked, as easily as possible. A call like this usually goes (adapt to what
+actually happens):
+- Greet them back. If they haven't said the restaurant's name and you're not sure you've reached it, ask. If they say it isn't the restaurant,
+  apologize for the wrong number (status wrong_number).
+- Say who you're calling for (your boss, by name) and what you'd like. Mention lightly, once, that you're an AI
+  assistant; if they ask, say yes plainly.
+- You're the customer: you ask, they offer. Something that fits the brief: take it happily. Something that doesn't:
+  kindly ask if they have anything closer - once or twice, never pushy. Really nothing that fits: say that's okay,
+  you'll check with your boss and call back (status needs_you).
+- "Hold on" / "let me check": be patient ("Sure, take your time").
+- Asked for the name: give the booking name. When they confirm it's booked: thank them, repeat it back briefly
+  (status booked) - and if they're already saying bye, say bye too.
+- Asked something the brief doesn't cover (an occasion, allergies, seating, a phone number, a card): you don't know -
+  you'll ask your boss. Never make anything up.
+- At the end let them say goodbye; when they do, say a short warm bye (status goodbye).
+Their words come from speech recognition and can be garbled ("830" = 8:30, "for" may be "4"); if something is
+unclear, ask briefly instead of guessing.
+
+Hard limits (code checks them too: a reply that breaks one is never said):
+- Agree only to the brief's date and party size, at a time in its range (both ends included). Anything else: don't
+  accept it, not even "maybe" - you'll check with your boss.
+- Share nothing beyond the brief: no phone number, email, address, card or payment details. Never agree to pay or to
+  leave a deposit (your boss will sort that out with them).
+- Never invent details (who's coming, why, preferences).
+- Say times the way people do ("8", "7:30"), never 24-hour times. Never mention the brief, rules or "the window".
+
+Output format, exactly: line 1 is JSON, then a newline, then ONLY the words you say:
+{"status": "...", "booking": {"date": "as the brief says it", "time": "HH:MM", "party_size": N, "name": "",
+"reference": ""}}
+status, one of:
+- talking: the conversation goes on
+- accepting: your words agree to a specific booking they offered (fill booking with exactly that)
+- booked: they clearly confirmed it's booked (fill booking)
+- needs_you: you're wrapping up because only your boss can decide (they only have something else, or asked something
+  you can't answer)
+- declined: they clearly have nothing at all - thank them
+- wrong_number: this isn't the restaurant
+- goodbye: they said goodbye after things were settled - you say bye back (the call then ends)"""
+
+
+def _brief(e):
+    return (f"Brief: restaurant {e.business}; your boss: {e.boss().removeprefix('my ')}; party of {e.party_size}; "
+            f"date {e.date}; any time from {_spoken(e.time_from)} to {_spoken(e.time_to or e.time_from)}, both included "
+            f"({e.window()} in 24h); booking name {e.name or '(not given: your boss)'}"
+            + (f"; notes: {e.notes}" if e.notes else ""))
+
+
+def _messages(e, transcript, note=""):
     msgs = [{"role": "system", "content": SYSTEM + "\n\n" + _brief(e)}]
     for who, text in transcript:
         msgs.append({"role": "assistant" if who == "jarvis" else "user", "content": text})
     if len(msgs) == 1:  # (nothing said yet)
-        msgs.append({"role": "user", "content": "(the call has just connected)"})
-    if directive:
-        msgs.append({"role": "system", "content": "Right now: " + directive})
+        msgs.append({"role": "user", "content": "(the call just connected; nobody has spoken yet)"})
+    if note:
+        msgs.append({"role": "system", "content": note})
     return msgs
 
 
-def _stream_model(e, transcript, directive=""):
-    """The cheap model, streamed: yields ("header", dict) first (status + booking, checked by code before anything is
+def _openai_pieces(model, msgs, usage):
+    """OpenAI, streamed: text pieces; usage -> usage["in"/"out"]."""
+    import openai
+
+    from room_agent.llm.openai_backend import openai_client
+
+    c = openai_client().with_options(max_retries=0, timeout=20)
+    kw = dict(model=model, messages=msgs, max_completion_tokens=1500, stream=True,
+              stream_options={"include_usage": True})  # (includes GPT-5's thinking tokens)
+    effort = config.ERRAND_REASONING
+    try:  # ("minimal" thinking: the first words have to come back fast on a phone call)
+        stream = c.chat.completions.create(reasoning_effort=effort, **kw) if effort else c.chat.completions.create(**kw)
+    except openai.BadRequestError as ex:  # (400, not billed: this model doesn't take reasoning_effort)
+        if "reasoning" not in str(ex).lower():
+            raise
+        stream = c.chat.completions.create(**kw)
+    for chunk in stream:
+        if getattr(chunk, "usage", None):
+            usage["in"], usage["out"] = chunk.usage.prompt_tokens, chunk.usage.completion_tokens
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+
+
+def _claude_pieces(model, msgs, usage):
+    """Claude, streamed: text pieces; usage -> usage["in"/"out"]."""
+    from room_agent.llm.client import client
+
+    system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
+    turns = []
+    for m in (m for m in msgs if m["role"] != "system"):
+        if turns and turns[-1]["role"] == m["role"]:
+            turns[-1]["content"] += "\n" + m["content"]
+        else:
+            turns.append(dict(m))
+    if not turns or turns[0]["role"] != "user":
+        turns.insert(0, {"role": "user", "content": "(the call connected)"})
+    with client().messages.stream(model=model, max_tokens=400, system=system, messages=turns) as s:
+        for piece in s.text_stream:
+            yield piece
+        u = s.get_final_message().usage
+        usage["in"], usage["out"] = u.input_tokens, u.output_tokens
+
+
+def _stream_model(e, transcript, note=""):
+    """ERRAND_MODEL, streamed: yields ("header", dict) first (status + booking, checked by code before anything is
     said), then ("text", piece) as the words arrive. Budget-checked; usage recorded (estimated if the stream is cut)."""
     from room_agent.llm.budget import budget, price
-    from room_agent.llm.openai_backend import openai_client
 
     if budget.exceeded():
         yield "header", {"status": "needs_you"}
         yield "text", "Sorry, I have to run - I'll call you back. Thanks!"
         return
-    import openai
-
-    msgs = _messages(e, transcript, directive)
-    c = openai_client().with_options(max_retries=0, timeout=20)
-    kw = dict(model=config.OPENAI_MODEL, messages=msgs, max_completion_tokens=1500, stream=True,
-              stream_options={"include_usage": True})  # (includes GPT-5's thinking tokens)
-    try:  # ("minimal" thinking: the first words have to come back fast on a phone call)
-        stream = c.chat.completions.create(reasoning_effort=config.OPENAI_REASONING, **kw) if config.OPENAI_REASONING \
-            else c.chat.completions.create(**kw)
-    except openai.BadRequestError as ex:  # (400, not billed: this model doesn't take reasoning_effort)
-        if "reasoning" not in str(ex).lower():
-            raise
-        stream = c.chat.completions.create(**kw)
-    buf, header_done, out_chars, usage = "", False, 0, None
+    model, msgs, usage = config.ERRAND_MODEL, _messages(e, transcript, note), {}
+    claude = model.startswith("claude")
+    pieces = (_claude_pieces if claude else _openai_pieces)(model, msgs, usage)
+    buf, header_done, out_chars = "", False, 0
     try:
-        for chunk in stream:
-            if getattr(chunk, "usage", None):
-                usage = chunk.usage
-            if not chunk.choices:
-                continue
-            piece = chunk.choices[0].delta.content or ""
+        for piece in pieces:
             out_chars += len(piece)
             if header_done:
-                if piece:
-                    yield "text", piece
+                yield "text", piece
                 continue
             buf += piece
             header, rest, complete = split_header(buf)
@@ -356,10 +415,11 @@ def _stream_model(e, transcript, directive=""):
             if rest:
                 yield "text", rest
     finally:
-        tin = usage.prompt_tokens if usage else sum(len(m["content"]) for m in msgs) // 4
-        tout = usage.completion_tokens if usage else out_chars // 4
-        budget.record("openai", config.OPENAI_MODEL, fresh_in=tin, out=tout)
-        p_in, _, _, p_out = price(config.OPENAI_MODEL)
+        pieces.close()
+        tin = usage.get("in") or sum(len(m["content"]) for m in msgs) // 4
+        tout = usage.get("out") or out_chars // 4
+        budget.record("claude" if claude else "openai", model, fresh_in=tin, out=tout)
+        p_in, _, _, p_out = price(model)
         e.cost_usd = round(e.cost_usd + (tin * p_in + tout * p_out) / 1e6, 6)
 
 
@@ -416,26 +476,22 @@ def _natural(sentence):
 
 
 SENTENCE = re.compile(r"(.+?[.!?])(\s+|$)", re.S)
+OUTCOMES = {"booked": "booked", "needs_you": "needs_you", "declined": "declined", "wrong_number": "failed"}
 
 
 class ErrandSession:
     """One errand call. send(text, last) speaks; hang_up() ends the call.
 
-    There's no script: it waits for the restaurant to answer (or, after OPEN_WAIT_S of silence, starts itself), and the
-    model words every reply from the conversation so far. CODE still makes every decision that matters - accept a time
-    (only inside the brief), ask for something closer, never another day, close the call with an outcome - and tells
-    the model WHAT to do ("Right now: ..."); the model decides HOW to say it. Every sentence is checked before it's
-    spoken. It never hangs up on them: only a goodbye ends the call (anything else reopens it)."""
+    The model decides every reply and how the call stands; code checks the hard limits before a word is spoken (see
+    the module doc). It waits for the restaurant to answer (or, after OPEN_WAIT_S of silence, starts itself). Once an
+    outcome is reached it waits for their goodbye: if they keep talking, the conversation simply goes on."""
 
     def __init__(self, errand, send, hang_up=None):
         self.e, self.send, self.hang_up = errand, send, hang_up
-        self.done = False
-        self.closing = False   # (its closing words were said: a goodbye from them ends the call; anything else reopens)
-        self.opened = False    # (it has said something)
-        self.introduced = False  # (it has said who it's calling for and what it wants)
-        self.asked_identity = False  # (it asked "is this Luigi's?" first)
-        self.identity_asks = 0
+        self.done = False      # (an outcome is recorded)
+        self.opened = False    # (someone has spoken)
         self._hung = False
+        self._finished = False
         self._close_no = 0
         self._rng = random.Random(errand.id)
         self._lock = threading.Lock()
@@ -452,26 +508,12 @@ class ErrandSession:
 
     # ------------------------------------------------------------ the conversation
     def _kick(self):
-        """Nobody has spoken since the call connected: start the call, like a person would."""
+        """Nobody has spoken since the call connected: the model starts the call, like a person would."""
         with self._lock:
             if self.opened or self._hung:
                 return
-            self.opened = self.asked_identity = True
-            self._speak(f"The call just connected and nobody has said anything yet. Start it: a friendly hello and ask "
-                        f"if this is {self.e.business}.", f"Hi there! Is this {self.e.business}?")
-
-    def _intro(self):
-        e = self.e
-        rel = e.relation.strip().removeprefix("my ").strip()
-        who = f"your {rel}, {e.name}" if rel and e.name else (e.name or "your boss")
-        return (f"This is the start of the conversation: react naturally to how they answered (greet them back; if they "
-                f"asked how you are, answer briefly), then say you're calling for {who}, hoping to get a table for "
-                f"{e.party_size} {e.when()} sometime between {e.spoken_window()}, and mention casually that you're an AI "
-                "assistant. Two or three short sentences, relaxed - not a speech.")
-
-    def _intro_fallback(self):
-        e = self.e
-        return e.opening()
+            self.opened = True
+            self._turn()
 
     def answer(self, text):
         """What the restaurant said -> the next reply, or the end of the call."""
@@ -483,174 +525,137 @@ class ErrandSession:
             if last and echo_of(text, last):  # (its own words echoing back through their phone: not them)
                 log.info("errand %s: ignored an echo of its own words", e.id)
                 return
+            self.opened = True
             e.turns += 1
             e.transcript.append(("them", str(text)[:500]))
-            if self.closing and HOLD_OFFER.search(str(text)) and e.status == "needs_you":
-                # (they offer to hold a time outside the brief: thank them, nothing is booked or held)
-                return self._speak(f"They offered to hold that time for you. Thank them, but say there's no need to hold "
-                                   f"it - you'll check with {e.first()} and call right back.",
-                                   f"Oh, that's so kind - no need to hold it, I'll check with {e.first()} and call "
-                                   "you right back!")
-            if self.closing:
-                if GOODBYE.search(str(text)) and not offered_times(e, text) and "?" not in str(text):
-                    return self._goodbye()
-                self.closing = self.done = False  # (they kept talking: the conversation isn't over)
-                self._close_no += 1
             if e.turns > MAX_TURNS or time.time() - e.started > MAX_SECONDS:
-                return self._close("You need to wrap up now: say sorry, you have to run, you'll call back. Thank them.",
-                                   "Sorry, I have to run - I'll call you back. Thanks so much!", "no_deal",
-                                   {"why": "the call went on too long without a booking"})
-            if self.asked_identity and not self.introduced and WRONG_PLACE.search(str(text)):
-                self.introduced = True
-                return self._close("", "Oh, I'm so sorry - wrong number! Have a good night.", "failed",
-                                   {"why": "wrong number: they said it isn't " + e.business}, use_model=False)
-            first_word = re.escape(e.business.split()[0].rstrip("'s").lower())
-            confirmed = CONFIRM_ID.search(str(text)) or re.search(rf"\b{first_word}", str(text).lower())
-            if self.asked_identity and not self.introduced and not confirmed and self.identity_asks < 2:
-                self.identity_asks += 1  # (no yes yet - "Hello?" isn't one: ask again, warmly)
-                self.opened = True
-                return self._speak(f"They answered '{str(text)[:60]}' but haven't confirmed who they are. Warmly ask "
-                                   f"again if this is {e.business} - just that, nothing else yet.",
-                                   f"Hi! Sorry - is this {e.business}?", sentences=1, words=15)
-            if RIGHT_NUMBER.search(str(text)) and not e.agreed_time:
-                self.asked_identity, self.introduced = True, False  # (a "no" next means the wrong number)
-                self.identity_asks = 2
-                return self._speak(f"They're not sure you have the right number. Say you think so - you're trying to "
-                                   f"reach {e.business} - and ask if that's them.",
-                                   f"I think so - I'm trying to reach {e.business}. Is that you?", sentences=2, words=25)
-            self.opened = True
-            directive, fallback, close = self._decide(text)
-            if not self.introduced:
-                self.introduced = True
-                if close is None:  # (the first thing they say: say hello back and what it's about)
-                    intro = self._intro() + (f" Also: {directive}" if directive else "")
-                    return self._speak(intro, self._intro_fallback(), sentences=3, words=55)
-            if close is not None:
-                return self._close(directive, fallback, *close)
-            if directive:
-                return self._speak(directive, fallback)
-            return self._free_turn(text)
+                if self.done:
+                    return self._hang_up_after(self._plain("Okay, thank you so much - bye!"))
+                spoken = self._plain("Sorry, I have to run - I'll call you back. Thanks so much!")
+                return self._outcome(spoken, "no_deal", {"why": "the call went on too long without a booking"})
+            self._turn()
 
-    def _decide(self, text):
-        """CODE decides what happens next. -> (directive for the model, fallback words, (status, outcome) to close
-        the call with or None)."""
-        e, t = self.e, str(text)
-        first = e.first()
-        if ASK_BOSS.search(t) and not e.agreed_time:
-            return (f"They asked you to check with your boss. Agree warmly - you'll check with {first} and call them "
-                    "right back - and thank them.",
-                    f"Of course! I'll check with {first} and call you right back. Thank you so much!",
-                    ("needs_you", {"offered": {"time": e.last_offer} if e.last_offer else {},
-                                   "why": f"they asked to check with {first}: {t[:120]}"}))
-        offered = offered_times(e, t)
-        if HOLD.search(t) and not offered:
-            return ("They asked you to hold on a moment. Say something short and patient.", "Sure, take your time!",
-                    None)
-        wrong_day = other_day(e, t)
-        if wrong_day and not e.agreed_time:
-            if not e.alt_asked:
-                e.alt_asked += 1
-                e.last_offer = offered[-1] if offered else ""
-                return (f"They mentioned {wrong_day}, but you need {e.date}. Kindly ask if they have anything on "
-                        f"{e.date}, sometime between {e.spoken_window()}.",
-                        f"Ah, we're actually hoping for {e.date} - do you have anything then?", None)
-            return (f"They don't have anything on {e.date}. Say that's totally okay, you'll check with {first} and call "
-                    "them back, and thank them warmly.",
-                    f"Aw, okay, no problem at all! Let me check with {first} and I'll call you right back. Thank you!",
-                    ("needs_you", {"why": f"they offered {wrong_day} instead of {e.date}"}))
-        fit = [x for x in offered if fits(e, {"time": x, "party_size": e.party_size})[0]]
-        if not offered and e.alt_asked and e.last_offer and not e.agreed_time and NOTHING_ELSE.search(t):
-            off = _short(e.last_offer)
-            return (f"They only have {off}. Say that's okay, you'll check with {first} whether {off} works and call "
-                    "right back, and thank them warmly.",
-                    f"Aw, okay, no problem! Let me check with {first} if {off} works and I'll call you right back. Thanks!",
-                    ("needs_you", {"offered": {"time": e.last_offer}, "why": f"they only have {off}"}))
-        if offered and not fit and not e.agreed_time:
-            off = offered[-1]
-            e.last_offer = off
-            late = (_minutes(off) or 0) > (_minutes(e.time_to or e.time_from) or 0)
-            if not e.alt_asked:
-                e.alt_asked += 1
-                edge = _short(e.time_to or e.time_from) if late else _short(e.time_from)
-                return (f"They offered {_short(off)}, which is a bit {'late' if late else 'early'} for you. Don't accept "
-                        f"it. Kindly ask if they have anything closer to {e.spoken_window().replace(' and ', ' or ')} - "
-                        f"even {edge} would be great.",
-                        f"Ah, {_short(off)} is a little {'late' if late else 'early'} for us - anything closer to "
-                        f"{e.spoken_window().replace(' and ', ' or ')}?", None)
-            return (f"They only have {_short(off)}. Don't accept it. Say that's okay, you'll check with {first} whether "
-                    f"{_short(off)} works and call right back, and thank them warmly.",
-                    f"Aw, okay, no problem! Let me check with {first} if {_short(off)} works and I'll call you right "
-                    "back. Thanks!",
-                    ("needs_you", {"offered": {"time": off}, "why": f"they only have {_short(off)}"}))
-        newly = bool(fit) and fit[-1] != e.agreed_time
-        if fit:
-            e.agreed_time = fit[-1]
-        agreed = {"date": e.date, "time": e.agreed_time, "party_size": e.party_size, "name": e.name}
-        ref = REFERENCE.search(t)
-        if ref:
-            agreed["reference"] = ref.group(1)
-        if e.agreed_time and BOOKED.search(t.rsplit("?", 1)[-1]):
-            recap = f"{_short(e.agreed_time)} for {e.party_size}" + (f" under {e.name}" if e.name else "")
-            return (f"They just confirmed the booking. Thank them warmly and briefly repeat it back: {recap}.",
-                    f"Perfect, {recap}. Thank you so much!", ("booked", {"booking": agreed}))
-        if newly:
-            asked_name = e.name and re.search(r"\bname\b", t, re.I)
-            return (f"They offered {_short(e.agreed_time)}, which works perfectly. Accept it happily"
-                    + (f" and tell them the name is {e.name}" if asked_name else "") + ".",
-                    f"Oh, {_short(e.agreed_time)} is perfect!" + (f" It's under {e.name}." if asked_name else ""), None)
-        return "", "", None
-
-    def _free_turn(self, text):
-        """No decision by code: the model decides (its decision is checked before a word is said)."""
+    def _turn(self, note="", retry=True):
+        """The model's next reply: its decision is checked, then its words are spoken (each sentence checked)."""
         e = self.e
         try:
-            gen = self._model("")
-            kind, header = next(gen)
+            gen = self._model(note)
+            _, header = next(gen)
         except Exception as ex:  # noqa: BLE001
             log.warning("errand %s: the model failed (%s)", e.id, ex.__class__.__name__)
-            return self._close("", "Sorry, I'm having trouble on my end - I'll call you back. Thanks!", "failed",
-                               {"why": f"model error ({ex.__class__.__name__})"}, use_model=False)
-        status = str(header.get("status") or "talking")
+            if not any(who == "jarvis" for who, _ in e.transcript):
+                spoken = self._plain(e.opening())  # (never silence)
+                return self._outcome(spoken, "failed", {"why": f"model error ({ex.__class__.__name__})"})
+            spoken = self._plain("Sorry, I'm having trouble on my end - I'll call you back. Thanks!")
+            return self._outcome(spoken, "failed", {"why": f"model error ({ex.__class__.__name__})"})
+        status = str(header.get("status") or "talking").strip().lower()
+        status = status if status in STATUSES else "talking"
         booking = header.get("booking") if isinstance(header.get("booking"), dict) else {}
-        accepting = status == "booked" or (status == "talking" and (booking.get("time") or booking.get("party_size")))
-        if accepting:
-            partial = {**{"party_size": e.party_size, "time": e.time_from}, **{k: v for k, v in booking.items() if v}}
-            ok, why = fits(e, {**{"party_size": e.party_size}, **booking} if status == "booked" else partial)
-            if not ok:  # (it would agree to something outside the brief: code says no, before a word)
+        booking = {k: v for k, v in booking.items() if v not in ("", None, 0)}
+        log.info("errand %s: model -> %s %s", e.id, status, booking or "")
+        if status in ("accepting", "booked"):
+            b = {"party_size": e.party_size, "date": e.date, **e.agreed, **booking}
+            if not b.get("time") and self._their_time():  # (the decision left the time out: the one they offered)
+                b["time"] = self._their_time()
+            ok, why = fits(e, b)
+            if not ok:  # (it would agree to something outside the brief: never said)
                 gen.close()
-                return self._close(f"Don't accept that. Say it's okay, you'll check with {e.first()} and call right "
-                                   "back, and thank them warmly.",
-                                   f"Aw, okay! Let me check with {e.first()} and I'll call you right back. Thank you!",
-                                   "needs_you", {"offered": booking, "why": why})
-        if status == "booked" and not (CONFIRMED.search(str(text)) and e.agreed_time):
-            status = "talking"  # (nothing confirmed by them on a time code accepted: keep talking)
-        if status == "declined" and not FULL.search(str(text)):
-            gen.close()  # (they never said there's nothing: no flat "that won't work" - keep the conversation going)
-            return self._speak(f"Keep it going kindly: ask a short friendly question, e.g. whether they have anything "
-                               f"else around {e.spoken_window()} {e.when()}.",
-                               f"Do you have anything else around {e.spoken_window().replace(' and ', ' or ')}?")
-        if status in ("declined", "needs_you", "goodbye"):
-            words = self._stream_words(gen)
-            return self._closed_with(words, {"goodbye": "no_deal"}.get(status, status),
-                                     {"booking": booking, "why": f"they said: {str(text)[:140]}"})
-        self._stream_words(gen)
+                log.info("errand %s: refused an agreement outside the brief (%s)", e.id, why)
+                if retry and not b.get("time"):
+                    return self._turn("Code check: your decision has no booking time. Put the time they offered in "
+                                      "booking.time; if they haven't offered one yet, ask.", retry=False)
+                if retry:
+                    return self._turn(f"Code check: you can't agree to that - {why}. Answer them again without "
+                                      "agreeing to it.", retry=False)
+                spoken = self._plain(f"Hmm, let me check with {e.first()} on that and call you right back. Thank you!")
+                return self._outcome(spoken, "needs_you", {"offered": booking, "why": why})
+            e.agreed = {k: b[k] for k in ("date", "time", "party_size", "name", "reference") if b.get(k)}
+            if e.name:
+                e.agreed.setdefault("name", e.name)
+        if status == "goodbye" and "?" in (e.transcript[-1][1] if e.transcript and e.transcript[-1][0] == "them" else ""):
+            status = "talking"  # (they asked something: not the end of the call)
+        wide = sum(who == "jarvis" for who, _ in e.transcript) < 2  # (its first explanation may take three sentences)
+        spoken = self._stream_words(gen, 3 if wide else 2, 50 if wide else 35)
+        if status == "booked":
+            return self._outcome(spoken, "booked", {"booking": dict(e.agreed)})
+        if status in ("needs_you", "declined", "wrong_number"):
+            return self._outcome(spoken, OUTCOMES[status],
+                                 {"offered": booking, "why": f"they said: {self._their_last()[:140]}"}
+                                 if status != "wrong_number" else {"why": "wrong number: it isn't " + e.business})
+        if status == "goodbye":
+            if not self.done:
+                self._record("no_deal", {"why": "the call ended without a booking"})
+            return self._hang_up_after(spoken)
+        if self.done:  # (after the outcome they kept talking: wait for their goodbye again)
+            self._wait_for_goodbye(spoken)
+
+    def _their_time(self):
+        """The latest time they offered that fits the brief ("" if none)."""
+        for who, text in reversed(self.e.transcript):
+            if who == "them":
+                ok = [x for x in offered_times(self.e, text)
+                      if fits(self.e, {"time": x, "party_size": self.e.party_size})[0]]
+                if ok:
+                    return ok[-1]
+        return ""
+
+    def _their_last(self):
+        return next((x for who, x in reversed(self.e.transcript) if who == "them"), "")
+
+    # ------------------------------------------------------------ outcome and goodbye
+    def _record(self, status, outcome):
+        e = self.e
+        self.done = True
+        e.status, e.outcome, e.ended = status, outcome or {}, time.time()
+        save(e)
+
+    def _outcome(self, spoken, status, outcome):
+        """The call has an outcome: record it, then wait for their goodbye (it never hangs up on them)."""
+        self._record(status, outcome)
+        self._wait_for_goodbye(spoken)
+
+    def _wait_for_goodbye(self, spoken):
+        self._close_no += 1
+        no = self._close_no
+        self._timer(speak_time(spoken) + CLOSE_WAIT_S, lambda: self._no_reply_bye(no))
+
+    def _no_reply_bye(self, no):
+        with self._lock:
+            if self._hung or no != self._close_no:
+                return  # (they answered meanwhile)
+            self._hang_up_after(self._plain(self._rng.choice(["Okay, bye-bye!", "Alright, bye now!", "Okay, bye!"])))
+
+    def _hang_up_after(self, spoken):
+        self._hung = True
+        self._timer(speak_time(spoken) + 0.5, self._finally_hang_up)
+
+    def _finally_hang_up(self):
+        self._finish()
+        if self.hang_up and not getattr(self, "_ended_line", False):
+            self._ended_line = True
+            try:
+                self.hang_up()
+            except Exception as ex:  # noqa: BLE001 (the line may already be closed)
+                log.debug("errand: hang-up after close: %s", ex)
+
+    def _finish(self):
+        """Once per call: the outcome is saved and texted to you."""
+        if self._finished:
+            return
+        self._finished = True
+        e = self.e
+        if not self.done:
+            self.done = True
+            e.status, e.ended = ("no_deal" if e.turns else "failed"), time.time()
+            e.outcome = e.outcome or {"why": "the call ended before a booking"}
+        finish(e)
+        e.over = True
 
     # ------------------------------------------------------------ speaking
-    def _model(self, directive):
-        self.e._directive = directive
+    def _model(self, note):
+        self.e._note = note
         return _from_dict(THINK(self.e, list(self.e.transcript))) if THINK else \
-            _stream_model(self.e, list(self.e.transcript), directive)
-
-    def _speak(self, directive, fallback, sentences=2, words=35):
-        """The model says `directive` in its own words (checked sentence by sentence); `fallback` if it can't."""
-        try:
-            gen = self._model(directive)
-            next(gen)  # (the header: code already decided, its status isn't used here)
-            spoken = self._stream_words(gen, sentences, words, fallback=fallback)
-        except Exception as ex:  # noqa: BLE001
-            log.warning("errand %s: the model failed (%s); using a plain line", self.e.id, ex.__class__.__name__)
-            spoken = self._plain(fallback)
-        return spoken
+            _stream_model(self.e, list(self.e.transcript), note)
 
     def _plain(self, line):
         self.e.transcript.append(("jarvis", line))
@@ -658,43 +663,14 @@ class ErrandSession:
         self.send("", True)
         return line
 
-    def _close(self, directive, fallback, status, outcome, use_model=True):
-        """The outcome is decided (by code): record it, say the closing words, then wait for their goodbye."""
-        spoken = self._speak(directive, fallback) if use_model and directive else self._plain(fallback)
-        return self._closed_with(spoken, status, outcome)
-
-    def _closed_with(self, spoken, status, outcome):
+    def _guard(self, sentence):
+        """A hard limit on a sentence before it's spoken. -> what to say instead (and stop), or None"""
         e = self.e
-        self.done, self.closing = True, True
-        e.status, e.outcome, e.ended = status, outcome or {}, time.time()
-        finish(e)
-        self._close_no += 1
-        no = self._close_no
-        self._timer(speak_time(spoken) + CLOSE_WAIT_S, lambda: self._no_reply_bye(no))
-
-    def _goodbye(self):
-        """They said goodbye: a short warm goodbye back, heard in full, then hang up."""
-        spoken = self._speak("They're saying goodbye. Say a short, warm goodbye back (a few words).", "Thanks, bye!",
-                             sentences=1, words=12)
-        self._hang_up_after(spoken)
-
-    def _no_reply_bye(self, no):
-        with self._lock:
-            if self._hung or not self.closing or no != self._close_no:
-                return  # (they answered meanwhile, or the conversation reopened)
-            self._hang_up_after(self._plain(self._rng.choice(["Okay, bye-bye!", "Alright, bye now!", "Okay, bye!"])))
-
-    def _hang_up_after(self, spoken):
-        self.done = self._hung = True
-        self._timer(speak_time(spoken) + 0.5, self._finally_hang_up)
-
-    def _finally_hang_up(self):
-        if self.hang_up and not getattr(self, "_ended_line", False):
-            self._ended_line = True
-            try:
-                self.hang_up()
-            except Exception as ex:  # noqa: BLE001 (the line may already be closed)
-                log.debug("errand: hang-up after close: %s", ex)
+        if not safe_to_say(e, sentence):
+            return "Sorry, I can't share that - they'll sort it out when they come in."
+        if agrees_outside(e, sentence):
+            return f"Hmm, I'd have to check with {e.first()} on that one."
+        return None
 
     def _stream_words(self, gen, sentences=2, words=35, fallback="Sorry, could you say that again?"):
         """Speak the model's words sentence by sentence as they arrive; each one is checked before it's sent. -> what
@@ -709,8 +685,9 @@ class ErrandSession:
                 if not m:
                     break
                 sentence, buf = _natural(m.group(1).strip()), buf[m.end():]
-                if not safe_to_say(e, sentence):
-                    sentence, buf, stop = "Sorry, I can't share that - they'll sort it out when they come in.", "", True
+                instead = self._guard(sentence)
+                if instead:
+                    sentence, buf, stop = instead, "", True
                 spoken.append(sentence)
                 self.send(sentence + " ", False)
                 if len(spoken) >= sentences or sum(len(x.split()) for x in spoken) >= words:
@@ -720,7 +697,8 @@ class ErrandSession:
                 buf = ""
                 break
         tail = _natural(buf.strip())
-        if tail and safe_to_say(e, tail) and len(spoken) < sentences:
+        if tail and len(spoken) < sentences:
+            tail = self._guard(tail) or tail
             spoken.append(tail)
             self.send(tail + " ", False)
         if not spoken:  # (nothing usable came back)
@@ -733,23 +711,14 @@ class ErrandSession:
         return said
 
     def closed(self):
-        """The line dropped / they hung up before an outcome. (Waits for a reply in progress, so the outcome isn't
-        recorded twice.)"""
+        """The line dropped / they hung up. (Waits for a reply in progress, so the outcome isn't recorded twice.)"""
         got = self._lock.acquire(timeout=5)
         try:
-            self._closed_locked()
+            self._hung = True
+            self._finish()
         finally:
             if got:
                 self._lock.release()
-
-    def _closed_locked(self):
-        self._hung = True
-        if not self.done:
-            self.done = True
-            e = self.e
-            e.status, e.ended = ("no_deal" if e.turns else "failed"), time.time()
-            e.outcome = e.outcome or {"why": "the call ended before a booking"}
-            finish(e)
 
 
 def hints(e):
@@ -873,7 +842,7 @@ def _main():
     mod.start(e)
     print(f"Calling your phone now. You're the restaurant ({e.business}). Errand {e.id}.", flush=True)
     end = time.time() + MAX_SECONDS + 120
-    while time.time() < end and e.status in ("new", "calling"):
+    while time.time() < end and not e.over:  # (the whole call, goodbye included: the tunnel carries it)
         time.sleep(1)
     print("Outcome:", mod.summary(e), flush=True)
     print("Transcript:", flush=True)
