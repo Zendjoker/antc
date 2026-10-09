@@ -21,7 +21,7 @@ import sys
 import time
 
 CATEGORIES = {
-    "unit": ["test_isolation", "test_cost", "test_intent", "test_claims", "test_speech", "test_generalization", "test_reliability",
+    "unit": ["test_isolation", "test_cost", "test_intent", "test_turn_intent", "test_claims", "test_speech", "test_generalization", "test_reliability",
              "test_conversation_policy", "test_memory_lifecycle", "test_proactive", "test_learning", "test_location",
              "test_cognition"],
     "integration": ["test_actions", "test_apps", "test_media", "test_windows", "test_integrations", "test_phone",

@@ -3,6 +3,11 @@
 A feature plugs in by registering Capability objects (and, optionally, a Group describing the area: when its tools are
 worth offering to the model and one line for the "what I can do" list). The model is offered exactly the registered,
 available capabilities; nothing else can run. Adding a feature = implement it, register it. No router or prompt edits.
+
+A capability can also say what the user's words must name for it (all optional, checked by code): `scope` (what it
+acts on: a tab, an app, a device...; compared with the turn's intent), `precheck` (nothing to do? answered before any
+confirmation is asked), `named_in_words` (do their words name its target?) and `asks` (their words asking for it). An
+area can register_vocabulary(provider): the names of its things (device names, aliases), read through vocabulary().
 """
 
 import re
@@ -62,6 +67,15 @@ class Capability:
     # Its result carries text from OUTSIDE (a web page, an email, a calendar invite, a file, search results, the screen):
     # data, never instructions. After such a result, actions the user didn't ask for need their yes (executor).
     untrusted_output: bool = False
+    # What the user's words must say for it (all optional; read by the executor, never by the model):
+    scope: Optional[str] = None                    # what it acts on: "tab" | "page" | "app" | "window" | "device" |
+                                                   # "media" | "volume" | "mission" | "timer" | "memory"... compared
+                                                   # with the turn's intent (cognition/understand.TurnIntent.scope)
+    precheck: Optional[Callable[[dict], Optional[str]]] = None  # (args) -> a result text ("OK: nothing to stop: ...")
+                                                   # when there is nothing to do, BEFORE any confirmation; None: go on
+    named_in_words: Optional[Callable[[dict, str], bool]] = None  # (args, their words) -> True when the words name
+                                                   # what it acts on (CONFIRM: checked by code, not the model's confidence)
+    asks: Any = None                               # regex: their words asking for it (the taint check: it's their request)
 
     def schema(self):
         """The tool definition the model sees."""
@@ -202,6 +216,7 @@ MODULES = ["room_agent.abilities.safety", "room_agent.abilities.info", "room_age
            "room_agent.abilities.undo", "room_agent.abilities.phone", "room_agent.abilities.zigbee", "room_agent.abilities.system", "room_agent.learning.capabilities", "room_agent.integrations.capabilities"]
 LINES = []    # extra "what I can do" lines that aren't a tool area: (title, available(), detail or detail())
 CONTEXT = []  # (order, provider): provider(user_text) -> lines for the runtime context
+VOCAB = []    # provider() -> short phrases this area knows by name (device names, aliases): see vocabulary()
 
 
 def ensure_loaded():
@@ -269,6 +284,29 @@ def register_context(provider, order=50):
     """provider(user_text) -> lines for the runtime context (live facts this area knows). Lower order comes first."""
     CONTEXT.append((order, provider))
     CONTEXT.sort(key=lambda x: x[0])
+
+
+def register_vocabulary(provider):
+    """provider() -> short phrases this area knows by name ("desk lamp", "LED"): the words that name its things, read
+    by the turn intent (cognition/understand.read_turn) and usable as speech-recognition hints. Keep it cheap."""
+    VOCAB.append(provider)
+    return provider
+
+
+def vocabulary():
+    """Every registered phrase, de-duplicated (case-insensitive, first spelling kept). A provider that fails is skipped."""
+    out, seen = [], set()
+    for provider in list(VOCAB):
+        try:
+            phrases = list(provider() or [])
+        except Exception:
+            continue
+        for p in phrases:
+            p = " ".join(str(p).split()) if isinstance(p, str) else ""
+            if p and p.lower() not in seen:
+                seen.add(p.lower())
+                out.append(p)
+    return out
 
 
 def context_lines(user_text):

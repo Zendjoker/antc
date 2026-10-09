@@ -48,6 +48,7 @@ class Turn:
         self.delivery = None        # how to say it (social/delivery.py VoiceDelivery)
         self.speech = {}            # spoken-response timestamps (speech/timing.py)
         self.last_performance = None  # the previous sentence's SpeechPerformance (speech/director.py: one speaker)
+        self.intent = None          # what their words ask for, read once by code (cognition/understand.TurnIntent)
 
     def mark(self, stage, since=None):
         """Note how long a stage took (from `since`, or from the start of the turn); only the first mark counts."""
@@ -80,6 +81,8 @@ last_ring = None            # the one that last went off: label, message, kind, 
 last_active_app = None      # the app this conversation is about ("close it"): name, action, time (tools/apps.py)
 last_media_at = 0.0         # when volume or playback last changed (tools/media.py)
 session_location = ""       # a city they named for the weather this session (tools/weather.py)
+reply_style = None          # how they asked Jarvis to talk this session: "minimal" | "short" | None (as usual)
+ack_word = ""               # the acknowledgement they asked for ("Alright"), or "" (Jarvis's own)
 user_profile = (config.USER_PROFILE or config.USER_NAME).lower()  # whose learned preferences apply (learning/)
 explaining = False          # "let me finish": collect what they say, answer only a finished thought (conversation/session.py)
 turn_start = None           # when they stopped talking, to time the answer (conversation/session.py)

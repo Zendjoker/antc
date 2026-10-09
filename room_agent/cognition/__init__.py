@@ -49,12 +49,22 @@ def active_goal():
 
 # ---------------------------------------------------------------- start of a turn
 def begin_turn(text):
-    """-> {"level", "why", "reflex": (cap, args) or None, "goal"}. Cheap: regexes and the registry, no model call."""
+    """-> {"level", "why", "reflex": (cap, args) or None, "goal", "intent"}. Cheap: regexes and the registry, no model
+    call. rt.turn.intent is the turn's TurnIntent (cognition/understand.read_turn), read first."""
     from room_agent.actions import pending
     from room_agent.cognition import reflex
 
+    intent = None
+    try:  # (what their words ask for, read once; a bug here never breaks the turn)
+        from room_agent.cognition import understand
+
+        intent = understand.read_turn(text)
+        log.debug("intent: %s", intent.describe())
+    except Exception as e:  # noqa: BLE001
+        log.debug("intent: not read (%s)", e)
+    rt.turn.intent = intent
     goal = active_goal()
-    info = {"reflex": None, "goal": None}
+    info = {"reflex": None, "goal": None, "intent": intent}
     cancelled = False
     if goal and pending.CANCEL.match(text or ""):  # (stop / cancel / never mind: the rest of the goal isn't done)
         goal.set(CANCELLED, "they cancelled it")

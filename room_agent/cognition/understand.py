@@ -15,6 +15,11 @@ merge() combines it with what the model recorded (update_goal): the model's own 
 from the words is added, and a contradiction (the model planning what the words forbid) is listed. The optional second
 pass (GOAL_VERIFIER, off by default) asks a cheap model only when something is ambiguous, and keeps only constraints whose
 words actually appear in the request: a model's confidence is never trusted on its own.
+
+read_turn(text) is the per-turn reading, computed once at the start of every turn (cognition.begin_turn ->
+rt.turn.intent): a TurnIntent with op (turn_on, close, cancel_for_good...), scope (tab, app, device, mission...),
+target, value, route (business_mission only when it names a business and a website / lead / demo), families and
+negation. Regexes only (well under 2 ms), never raises.
 """
 
 import re
@@ -362,3 +367,224 @@ def _ask_cheap_model(text):
                             "Request: " + text,
                             {"name": "goal_check", "description": "stated limits and missing information",
                              "input_schema": schema})
+
+
+# ---------------------------------------------------------------- the turn's intent (read once, at the start of a turn)
+@dataclass
+class TurnIntent:
+    """What this turn's words ask for, read by code once per turn (read_turn -> rt.turn.intent). Routing, the executor
+    and the reflex read it instead of re-reading the words; it never grants a permission by itself."""
+    text: str = ""
+    act: str = ""                 # the kind of turn (conversation/policy.py kind), "" until policy has read it
+    op: str = None                # what to do: one of OPS ("turn_on", "close", "cancel_for_good"...), "ask", or None
+    scope: str = None             # what it acts on: tab | app | window | device | media | volume | mission | timer |
+                                  # memory, or None
+    target: str = ""              # the thing named: "chrome", "LED", "mission"...
+    value: int = None             # a number / percent said ("50%" -> 50)
+    route: str = "conversation"   # missions/goals.route(), "business_mission" only when it really is one
+    business: bool = False        # route == "business_mission"
+    families: list = field(default_factory=list)  # capability areas the words need (_families)
+    negated: bool = False         # the op's verb is negated ("don't close it")
+    correction: dict = None       # {"wanted", "not"} from "I said X, not Y" (filled by the corrections layer)
+    style_pref: str = None        # how they want Jarvis to talk this turn ("short"...) (filled by the social layer)
+    answer: str = None            # "yes" / "no" to what's pending (filled by the confirmation layer)
+
+    def describe(self):
+        """One short line for the logs: "op=turn_off scope=device target=LED"."""
+        bits = [f"op={self.op}", f"scope={self.scope}"]
+        if self.target:
+            bits.append(f"target={self.target}")
+        if self.value is not None:
+            bits.append(f"value={self.value}")
+        if self.negated:
+            bits.append("negated")
+        if self.route and self.route != "conversation":
+            bits.append(f"route={self.route}")
+        if self.act:
+            bits.append(f"act={self.act}")
+        return " ".join(bits)
+
+
+_NOT_CALL = r"(?!(?:at|in|on|when|later|tomorrow|back|tonight|now|if|after|before|again|asap|\d)\b)"
+# What to do, from their words: the first that matches wins (order matters: "cancel it for good" before "cancel").
+OPS = [(op, re.compile(rx, re.I)) for op, rx in (
+    ("cancel_for_good", r"\b(?:cancel|stop|end|kill|abort|delete)\b[^.?!]{0,40}?\b(?:for good|permanently|completely|"
+                        r"for ever|forever|altogether)\b"),
+    ("pause", r"\bpause\b"),
+    ("resume", r"\b(?:resume|unpause|continue|carry on)\b"),
+    ("cancel", r"\b(?:cancel|abort|call off|never ?mind)\b"),
+    ("stop", r"\b(?:stop|halt)\b"),
+    ("close", r"\b(?:close|quit|exit)\b"),
+    ("open", r"\b(?:open|launch|bring up|pull up)\b"),
+    ("switch", r"\b(?:switch|go|flip)\s+(?:over\s+|back\s+)?to\b"),
+    ("search", r"\b(?:search|google|look up)\b"),
+    ("research", r"\bresearch\b"),
+    ("find", r"\b(?:find|look(?:ing)? for|locate)\b"),
+    ("start", r"\b(?:start|begin|kick off|set (?:a|an|the|my) (?:timer|alarm|reminder))\b"),
+    ("set", r"\b(?:set|put|make)\b[^.?!]{0,30}?(?:\b(?:to|at)\s+\d|\d+\s*(?:%|percent\b))|"
+            r"\bturn\b[^.?!]{0,30}?(?:\bto\s+\d|\d+\s*(?:%|percent\b))"),
+    ("raise", r"\b(?:raise|increase|turn (?:\w+\s+){0,2}?up|crank (?:\w+\s+){0,2}?up|bump (?:\w+\s+){0,2}?up|louder|"
+              r"brighter)\b"),
+    ("lower", r"\b(?:lower|reduce|decrease|turn (?:\w+\s+){0,2}?down|quieter|dimmer|dim)\b"),
+    ("turn_on", r"\b(?:turn|switch|flip)\s+(?:[\w.'-]+\s+){0,3}?on\b"),
+    ("turn_off", r"\b(?:turn|switch|flip|shut)\s+(?:[\w.'-]+\s+){0,3}?off\b"),
+    ("play", r"\bplay\b|\bput on some\b"),
+    ("remember", rf"\b(?:remember|forget)\b|\bcall me {_NOT_CALL}\w+"),
+    ("report", r"\bhow (?:much|many)\b|\bwhat'?s my usage\b|\bmy usage\b"),
+)]
+_REPORT = dict(OPS)["report"]
+QUESTION = re.compile(r"^(?:(?:hey|ok(?:ay)?|so|and|well|um+|uh+|jarvis)[\s,]+)*(?:is|are|was|were|am|isn'?t|aren'?t|"
+                      r"wasn'?t|does|doesn'?t|did|didn'?t|has|have|hasn'?t|what|what'?s|whats|which|who|who'?s|whose|"
+                      r"where|where'?s|when|why(?! don'?t you)|how(?! about))\b", re.I)
+DEVICE_OPS = ("turn_on", "turn_off", "set", "raise", "lower")
+SCOPE_RX = {k: re.compile(v, re.I) for k, v in {
+    "tab": r"\btabs?\b|\bthis (?:web ?)?page\b",
+    "window": r"\bwindows?\b",
+    "timer": r"\b(timers?|alarms?|reminders?|remind me)\b",
+    "mission": r"\b(missions?|lead search|business search)\b",
+    "volume": r"\b(volume|sound level|louder|quieter|mute|unmute)\b",
+    "device": r"\b(LEDs?|lights?|lamps?|strips?|bulbs?)\b(?!\s+(?:mode|theme))",
+    "heard_as_led": r"\b(leads?|lids?)\b",  # (speech recognition's "LED": only with a device op)
+    "media": r"\b(music|songs?|tracks?|playback|spotify|videos?|podcasts?)\b",
+    "app": rf"\b(apps?|programs?|applications?)\b|\b{APPS}\b",
+    "memory": rf"\b(remember|forget)\b|\bcall me {_NOT_CALL}(\w+)",
+}.items()}
+_APP_NAME = re.compile(rf"\b{APPS}\b", re.I)
+_SPELLED_LED = re.compile(r"(?<!\w)l\.?\s?e\.?\s?d\b\.?", re.I)
+_NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                 "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+                 "ninety": 90, "hundred": 100}
+_BUSINESS_OBJECT = re.compile(r"\b(web ?sites?|sites?|demos?|leads?|prospects?|outreach|online presence|facebook page)\b",
+                              re.I)
+_category_rx = []
+
+
+def read_turn(text):
+    """-> TurnIntent from the user's words alone: regexes, no model call, no I/O, never raises (whatever could be read)."""
+    it = TurnIntent(text=" ".join(text.split()) if isinstance(text, str) else "")
+    try:
+        _read(it)
+    except Exception:  # noqa: BLE001 (a bug here must never break a turn: keep what was read)
+        pass
+    return it
+
+
+def _read(it):
+    t = _SPELLED_LED.sub("LED", it.text)
+    if not t:
+        return
+    m = None
+    if QUESTION.search(t):  # ("is the door closed?": a question about it, not a request to close it)
+        m = _REPORT.search(t)
+        it.op = "report" if m else "ask"
+    else:
+        for op, rx in OPS:
+            m = rx.search(t)
+            if m:
+                it.op = op
+                break
+        if it.op is None and t.endswith("?"):
+            it.op = "ask"
+    it.negated = bool(m and _negated(t, m))
+    it.scope, it.target = _scope(t, it.op)
+    it.value = _value(t)
+    it.families = _families(t)
+    it.route = _route(t)
+    it.business = it.route == "business_mission"
+
+
+def _scope(t, op):
+    """-> (scope, target) named by the words, or (None, "")."""
+    def hit(name):
+        return SCOPE_RX[name].search(t)
+
+    app = _APP_NAME.search(t)
+    if hit("tab"):
+        return "tab", "tab"
+    if hit("window"):
+        return "window", app.group(0).lower() if app else "window"
+    if m := hit("timer"):
+        return "timer", "reminder" if m.group(1).lower() == "remind me" else m.group(1).lower().rstrip("s")
+    if hit("mission"):
+        return "mission", "mission"
+    if hit("volume"):
+        return "volume", "volume"
+    device = _device(t, op)
+    if device:
+        return "device", device
+    if app and op in ("open", "close", "switch", "start"):  # ("close Spotify": the app, not the music)
+        return "app", app.group(0).lower()
+    if m := hit("media"):
+        return "media", m.group(1).lower()
+    if hit("app"):
+        return "app", app.group(0).lower() if app else ""
+    if m := hit("memory"):
+        return "memory", (m.group(2) or "").lower()
+    return None, ""
+
+
+def _device(t, op):
+    """The device named: a phrase from core.vocabulary() as it's spelled there, "LED" (also when heard as "lead" / "lid"
+    with a device op), "light", "lamp"... or ""."""
+    from room_agent.actions import core
+
+    names = core.vocabulary()
+    for name in sorted(names, key=len, reverse=True):  # (the longest first: "desk lamp" before "lamp")
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", t, re.I):
+            return name
+    led = next((n for n in names if n.lower() == "led"), "LED")
+    m = SCOPE_RX["device"].search(t)
+    if m:
+        word = m.group(1).lower()
+        return led if word.startswith("led") else word.rstrip("s")
+    if op in DEVICE_OPS and SCOPE_RX["heard_as_led"].search(t):
+        return led
+    return ""
+
+
+def _value(t):
+    """A number they said, as an int: a percent first, then "to / at N", then the first number (digits or a word)."""
+    for rx in (r"(?<![\d:.,$])(\d{1,4})\s*(?:%|percent\b)", r"\b(?:to|at)\s+(\d{1,4})(?![\d:])",
+               r"(?<![\d:.,$])(\d{1,4})(?![\d:])"):
+        m = re.search(rx, t, re.I)
+        if m:
+            return int(m.group(1))
+    m = re.search(r"\b(" + "|".join(_NUMBER_WORDS) + r")\b", t, re.I)
+    return _NUMBER_WORDS[m.group(1).lower()] if m else None
+
+
+def _route(t):
+    """missions/goals.route(), but "business_mission" only when the words name both a kind of business and a website /
+    lead / demo object (so "turn on the lead" can't start one)."""
+    try:
+        from room_agent.missions import goals
+
+        route = goals.route(t)
+    except Exception:  # noqa: BLE001
+        return "conversation"
+    if route == "business_mission" and not (_BUSINESS_OBJECT.search(t) and _business_category(t)):
+        route = "conversation"
+    return route
+
+
+def _business_category(t):
+    """The kind of business their words name ("restaurants", "plumbers", "businesses"), or ""."""
+    from room_agent.missions import goals
+
+    if not _category_rx:  # (goals.py's own category patterns, without its memory lookup)
+        loc = r"(?P<loc>[^,.;!?]+?(?:,\s*[A-Z]{2}\b)?)"
+        _category_rx.extend(re.compile(rx, re.I) for rx in (
+            goals.VERB + rf"(?:{goals.N}\s+)?(?P<cat>[a-z][a-z' &-]*?)\s+(?:in|near|around|within \d+ ?km of)\s+{loc}"
+            + goals.STOP,
+            r"\bdemo (?:web)?sites? for\s+(?:the best\s+)?" + rf"(?:{goals.N}\s+)?(?P<cat>[a-z][a-z' &-]*?)\s+"
+            rf"(?:in|near|around)\s+{loc}" + goals.STOP,
+            goals.VERB + rf"(?:{goals.N}\s+)?(?P<cat>[a-z][a-z' &-]*?)\s+(?:that|which|who|with|without|lacking|lacks?|"
+            r"missing|having)\b"))
+    for rx in _category_rx:
+        m = rx.search(t)
+        if m:
+            cat = re.sub(r"^(?:of|for|about)\s+|^(?:(?:leads?|prospects?|demos?(?: sites?)?|web ?sites?)\s+for\s+)", "",
+                         goals._clean_cat(m.group("cat")))
+            if cat and not _BUSINESS_OBJECT.fullmatch(cat) and cat not in ("clients", "customers"):
+                return cat
+    return ""
