@@ -149,7 +149,67 @@ def classify(text, info=None):
 
 def on_user_turn(text, info=None):
     rt.turn.policy = classify(text, info)
+    style_request(text)
     return rt.turn.policy
+
+
+# How they asked Jarvis to talk: "don't talk a lot", "just say alright", "you don't have to repeat everything I say".
+# A rule, not a mood: kept for the session and (unless it was "for now") as their response_style preference.
+STYLE_ASK = re.compile(
+    r"\b(?:don'?t|do not|stop)\s+(?:talk|speak)(?:ing)?\s+(?:a lot|so much|too much)\b|\btalk less\b|\bless talking\b"
+    r"|(?<!\bi )(?<!\bwe )\b(?:just|only)\s+say\s+(?P<ack>ok(?:ay)?|alright|all right|done|got it)\b"
+    r"|\b(?:you\s+)?don'?t\s+(?:have|need)\s+to\s+(?:say|repeat|tell me|explain|confirm)\b|\bstop repeating\b"
+    r"|\bdon'?t repeat (?:everything|what i say|me|it back|after me)\b|\bkeep (?:it|your answers|replies) short\b"
+    r"|\bbe brief\b", re.I)
+ACKS = {"ok": "Okay", "okay": "Okay", "alright": "Alright", "all right": "Alright", "done": "Done", "got it": "Got it"}
+STYLE_NORMAL = re.compile(r"\b(?:talk|speak) (?:normally|normal) again\b|\byou can (?:talk|explain) more\b|"
+                          r"\bmore detail(?:s|ed)?\b(?: please)?$|\bback to (?:normal|how you talked)\b", re.I)
+
+
+def style_request(text):
+    """Their words about how Jarvis should talk -> rt.reply_style / rt.ack_word now, and a lasting preference."""
+    t = str(text or "")
+    m = STYLE_ASK.search(t)
+    if m:
+        rt.reply_style = "minimal"
+        rt.ack_word = ACKS.get((m.group("ack") or "alright").lower(), "Alright")
+        _remember_style("minimal", t)
+    elif STYLE_NORMAL.search(t):
+        rt.reply_style, rt.ack_word = None, ""
+        _remember_style("normal", t)
+    if getattr(rt.turn, "intent", None) is not None and (m or STYLE_NORMAL.search(t)):
+        rt.turn.intent.style_pref = "minimal" if m else "normal"
+
+
+def _remember_style(value, said):
+    from room_agent.learning.adaptation import PERMANENT, TEMPORARY
+
+    if TEMPORARY.search(said) and not PERMANENT.search(said):
+        return  # ("for now, just say ok": this session only)
+    try:
+        from room_agent import learning
+
+        learning.user_model().teach("response_style", value, because=f'you said: "{said[:80]}"')
+    except Exception as e:  # noqa: BLE001 (the session rule still applies)
+        import logging
+
+        logging.getLogger("room-agent").debug("response style not saved: %s", e)
+
+
+def minimal_replies():
+    """Did they ask for minimal replies (this session, or as a lasting preference)? -> the acknowledgement word, or ''."""
+    if rt.reply_style == "minimal":
+        return rt.ack_word or "Alright"
+    if rt.reply_style is None:
+        try:
+            from room_agent import learning
+
+            p = learning.user_model().resolve("response_style")
+            if p and p.get("value") == "minimal":
+                return rt.ack_word or "Alright"
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
 
 
 def _openers():
@@ -167,6 +227,10 @@ def context_lines(user_text):
     if p is None:
         return []
     lines = [p.render()]
+    ack = minimal_replies()
+    if ack:
+        lines.append(f"- reply_style: they asked you to keep it minimal: after an action say only \"{ack}.\"; never repeat "
+                     "their command back; no offers or follow-up questions. Questions still get their answer, briefly.")
     worn = _openers()
     if worn:
         lines.append("- vary your wording: recent replies kept starting with " + ", ".join(repr(w) for w in worn[:3])

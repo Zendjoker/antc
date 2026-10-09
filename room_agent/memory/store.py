@@ -23,7 +23,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from .text import mentions, now as _now, norm as _norm, raw_words as _raw_words, terms as _terms
+from .text import concepts as _concepts, mentions, now as _now, norm as _norm, raw_words as _raw_words, terms as _terms
 
 log = logging.getLogger("room-agent")
 
@@ -34,18 +34,72 @@ NOTHING_TO_LEARN = {"yeah", "yes", "yep", "no", "nope", "nah", "ok", "okay", "th
                     "nice", "sure", "alright", "right", "hmm", "mm", "lol", "haha", "bye", "good", "great"}
 # Core facts: one value each (a new value supersedes the old one)
 PROFILE_KEYS = {
-    "name": "name", "home_location": "home city / location", "units": "preferred units (metric or imperial)",
+    "name": "name", "address_as": "what to call them; never their real name",
+    "home_location": "home city / location", "units": "preferred units (metric or imperial)",
     "timezone": "timezone", "birthday": "birthday", "job": "job", "school": "school", "partner": "partner",
     "pets": "pets",
 }
+# Who they are (the real name: bookings, emails, calls) is changed only by their own "my name is..." (override=True);
+# how they like to be addressed ("call me boss") is address_as, a separate key.
+IDENTITY_KEYS = {"name"}
+FORMS_OF_ADDRESS = {"boss", "the boss", "big boss", "boss man", "sir", "chief", "captain", "cap", "king", "queen", "champ",
+                    "champion", "legend", "master", "madam", "ma am", "maam", "my lord", "lord", "your majesty",
+                    "your highness", "commander", "general", "big man", "buddy", "bro", "dude", "mate", "pal"}
+CALL_ME = re.compile(r"\b(call me|you can call me|address me as|refer to me as|call me by|i'?d like to be called|"
+                     r"i want to be called|i prefer to be called)\b", re.I)
+NAME_IS = re.compile(r"\b(my name is|my name'?s|i'?m called|i am called|my real name|changed my name|"
+                     r"spell(ed|s)? (it|my name))\b", re.I)
 HOME_KEYS = ("home_location", "location", "city", "home", "lives_in")
+OPEN_THREAD = re.compile(r"\bopen[- ]threads?\b|\bunresolved\b|\bnot done\b|\bstill (?:to do|needs?)\b|\bnext step\b", re.I)
 CATEGORIES = ("profile", "person", "preference", "plan", "routine", "fact")
+
+
+def clip(text, limit):
+    """At most `limit` characters, cut after the last whole sentence that fits (else the last whole word), never
+    mid-word."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit + 1]  # (one more character: is a sentence's full stop followed by a space?)
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s)", cut)]
+    if ends and ends[-1] >= limit // 3:
+        return cut[:ends[-1]]
+    return cut[:max(cut[:limit - 2].rfind(" "), 1)].rstrip(" ,;:-") + "..."
+
+
+def is_form_of_address(value):
+    return _norm(value) in FORMS_OF_ADDRESS
+
+
+def resolve_identity(rows):
+    """Who they are vs. what they asked to be called, read from the 'name' / 'address_as' rows (dicts with id, key,
+    value, active, superseded_by). Read-time only, nothing is written: a form of address ('boss') that superseded a
+    real name ('Adam') under 'name' reads as name Adam, address_as boss.
+    -> {"name", "address_as", "name_suspect", "real_row", "title_row"} (rows only when that repair applies)."""
+    by_id = {r["id"]: r for r in rows}
+    current = next((r for r in sorted(rows, key=lambda r: -r["id"]) if r["key"] == "name" and r["active"]), None)
+    address = next((r for r in sorted(rows, key=lambda r: -r["id"]) if r["key"] == "address_as" and r["active"]), None)
+    out = {"name": current["value"] if current else "", "address_as": address["value"] if address else "",
+           "name_suspect": False, "real_row": None, "title_row": None}
+    if not current or not is_form_of_address(current["value"]):
+        return out
+    seen, row = set(), current  # (walk back what it superseded: Adam -> boss, or Adam -> boss -> sir)
+    while row is not None and row["id"] not in seen:
+        seen.add(row["id"])
+        row = next((r for r in by_id.values() if r["key"] == "name" and not r["active"]
+                    and r.get("superseded_by") == row["id"]), None)
+        if row is not None and not is_form_of_address(row["value"]):
+            out.update(name=row["value"], address_as=out["address_as"] or current["value"], name_suspect=True,
+                       real_row=row, title_row=current)
+            break
+    return out
 
 
 # Words people use for core facts that don't appear in the stored text ("where do I live" -> home_location)
 PROFILE_ALIASES = {
     "home_location": {"live", "where", "home", "city", "town", "address", "location", "from", "move", "moved", "weather"},
-    "name": {"name", "call", "called"},
+    "name": {"name"},
+    "address_as": {"call", "called", "nickname", "address"},
     "units": {"units", "celsius", "fahrenheit", "metric", "imperial", "temperature"},
     "birthday": {"birthday", "born", "age", "old"},
     "job": {"job", "work", "career", "profession"},
@@ -138,8 +192,21 @@ class Memory:
         return self._q("SELECT COUNT(*) FROM memories WHERE active=1")[0][0]
 
     def profile(self):
-        return {r["key"]: r["value"] for r in
-                self._q("SELECT key, value FROM memories WHERE active=1 AND key IS NOT NULL ORDER BY id")}
+        """Core facts, with the name read through identity() (a stored 'boss' that replaced 'Adam' reads correctly)."""
+        out = {r["key"]: r["value"] for r in
+               self._q("SELECT key, value FROM memories WHERE active=1 AND key IS NOT NULL ORDER BY id")}
+        if "name" in out or "address_as" in out:
+            who = self.identity()
+            out.update({k: who[k] for k in ("name", "address_as") if who[k]})
+        return out
+
+    def identity(self):
+        """-> {"name": their real name, "address_as": what they asked to be called, "name_suspect": the stored name
+        is a form of address that replaced the real one}. Reads only: the table is never changed here."""
+        rows = [dict(r) for r in self._q("SELECT id, key, value, source, active, superseded_by FROM memories "
+                                         "WHERE key IN ('name', 'address_as')")]
+        who = resolve_identity(rows)
+        return {k: who[k] for k in ("name", "address_as", "name_suspect")}
 
     def get(self, key):
         rows = self._q("SELECT value FROM memories WHERE active=1 AND key=? ORDER BY id DESC LIMIT 1", (key,))
@@ -156,26 +223,62 @@ class Memory:
     SOURCE_WEIGHT = {"you said it": 0.5, "user_statement": 0.3, "confirmation": 0.3, "tool": 0.3, "imported": 0.1,
                      "learned": 0.0, "inference": -0.2}
 
-    def relevant(self, query, k=8):
-        """Stored facts relevant to `query`, best first: shared meaningful words first, then how trustworthy the source
-        is, then how recent. Core (keyed) facts are handled separately and always known."""
-        q = _terms(query)
-        if not q:
+    CONCEPT_ONLY_MAX = 3  # facts that share only a topic (no word) with the request: at most this many
+
+    def relevant(self, query, k=8, context=""):
+        """Stored facts relevant to `query`, best first: shared meaningful words, then a shared topic ("get more
+        clients" and "a side business building websites" are both about work: text.CONCEPTS), then the words of the
+        recent conversation (`context`: a short follow-up keeps its topic), then how trustworthy the source is and how
+        recent. Core (keyed) facts are handled separately and always known."""
+        q, ctx = _terms(query), _terms(context) - _terms(query)
+        if not q and not ctx:
             return []
+        topics = _concepts(q) or _concepts(ctx)
         today = datetime.datetime.now()
         scored = []
         for f in self.facts():
-            overlap = len(q & _terms(f["content"] + " " + (f["category"] or "")))
-            if not overlap:
+            ft = _terms(f["content"] + " " + (f["category"] or ""))
+            overlap, from_ctx, shared = len(q & ft), len(ctx & ft), topics & _concepts(ft)
+            if not (overlap or from_ctx or shared):
                 continue
             try:
                 age_days = (today - datetime.datetime.strptime(f["updated_at"][:10], "%Y-%m-%d")).days
             except ValueError:
                 age_days = 999
-            score = overlap + self.SOURCE_WEIGHT.get(f["source"], 0.0) + (0.2 if age_days <= 7 else 0.0)
-            scored.append((score, f["updated_at"], f))
+            score = (overlap + 0.5 * min(from_ctx, 2) + (0.6 if shared else 0.0)
+                     + self.SOURCE_WEIGHT.get(f["source"], 0.0) + (0.2 if age_days <= 7 else 0.0))
+            scored.append((score, f["updated_at"], not (overlap or from_ctx), f))
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        return [f for _, _, f in scored[:k]]
+        out, topic_only = [], 0
+        for _, _, only_topic, f in scored:
+            if only_topic:
+                topic_only += 1
+                if topic_only > self.CONCEPT_ONLY_MAX:
+                    continue
+            out.append(f)
+            if len(out) >= k:
+                break
+        return out
+
+    def relevant_summaries(self, query, context="", n=3, scan=12, looking_back=False):
+        """The past-conversation summaries worth knowing for this request (not just the newest): the ones that share
+        words or a topic with it (or with the recent conversation), and - when they refer back ("continue the project",
+        "what did we decide") - the ones with an open thread. The newest is always included. Oldest first."""
+        sums = [s for s in self.summaries(scan) if "SKIP" not in s["summary"]]
+        if not sums:
+            return []
+        q, ctx = _terms(query), _terms(context)
+        topics = _concepts(q) or _concepts(ctx)
+        scored = []
+        for i, s in enumerate(sums):
+            st = _terms(s["summary"])
+            score = len(q & st) + 0.5 * min(len(ctx & st), 2) + (0.6 if topics & _concepts(st) else 0.0)
+            if looking_back and OPEN_THREAD.search(s["summary"]):
+                score += 1.5
+            scored.append((score, i, s))
+        picked = {i for score, i, _ in sorted(scored, key=lambda x: (x[0], x[1]), reverse=True)[:n - 1] if score >= 1}
+        picked.add(len(sums) - 1)  # (the newest: what was just going on)
+        return [s for i, s in enumerate(sums) if i in picked]
 
     # ---------- what must never come back, near-duplicates, contradictions, expiry ----------
     def reject(self, content, why="they said it isn't true"):
@@ -267,16 +370,24 @@ class Memory:
         }
 
     # ---------- writing (each returns a verified result) ----------
-    def set_key(self, key, value, source="learned", confidence=1.0):
-        """Set a core fact. A different existing value is superseded (kept for history, inactive).
-        Returns (changed, previous_value). Raises MemoryError_ if it couldn't be stored."""
+    def set_key(self, key, value, source="learned", confidence=1.0, override=False):
+        """Set a core fact. A different existing value is superseded (kept for history, inactive), except: what they
+        told it directly (source 'explicit') isn't replaced by anything learned in the background, and their real name
+        (IDENTITY_KEYS) changes only with override=True (their own "my name is ..."). Returns (changed, previous_value);
+        a kept value returns (False, previous). Raises MemoryError_ if it couldn't be stored."""
         key = re.sub(r"\W+", "_", str(key).strip().lower()).strip("_")
         value = str(value or "").strip()[:MAX_CONTENT]
         if not key:
             raise MemoryError_("empty key")
         with self._lock:
-            old = self._q("SELECT id, value FROM memories WHERE active=1 AND key=?", (key,))
+            old = self._q("SELECT id, value, source FROM memories WHERE active=1 AND key=?", (key,))
             previous = old[0]["value"] if old else ""
+            if old and previous != value and not override:
+                why = ("told directly" if any(r["source"] == "explicit" for r in old) and source != "explicit"
+                       else "their real name" if key in IDENTITY_KEYS else "")
+                if why:
+                    log.info("memory: kept %s=%r (%s), not replaced by %r (%s)", key, previous, why, value, source)
+                    return False, previous
             if not value:  # delete
                 self._q("DELETE FROM memories WHERE active=1 AND key=?", (key,))
                 return bool(old), previous
@@ -353,7 +464,7 @@ class Memory:
             return [r["content"] for r in doomed] + [f"a past conversation summary" for _ in sums]
 
     def add_summary(self, summary):
-        self._q("INSERT INTO summaries(created_at, summary) VALUES(?,?)", (_now(), summary.strip()[:400]))
+        self._q("INSERT INTO summaries(created_at, summary) VALUES(?,?)", (_now(), clip(summary, 400)))
         self._q("DELETE FROM summaries WHERE id NOT IN (SELECT id FROM summaries ORDER BY id DESC LIMIT 60)")
 
     # ---------- recent dialogue (survives restarts) ----------

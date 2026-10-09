@@ -5,9 +5,36 @@ import re
 
 from room_agent import runtime as rt
 from room_agent.config import USER_NAME
-from room_agent.memory import FORGET_ALL, PROFILE_KEYS, MemoryError_, mentions
+from room_agent.memory import CALL_ME, FORGET_ALL, NAME_IS, PROFILE_KEYS, MemoryError_, mentions
 
 log = logging.getLogger("room-agent")
+# (the model's own note can only move a value to the SAFER key: "Prefer to be called 'boss'" is never their name)
+_CALLED = re.compile(r"\b(call(ed)?|address(ed)?|nickname|refer(red)? to)\b", re.I)
+
+
+def _their_words():
+    """What they said for this: this turn's words, plus the request a 'yes' answers."""
+    p = rt.pending
+    source = getattr(p, "source_text", "") if p is not None and getattr(p, "capability", "") == "remember" else ""
+    return f"{rt.turn_text or ''} {source}".strip()
+
+
+def _name_key(value, content):
+    """remember(key='name'): their real name, or what they want to be called? -> (key, override) or a NEEDS text.
+    Only their own 'my name is ...' may change the name; 'call me boss' is address_as."""
+    said = _their_words()
+    call = CALL_ME.search(said)
+    if call and (not NAME_IS.search(said) or value.lower() in said[call.end():call.end() + 40].lower()):
+        return "address_as", False  # ("my name is Adam but call me boss": boss is what to call them)
+    if NAME_IS.search(said):
+        return "name", True
+    if _CALLED.search(content):
+        return "address_as", False
+    stored = rt.memory.identity()["name"]
+    if stored and stored.strip().lower() != value.strip().lower():
+        return (f"NEEDS: is '{value}' their actual name or what they want to be called? Their name is stored as "
+                f"{stored}. Ask in a few words. Nothing was saved.")
+    return "name", False
 
 
 def remember(args):
@@ -21,8 +48,20 @@ def remember(args):
         return "NEEDS: content (what to remember). Ask what they want remembered. Nothing was saved."
     try:
         if key:
-            changed, previous = memory.set_key(key, value or content, source="explicit")
-            stored = memory.get(key)
+            value, override = value or content, False
+            if key == "name":
+                decided = _name_key(value, content)
+                if isinstance(decided, str):
+                    return decided
+                key, override = decided
+            changed, previous = memory.set_key(key, value, source="explicit", override=override)
+            stored = memory.identity()["name"] if key == "name" else memory.get(key)
+            if key == "address_as":
+                name = memory.identity()["name"] or USER_NAME
+                kept = f" (their name stays {name})" if name and name.lower() != stored.lower() else ""
+                return f"OK: {'saved' if changed else 'already stored'}: call them '{stored}'{kept}."
+            if not changed and stored != value:
+                return f"OK: kept: {PROFILE_KEYS.get(key, key)} = {stored} (they told you this directly). Nothing changed."
             if not changed:
                 return f"OK: already stored: {PROFILE_KEYS.get(key, key)} = {stored}."
             replaced = f" (replaces the old value: {previous})" if previous else ""

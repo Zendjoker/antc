@@ -64,8 +64,8 @@ KINDS = {
                     say=lambda s, v: f"when they say '{s}': " + (", ".join(f"{x['action']} {' '.join(map(str, x['args'].values()))}".strip()
                                                                          for x in v) if isinstance(v, list) else v),
                     words=None),
-    "response_style": dict(subject=False, check=_choice("short", "normal", "detailed"), say=lambda s, v: f"answers: {v}",
-                           words=None, behavior=True),
+    "response_style": dict(subject=False, check=_choice("minimal", "short", "normal", "detailed"),
+                           say=lambda s, v: f"answers: {v}", words=None, behavior=True),  # (minimal: "Alright." after actions)
     "humor": dict(subject=True, check=_text, say=lambda s, v: f"humor{'' if s in ('', 'always') else ' when ' + s}: {v}",
                   words=None, behavior=True),
     "interruptions": dict(subject=False, check=_text, say=lambda s, v: f"interruptions: {v}", words=None, behavior=True),

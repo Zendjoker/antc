@@ -55,6 +55,11 @@ def run(cap, args):
     result = plan.run(cap.name, args)
     if not result.success:
         return None, result
+    from room_agent.conversation.policy import minimal_replies
+
+    ack = minimal_replies()
+    if ack and result.verified:  # (they asked for just "Alright")
+        return f"{ack}.", result
     if cap.reflex_say:  # (built from the verified new state, e.g. "Okay, it's at 55.")
         try:
             line = cap.reflex_say(result)

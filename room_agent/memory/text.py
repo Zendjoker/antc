@@ -38,5 +38,25 @@ def terms(text):
     return {stem(w) for w in words if w not in STOPWORDS and len(w) > 1}
 
 
+# What a memory is ABOUT, beyond its exact words: "get more clients" is about the side business, "I miss my sister" about
+# family. A small fixed vocabulary, stemmed like terms(): bounded and predictable (no model call, no embeddings).
+CONCEPTS = {
+    "work": "business busines client customer money income revenue sale sell market lead project side startup company "
+            "website site web design freelance agency pitch profit earn work job career plan idea demo restaurant",
+    "family": "sister brother mom mother dad father family parent cousin aunt uncle son daughter wife husband partner "
+              "kid child grandma grandpa",
+    "health": "doctor dentist appointment sick pain health hospital medicine therapy gym workout sleep tired",
+    "money": "money rent bill pay budget cost expense afford debt salary price spend saving",
+    "mood": "stress stressed anxious anxiety worried sad lonely upset happy mood overwhelmed struggling feel",
+    "home": "house apartment home room door light lamp kitchen bedroom",
+}
+_CONCEPT_TERMS = {name: {stem(w) for w in words.split()} for name, words in CONCEPTS.items()}
+
+
+def concepts(term_set):
+    """The concepts a set of terms() touches."""
+    return {name for name, ts in _CONCEPT_TERMS.items() if ts & term_set}
+
+
 def raw_words(text):
     return {re.sub(r"'s$|'", "", w) for w in re.findall(r"[a-z0-9']+", str(text).lower())}

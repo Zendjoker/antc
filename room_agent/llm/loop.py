@@ -67,6 +67,11 @@ def verified_done(plan, n, spoken, guard):
         return None
     if spoken:
         return []
+    from room_agent.conversation.policy import minimal_replies
+
+    ack = minimal_replies()
+    if ack:  # (they asked for just "Alright": verified, so nothing more to say)
+        return [f"{ack}."]
     lines = []
     for cap, step in zip(caps, steps):
         line = cap.reflex_say(step) if cap.reflex_say else None
