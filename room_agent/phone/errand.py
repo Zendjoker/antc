@@ -808,6 +808,7 @@ def _main():
             tunnel.stop()
             raise SystemExit("the public tunnel never became reachable; no call was placed")
         time.sleep(1.5)
+    time.sleep(8)  # (this PC sees a brand-new tunnel address before Twilio's servers do: give them a moment)
     # (run as "python -m", this file is __main__: the phone server uses room_agent.phone.errand, so use that one)
     from room_agent.phone import errand as mod
 
