@@ -159,18 +159,30 @@ async def relay(request):
                     await ws.close()
                     break
                 pending = PENDING.pop((data.get("customParameters") or {}).get("reason", ""), None) or {}
-                from room_agent.phone.session import CallSession
+                item = pending.get("item") or {}
+                if item.get("kind") == "errand":  # (a call FOR you: restricted session, no tools - phone/errand.py)
+                    from room_agent.phone import errand
 
-                session = CallSession(send, pending.get("greeting", ""), pending.get("item"), hang_up=hang_up)
+                    e = errand.ACTIVE.get(item.get("errand_id"))
+                    if e is None:
+                        await ws.close()
+                        break
+                    session = errand.ErrandSession(e, send, hang_up=hang_up)
+                else:
+                    from room_agent.phone.session import CallSession
+
+                    session = CallSession(send, pending.get("greeting", ""), pending.get("item"), hang_up=hang_up)
                 state.call_started("inbound" if inbound else "outbound")
                 log.info("phone: call connected (%s)", "they called" if inbound else "Jarvis called")
             elif kind == "prompt" and session and data.get("last", True) and str(data.get("voicePrompt", "")).strip():
                 loop.run_in_executor(None, session.answer, data["voicePrompt"])
-            elif kind == "interrupt" and session:
+            elif kind == "interrupt" and session and hasattr(session, "interrupt"):
                 session.interrupt()
             elif kind == "error":
                 log.warning("phone: Twilio reported a problem: %s", str(data.get("description", ""))[:120])
     finally:
+        if session is not None and hasattr(session, "closed"):
+            session.closed()  # (an errand call that ended before an outcome is recorded as such)
         state.call_ended()
         log.info("phone: call ended")
     return ws

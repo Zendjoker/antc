@@ -283,6 +283,7 @@ TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "").strip()  # Jarvis's number, +1...
 MY_PHONE = os.getenv("MY_PHONE", "").strip()  # your number, +1... (the only number Jarvis talks to)
 PHONE_TTS_PROVIDER = os.getenv("PHONE_TTS_PROVIDER", "").strip()  # optional: Google / Amazon / ElevenLabs (Twilio's)
 PHONE_VOICE = os.getenv("PHONE_VOICE", "").strip()  # optional voice id for that provider
+ERRANDS_FILE = Path(os.getenv("ERRANDS_FILE", HERE / "errands.json"))  # errand calls (phone/errand.py): outcomes
 VIP_SENDERS = [s.strip().lower() for s in os.getenv("VIP_SENDERS", "").split(",") if s.strip()]  # emails worth a call
 SMS_DAILY_LIMIT = int(os.getenv("SMS_DAILY_LIMIT", "20"))  # texts to your phone per day (each one costs a little)
 CALL_COOLDOWN_MIN = float(os.getenv("CALL_COOLDOWN_MIN", "10"))  # at least this long between calls

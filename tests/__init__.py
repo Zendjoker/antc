@@ -22,7 +22,7 @@ for _name, _file in {
     "PROACTIVE_STATE_FILE": "proactive_state.json", "CONNECTIONS_FILE": "connections.json",
     "LEARNING_DB": "learning.db", "EXPERIENCE_DB": "experience.db", "APPS_CACHE": "apps_cache.json",
     "RESEARCH_FILE": "research.json", "TASKS_FILE": "tasks.json", "LISTS_FILE": "lists.json", "EVENT_REMINDERS_FILE": "event_reminders.json",
-    "MISSIONS_DB": "missions.db", "MISSIONS_DIR": "missions",
+    "MISSIONS_DB": "missions.db", "MISSIONS_DIR": "missions", "ERRANDS_FILE": "errands.json",
 }.items():
     os.environ[_name] = os.path.join(_TMP, _file)
 os.environ.setdefault("JARVIS_TEST", "1")  # (config.TEST_MODE: the real desktop is off-limits; hardware tests set 0)
