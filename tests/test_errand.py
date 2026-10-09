@@ -155,7 +155,9 @@ twiml, said, ended = run_errand(e, ["Luigi's, hi! How are you doing?", "We can d
 t.check("the call goes to THEIR OWN phone (test mode); the number's settings untouched",
         TW.calls[-1]["to"] == config.MY_PHONE and TW.calls[-1]["from"] == config.TWILIO_NUMBER)
 t.check("no scripted greeting: it waits for the restaurant to answer (no welcomeGreeting); a natural female voice; "
-        "echo-resistant listening", "welcomeGreeting" not in twiml and 'voice="en-US-Chirp3-HD-Aoede"' in twiml
+        "echo-resistant listening", "welcomeGreeting" not in twiml and 'ttsProvider="ElevenLabs"' in twiml
+        and 'voice="cgSgspJ2msm6clMCkdW9-flash_v2_5-1.0_0.45_0.8"' in twiml and "Azzouz" in twiml
+        and 'speechModel="nova-3-general"' in twiml
         and 'interruptible="speech"' in twiml and 'interruptSensitivity="low"' in twiml, twiml)
 t.check("its first words answer how they picked up, then who it's calling for and why, and that it's an AI",
         "react naturally" in said[0] and "your boss, Adam Azzouz" in said[0] and "AI" in said[0] and "Friday" in said[0],

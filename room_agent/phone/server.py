@@ -128,7 +128,13 @@ async def voice(request):
     if voice_id:
         voice_attrs += f" voice={quoteattr(voice_id)}"
     if errand_call:  # (only real speech interrupts it, not its own voice echoing back or background noise)
-        voice_attrs += (' interruptSensitivity="low" ignoreBackchannel="true"')
+        voice_attrs += (' interruptSensitivity="low" ignoreBackchannel="true" transcriptionProvider="Deepgram"'
+                        f" speechModel={quoteattr(config.ERRAND_SPEECH_MODEL)}")
+        from room_agent.phone import errand
+
+        e = errand.ACTIVE.get(((PENDING.get(reason) or {}).get("item") or {}).get("errand_id"))
+        if e is not None:  # (words this call is likely to contain: recognized more reliably)
+            voice_attrs += f" hints={quoteattr(errand.hints(e))}"
     relay = _public(request, ws=True).split("/twilio/")[0] + "/twilio/relay"
     interrupt = "speech" if errand_call else "true"
     welcome = "" if errand_call else f" welcomeGreeting={quoteattr(greeting)}"  # (an errand waits for them to answer)

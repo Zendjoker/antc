@@ -283,8 +283,11 @@ TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "").strip()  # Jarvis's number, +1...
 MY_PHONE = os.getenv("MY_PHONE", "").strip()  # your number, +1... (the only number Jarvis talks to)
 PHONE_TTS_PROVIDER = os.getenv("PHONE_TTS_PROVIDER", "").strip()  # optional: Google / Amazon / ElevenLabs (Twilio's)
 PHONE_VOICE = os.getenv("PHONE_VOICE", "").strip()  # optional voice id for that provider
-ERRAND_TTS_PROVIDER = os.getenv("ERRAND_TTS_PROVIDER", "Google").strip()  # errand calls' voice (Twilio)
-ERRAND_VOICE = os.getenv("ERRAND_VOICE", "en-US-Chirp3-HD-Aoede").strip()  # a natural US female voice; or Amazon / Danielle-Generative
+ERRAND_TTS_PROVIDER = os.getenv("ERRAND_TTS_PROVIDER", "ElevenLabs").strip()  # errand calls' voice (through Twilio)
+# ElevenLabs "Jessica" (young American woman, conversational): VOICEID-model-speed_stability_similarity; a lower stability
+# sounds less flat. Alternatives: Sarah EXAVITQu4vr4xnSDxMaL, Rachel 21m00Tcm4TlvDq8ikWAM; or Google en-US-Chirp3-HD-Aoede
+ERRAND_VOICE = os.getenv("ERRAND_VOICE", "cgSgspJ2msm6clMCkdW9-flash_v2_5-1.0_0.45_0.8").strip()
+ERRAND_SPEECH_MODEL = os.getenv("ERRAND_SPEECH_MODEL", "nova-3-general").strip()  # Deepgram speech recognition
 ERRANDS_FILE = Path(os.getenv("ERRANDS_FILE", HERE / "errands.json"))  # errand calls (phone/errand.py): outcomes
 VIP_SENDERS = [s.strip().lower() for s in os.getenv("VIP_SENDERS", "").split(",") if s.strip()]  # emails worth a call
 SMS_DAILY_LIMIT = int(os.getenv("SMS_DAILY_LIMIT", "20"))  # texts to your phone per day (each one costs a little)

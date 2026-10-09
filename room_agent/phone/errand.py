@@ -661,6 +661,14 @@ class ErrandSession:
             finish(e)
 
 
+def hints(e):
+    """Words and phrases this call is likely to contain, for speech recognition (Twilio's `hints`)."""
+    words = [e.business, e.name, *(e.name or "").split(), e.date, "reservation", "table", "party of", "people",
+             "booked", "all set", "available", "o'clock", "seven thirty", "eight", "under the name", "how many",
+             "what time", "hold on", "wrong number"]
+    return ",".join(dict.fromkeys(w.replace(",", " ") for w in words if w))[:500]
+
+
 def summary(e):
     b = (e.outcome or {}).get("booking") or {}
     if e.status == "booked":
