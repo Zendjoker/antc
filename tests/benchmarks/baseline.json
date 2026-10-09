@@ -1,0 +1,154 @@
+{
+ "label": "baseline",
+ "mode": "baseline",
+ "when": "2026-10-08 17:07",
+ "commit": "0af9ef4",
+ "settings": {
+  "latency_s": 0.03,
+  "pace_scale": 0.02
+ },
+ "rows": [
+  {
+   "scenario": "dense",
+   "mode": "baseline",
+   "state": "completed",
+   "success": true,
+   "completion": 1.0,
+   "got": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 116,
+   "duplicate_fetches": 2,
+   "searches": 28,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 0,
+   "wall_s": 5.28,
+   "steps": 68,
+   "failed_steps": 0,
+   "gmail_created": 0,
+   "demo_failure_injected": ""
+  },
+  {
+   "scenario": "sparse",
+   "mode": "baseline",
+   "state": "completed",
+   "success": false,
+   "completion": 0.933,
+   "got": {
+    "qualified": 16,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 16,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 16,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 74,
+   "duplicate_fetches": 2,
+   "searches": 18,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 0,
+   "wall_s": 3.47,
+   "steps": 35,
+   "failed_steps": 0,
+   "gmail_created": 0,
+   "demo_failure_injected": ""
+  },
+  {
+   "scenario": "failures",
+   "mode": "baseline",
+   "state": "finished_with_problems",
+   "success": false,
+   "completion": 0.867,
+   "got": {
+    "qualified": 20,
+    "demos": 4,
+    "drafts": 4
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 4,
+    "drafts": 4
+   },
+   "unsupported_claims": 0,
+   "http_requests": 112,
+   "duplicate_fetches": 2,
+   "searches": 41,
+   "paid_calls": 4,
+   "model_calls": 4,
+   "cost_usd": 0.0029,
+   "interventions": 0,
+   "wall_s": 5.96,
+   "steps": 68,
+   "failed_steps": 2,
+   "gmail_created": 0,
+   "demo_failure_injected": "Testville Kitchen 02"
+  },
+  {
+   "scenario": "crash",
+   "mode": "baseline",
+   "state": "completed",
+   "success": true,
+   "completion": 1.0,
+   "got": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 116,
+   "duplicate_fetches": 2,
+   "searches": 28,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 1,
+   "wall_s": 5.28,
+   "steps": 68,
+   "failed_steps": 0,
+   "gmail_created": 0,
+   "demo_failure_injected": ""
+  }
+ ],
+ "aggregate": {
+  "scenarios": 4,
+  "success_rate": 0.5,
+  "mean_completion": 0.95,
+  "false_qualified": 0,
+  "unsupported_claims": 0,
+  "duplicate_fetches": 8,
+  "http_requests": 418,
+  "paid_calls": 19,
+  "total_cost_usd": 0.013775,
+  "cost_per_success_usd": 0.006888,
+  "interventions": 1,
+  "total_wall_s": 20.0
+ }
+}

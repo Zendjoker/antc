@@ -66,6 +66,20 @@ def _connect_errors():
     return tuple(out)
 
 
+# which tier each kind of mission work uses (light = cheap, strong = capable); configurable, not a judgement of models
+TASK_TIERS = {"classification": "light", "extraction": "light", "formatting": "light", "wording": "light",
+              "tool_selection": "light", "planning": "strong", "reasoning": "strong", "coding": "strong"}
+
+
+def tier_for(task, failures=0):
+    """The tier for a task: its default (TASK_TIERS), moved to "strong" once the light model's outputs for it failed
+    their checks MISSION_ESCALATE_AFTER times (0 = never: no surprise cost)."""
+    base = TASK_TIERS.get(task, "light")
+    if base == "light" and config.MISSION_ESCALATE_AFTER and failures >= config.MISSION_ESCALATE_AFTER:
+        return "strong"
+    return base
+
+
 def complete(prompt, system="", tier="light", max_tokens=800, what="model call", idem_key=None):
     """-> text. Raises meter.BudgetExceeded before spending past the mission's budget, ModelUnavailable without a key,
     runctx.Cancelled if the step was stopped (before sending; a call already sent is still charged)."""

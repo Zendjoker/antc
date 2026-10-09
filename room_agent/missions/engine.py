@@ -20,6 +20,19 @@ running goes back to pending if idempotent, otherwise it's marked failed ("not r
 reservations left open are counted at their full estimate; approvals left mid-way become "unknown"; half-swapped demo
 sites are finished or rolled back; any Google Places content an older version stored is purged.
 Missions run one at a time, in a single background thread (plus one thread per step run, for timeouts).
+
+Goal-driven missions (missions/goals.py; a `goals` row next to the mission) also get:
+    - plan validation BEFORE anything runs or is added: every step kind has a handler, no duplicate keys, no dependency
+      on a step that doesn't exist, no dependency cycle (validate_plan)
+    - step contracts (Workflow.contracts): purpose, the existing capability used, expected output, a deterministic
+      read-only verification, failure handling, estimated cost. A step is recorded completed only when its handler
+      succeeded AND its contract's verification passed (MISSION_VERIFY); a failed verification is a failure (retried only
+      if the step is idempotent)
+    - bounded replanning (Workflow.replan, MISSION_REPLAN, at most MISSION_MAX_REPLANS times): when every step has ended
+      but a success criterion isn't met, the workflow may add steps (e.g. the next-best business for a demo that failed
+      its checks). Every change is logged with its reason. Never a paid or irreversible action that wasn't asked for.
+    - at the end the goal's success criteria are checked against the database and files, not against any model.
+A mission never ends "completed" with steps that never ran (an unreachable step is marked blocked).
 """
 
 import logging
@@ -79,6 +92,20 @@ class StepResult:
 
 
 @dataclass
+class Contract:
+    """What a step kind promises, checked by code. verify(ctx, step, result) -> [problems] must be read-only and
+    deterministic (files, database, the step's own result); never a model's opinion."""
+    purpose: str
+    capability: str                          # the existing component that does it
+    expected: str                            # the output it must produce
+    verify: Callable = None
+    on_failure: str = ""                     # what happens when it fails
+    cost: Callable = None                    # (mission params, step args) -> estimated USD
+    parallel_safe: bool = False              # may run at the same time as other steps (MISSION_CONCURRENCY)
+    resource: Callable = None                # (step args) -> key: two steps with the same key never run at once
+
+
+@dataclass
 class Workflow:
     kind: str
     title: str
@@ -93,6 +120,52 @@ class Workflow:
     reconcile: Callable = None              # (mission row, step row) -> (state, note) for a NON-idempotent step that was
                                             # running when Jarvis stopped: "completed" (its effect is in place),
                                             # "pending" (provably not applied, safe to run again), "uncertain"
+    contracts: dict = field(default_factory=dict)  # step kind -> Contract
+    replan: Callable = None                 # (ctx, criteria) -> ([StepSpec], why): steps that could still meet an unmet
+                                            # success criterion (goal-driven missions only)
+
+
+def validate_plan(wf, specs, existing=None):
+    """-> [problems] ([] = valid). existing: {key: depends} of steps the mission already has."""
+    existing = existing or {}
+    problems = []
+    keys = [x.key for x in specs]
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    if dup:
+        problems.append(f"duplicate step keys: {', '.join(dup[:5])}")
+    known = set(existing) | set(keys)
+    for x in specs:
+        if x.kind not in wf.handlers:
+            problems.append(f"'{x.key}': no capability for step kind '{x.kind}'")
+        elif wf.contracts and x.kind not in wf.contracts:
+            problems.append(f"'{x.key}': step kind '{x.kind}' has no contract (expected output / verification)")
+        for d in x.depends or []:
+            d = d.lstrip("~")
+            if not d.endswith(":*") and d not in known:
+                problems.append(f"'{x.key}' depends on '{d}', which isn't part of the plan")
+    graph = {k: [d.lstrip("~") for d in deps or [] if not d.endswith(":*")] for k, deps in existing.items()}
+    graph.update({x.key: [d.lstrip("~") for d in x.depends or [] if not d.lstrip("~").endswith(":*")] for x in specs})
+    state = {}
+
+    def cyclic(k):
+        if state.get(k) == 1:
+            return True
+        if state.get(k) == 2:
+            return False
+        state[k] = 1
+        if any(cyclic(d) for d in graph.get(k, []) if d in graph):
+            return True
+        state[k] = 2
+        return False
+
+    loops = sorted(k for k in graph if k in keys and cyclic(k))
+    if loops:
+        problems.append(f"dependency cycle through: {', '.join(loops[:5])}")
+    return problems
+
+
+def _existing_plan(mid):
+    return {st["key"]: st["depends"] for st in store().steps(mid)}
 
 
 WORKFLOWS = {}
@@ -111,8 +184,9 @@ def _controlled(fn):
             return fn(*a, **k)
     return wrapper
 _runner = {"thread": None}
-_active = {}       # mission id -> the Token of the step run in progress
+_active = {}       # mission id -> {step key: the Token of its run in progress}
 _abandoned = []    # (thread, token, mission id, step key): runs cancelled but not yet ended (for the dashboard)
+_budget_hit = {}   # mission id -> daily?: a parallel step hit the budget; the scheduler pauses once the others ended
 
 
 def register(workflow):
@@ -162,13 +236,18 @@ def _slug(text):
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")[:40] or "mission"
 
 
-def create(kind, params, budget_usd=None):
+def create(kind, params, budget_usd=None, goal=None):
     """Plan a mission and start it in the background. -> the mission row. Raises ownership.NotOwner if another Jarvis
-    process runs this database's missions."""
+    process runs this database's missions, ValueError for an invalid plan (nothing is created then).
+    goal: the structured goal (missions/goals.py) it serves; stored with it (criteria, decisions, replanning)."""
     ownership.acquire()
     wf = WORKFLOWS.get(kind)
     if wf is None:
         raise ValueError(f"no workflow called {kind}")
+    specs = list(wf.plan(params))
+    problems = validate_plan(wf, specs)
+    if problems:
+        raise ValueError("the plan isn't valid, so nothing was started: " + "; ".join(problems[:4]))
     budget = float(budget_usd if budget_usd is not None else config.MISSION_DEFAULT_BUDGET_USD)
     budget = max(0.0, min(budget, config.MISSION_MAX_BUDGET_USD))
     title = wf.describe(params)
@@ -177,7 +256,9 @@ def create(kind, params, budget_usd=None):
     workspace.mkdir(parents=True, exist_ok=True)
     s = store()
     m = s.create_mission(mid, kind, title, params, budget, workspace)
-    for spec in wf.plan(params):
+    if goal is not None:
+        s.set_goal(mid, goal)
+    for spec in specs:
         s.add_step(mid, spec.key, spec.kind, spec.title, spec.args, spec.depends, spec.idempotent, spec.max_attempts)
     s.set_state(mid, "running", "created")
     s.event(mid, f"mission planned: {title} (budget ${budget:.2f})")
@@ -202,6 +283,10 @@ def add_steps(mid, specs):
         raise MissionClosed("there's no such mission")
     if m["state"] == "cancelled":
         raise MissionClosed("that mission was stopped for good; start a new one")
+    wf = WORKFLOWS.get(m["kind"])
+    problems = validate_plan(wf, specs, _existing_plan(mid)) if wf else []
+    if problems:
+        raise ValueError("those steps aren't a valid plan: " + "; ".join(problems[:4]))
     added = sum(s.add_step(mid, x.key, x.kind, x.title, x.args, x.depends, x.idempotent, x.max_attempts) for x in specs)
     if added and m["state"] in RESTARTABLE:
         s.set_state(mid, "running", f"{added} step(s) added", only_from=RESTARTABLE)
@@ -216,8 +301,7 @@ def add_steps(mid, specs):
 
 
 def _cancel_active(mid, why):
-    t = _active.get(mid)
-    if t is not None:
+    for t in list((_active.get(mid) or {}).values()):
         t.cancel(why)
 
 
@@ -462,6 +546,8 @@ def _run_mission(mid):
         s.set_state(mid, "paused", "no workflow for this kind")
         return
     s.event(mid, "running")
+    if config.MISSION_CONCURRENCY > 1 and wf.contracts:
+        return _run_parallel(wf, mid, started)
     while True:
         m = s.mission(mid)
         if m is None or m["state"] != "running":
@@ -475,9 +561,172 @@ def _run_mission(mid):
             return
         st = _next_step(s, mid)
         if st is None:
+            if _replan(wf, m):
+                continue
             _finish(wf, m)
             return
         _run_step(wf, m, st, started)
+
+
+def _replan(wf, m):
+    """Every step has ended. If this is a goal-driven mission with an unmet success criterion, the workflow may add
+    steps that could still meet it - bounded (MISSION_MAX_REPLANS), validated, logged with the reason. -> added any?"""
+    if wf.replan is None or not config.MISSION_REPLAN:
+        return False
+    s = store()
+    mid = m["id"]
+    row = s.goal(mid)
+    if row is None:
+        return False
+    from room_agent.missions import goals
+
+    crit = goals.evaluate(mid)
+    if not crit or all(c["met"] for c in crit):
+        return False
+    if row["replans"] >= config.MISSION_MAX_REPLANS:
+        if not any(d.get("type") == "replan_limit" for d in row.get("decisions") or []):
+            s.add_decision(mid, {"type": "replan_limit", "why": f"replanning limit reached ({config.MISSION_MAX_REPLANS}); "
+                                                                "reporting what's done and what isn't"})
+        return False
+    try:
+        specs, why = wf.replan(Ctx(m, runctx.Token(mid, "replan")), crit)
+    except Exception as e:  # noqa: BLE001 (a replanning bug must not take the mission down: it just ends)
+        log.exception("mission %s: replanning failed", mid)
+        s.add_decision(mid, {"type": "replan_error", "why": f"replanning failed ({e.__class__.__name__})"})
+        return False
+    if not specs:
+        if why and not any(d.get("why") == why for d in row.get("decisions") or []):
+            s.add_decision(mid, {"type": "no_replan", "why": why})
+        return False
+    problems = validate_plan(wf, specs, _existing_plan(mid))
+    if problems:
+        s.add_decision(mid, {"type": "replan_rejected", "why": "; ".join(problems[:3])})
+        return False
+    added = sum(s.add_step(mid, x.key, x.kind, x.title, x.args, x.depends, x.idempotent, x.max_attempts) for x in specs)
+    if not added:
+        return False
+    s.add_decision(mid, {"type": "replan", "why": why, "added": [x.key for x in specs]}, replan=True)
+    s.event(mid, f"plan changed: {why} ({added} step{'s' if added != 1 else ''} added)", "warn")
+    _audit("mission_replanned", mid, why=why[:200], added=added)
+    return True
+
+
+def _verify(wf, ctx, st, res):
+    """The step's contract check (deterministic, read-only). -> [problems]"""
+    c = wf.contracts.get(st["kind"]) if config.MISSION_VERIFY else None
+    if c is None or c.verify is None:
+        return []
+    try:
+        return [str(x) for x in (c.verify(ctx, st, res) or [])]
+    except Exception as e:  # noqa: BLE001
+        return [f"its verification couldn't run ({e.__class__.__name__}: {str(e)[:120]})"]
+
+
+def _release_active(mid, key):
+    with _lock:
+        runs = _active.get(mid) or {}
+        runs.pop(key, None)
+        if not runs:
+            _active.pop(mid, None)
+
+
+def _ready_steps(s, mid, busy):
+    """Pending steps whose dependencies are done, in plan order (blocking those whose hard dependency failed).
+    busy: keys running right now (a step waiting out its retry backoff counts as busy)."""
+    for _ in range(1000):
+        steps = s.steps(mid)
+        by_key = {st["key"]: st for st in steps}
+        blocked_one = False
+        ready = []
+        for st in steps:
+            if st["state"] != "pending" or st["key"] in busy:
+                continue
+            deps = _deps(by_key, st["depends"])
+            dead = [d["key"] for d, soft in deps if not soft and d["state"] in DEAD]
+            if dead:
+                s.update_step(st["id"], state="blocked", error=f"not run: {', '.join(dead[:3])} didn't complete")
+                blocked_one = True
+                break
+            if all(d["state"] in DONE or (soft and d["state"] in DEAD) for d, soft in deps):
+                ready.append(st)
+        if not blocked_one:
+            return ready
+    return []
+
+
+def _run_parallel(wf, mid, started):
+    """Like the loop in _run_mission, with up to MISSION_CONCURRENCY steps at once. Only steps whose contract says
+    parallel_safe run together; two steps with the same resource key (the same business / site) never overlap; a step
+    that isn't parallel-safe runs alone. Budget reservations are atomic (meter), so parallel paid calls can't overspend;
+    pause / stop / the emergency stop cancel every run in progress; each run records its outcome only if it still owns
+    its step (run_id), exactly as one at a time."""
+    s = store()
+    running = {}  # step key -> (thread, resource key or None, parallel_safe)
+
+    def reap():
+        for k in [k for k, v in running.items() if not v[0].is_alive()]:
+            running.pop(k)
+
+    def drain():
+        while running:
+            reap()
+            time.sleep(0.05)
+
+    _budget_hit.pop(mid, None)
+    while True:
+        reap()
+        m = s.mission(mid)
+        if m is None or m["state"] != "running":
+            drain()
+            return
+        if mid in _budget_hit:  # (no new step starts; the ones in flight - their money reserved - end normally)
+            drain()
+            daily = _budget_hit.pop(mid, False)
+            m = s.mission(mid)
+            if m["state"] == "running":
+                _budget_pause(mid, m, daily=daily)
+            return
+        why = _mission_should_stop(mid, started)
+        if why == "emergency stop":
+            pause(mid, why)
+            drain()
+            return
+        if _headroom(m) <= 0 and (m["budget_usd"] > 0 or m["spent_usd"] > 0):
+            drain()
+            m = s.mission(mid)
+            if m["state"] == "running":
+                _budget_pause(mid, m)
+            return
+        started_one = False
+        alone = any(not v[2] for v in running.values())
+        for st in _ready_steps(s, mid, set(running)):
+            if alone or len(running) >= config.MISSION_CONCURRENCY:
+                break
+            c = wf.contracts.get(st["kind"])
+            safe = bool(c and c.parallel_safe)
+            if running and not safe:
+                continue  # (waits until nothing else runs)
+            res_key = None
+            if c is not None and c.resource is not None:
+                try:
+                    res_key = c.resource(st["args"])
+                except Exception:  # noqa: BLE001
+                    res_key = f"step:{st['key']}"
+            if res_key is not None and any(v[1] == res_key for v in running.values()):
+                continue
+            th = threading.Thread(target=_run_step, args=(wf, m, st, started, True), name=f"mission-run-{st['key']}",
+                                  daemon=True)
+            running[st["key"]] = (th, res_key, safe)
+            th.start()
+            started_one = True
+            if not safe:
+                break
+        if not running and not started_one:
+            if _replan(wf, m):
+                continue
+            _finish(wf, m)
+            return
+        time.sleep(0.02)
 
 
 def _budget_pause(mid, m, daily=False):
@@ -533,7 +782,7 @@ def _call(handler, ctx, st, token):
     return "ok", r
 
 
-def _run_step(wf, m, st, started):
+def _run_step(wf, m, st, started, defer_budget_pause=False):
     s = store()
     mid = m["id"]
     handler = wf.handlers.get(st["kind"])
@@ -546,16 +795,17 @@ def _run_step(wf, m, st, started):
     token = runctx.Token(mid, st["key"], deadline=time.time() + timeout,
                          should_stop=lambda: _mission_should_stop(mid, started))
     crashpoints.hit("before_operation")
-    _active[mid] = token  # (registered before the claim: a stop / pause from now on cancels this run)
+    with _lock:
+        _active.setdefault(mid, {})[st["key"]] = token  # (registered before the claim: a stop / pause cancels this run)
     if not s.claim_step(st["id"], mid, run_id, attempt, owner=ownership.token() or "-"):
-        _active.pop(mid, None)  # (the step was cancelled / the mission stopped or paused since it was read)
+        _release_active(mid, st["key"])  # (the step was cancelled / the mission stopped or paused since it was read)
         return
     spent0 = s.mission(mid)["spent_usd"]
     ctx = Ctx(m, token)
     try:
         kind, res = _call(handler, ctx, st, token)
     finally:
-        _active.pop(mid, None)
+        _release_active(mid, st["key"])
     cost = s.mission(mid)["spent_usd"] - spent0
 
     def finish(**fields):
@@ -563,7 +813,10 @@ def _run_step(wf, m, st, started):
 
     if kind == "error" and isinstance(res, meter.BudgetExceeded):
         finish(state="pending", attempts=attempt - 1, error=str(res), cost_usd=cost)
-        _budget_pause(mid, s.mission(mid), daily=isinstance(res, meter.DailyBudgetExceeded))
+        if defer_budget_pause:  # (steps running beside it already reserved their money: they finish first)
+            _budget_hit[mid] = _budget_hit.get(mid, False) or isinstance(res, meter.DailyBudgetExceeded)
+        else:
+            _budget_pause(mid, s.mission(mid), daily=isinstance(res, meter.DailyBudgetExceeded))
         return
     if kind == "cancelled":
         reason = res or "stopped"
@@ -586,6 +839,24 @@ def _run_step(wf, m, st, started):
         res = StepResult(False, error=f"{res.__class__.__name__}: {str(res)[:200]}")
     elif not isinstance(res, StepResult):
         res = StepResult(False, error="the step returned nothing")
+    if res.ok and res.add:
+        problems = validate_plan(wf, res.add, _existing_plan(mid))
+        if problems:
+            res = StepResult(False, error="its follow-up steps aren't a valid plan: " + "; ".join(problems[:3]),
+                             final=True)
+    if res.ok:
+        problems = _verify(wf, ctx, st, res)
+        if problems:
+            if res.committed:  # (its change happened, but it isn't what was promised: recorded, never silently "done")
+                finish(state="failed", ended=time.time(), cost_usd=cost, evidence=res.evidence[:2000],
+                       error="applied, but verification failed: " + "; ".join(problems)[:400])
+                s.event(mid, f"step '{st['title']}' was applied but failed its verification: {problems[0][:200]}", "error")
+                return
+            res = StepResult(False, error="verification failed: " + "; ".join(problems)[:400])
+        else:
+            c = wf.contracts.get(st["kind"])
+            if c is not None and c.verify is not None and config.MISSION_VERIFY:
+                res.evidence = (res.evidence + f" | verified: {c.expected}")[:2000]
     if res.ok:
         crashpoints.hit("before_db_commit")
         # the completion, the follow-up steps and the skips are ONE transaction: never a completed step without them
@@ -622,6 +893,24 @@ def _finish(wf, m):
         summary = wf.summarize(ctx)
     except Exception as e:  # noqa: BLE001
         summary = f"(the summary couldn't be written: {e.__class__.__name__})"
+    never = [st for st in steps if st["state"] == "pending"]  # (no runnable order exists, e.g. a dependency cycle)
+    for st in never:
+        s.update_step(st["id"], state="blocked", error="not run: its dependencies can never complete")
+    problems += never
+    row = s.goal(mid)
+    if row is not None:
+        from room_agent.missions import goals
+
+        crit = goals.evaluate(mid)
+        if crit:
+            met = [c for c in crit if c["met"]]
+            summary += "\nGoal: " + f"{len(met)} of {len(crit)} success criteria met" + "".join(
+                f"; {c['id']} {c['got']}/{c['target']}" + ("" if c["met"] else " (NOT met)") for c in crit
+                if c["metric"] != "sent")
+            try:
+                goals.remember(mid)
+            except Exception as e:  # noqa: BLE001
+                log.debug("goal knowledge not saved: %s", e)
     state = "finished_with_problems" if problems else "completed"
     if not s.set_state(mid, state, "all steps ended", only_from=("running",)):
         return  # (paused / stopped at the last moment)
@@ -632,6 +921,31 @@ def _finish(wf, m):
 
 
 # ---------------------------------------------------------------- reconciliation while running (no restart needed)
+def plan_view(mid):
+    """The plan as the user should see it: each step with its contract (purpose, capability, expected output,
+    verification, failure handling, estimated cost), state and evidence. No payloads."""
+    s = store()
+    m = s.mission(mid)
+    if m is None:
+        return []
+    wf = WORKFLOWS.get(m["kind"])
+    out = []
+    for st in s.steps(mid):
+        c = wf.contracts.get(st["kind"]) if wf else None
+        est = None
+        if c is not None and c.cost is not None:
+            try:
+                est = round(float(c.cost(m["params"], st["args"])), 4)
+            except Exception:  # noqa: BLE001
+                est = None
+        out.append({"key": st["key"], "title": st["title"], "state": st["state"], "depends": st["depends"],
+                    "purpose": c.purpose if c else "", "capability": c.capability if c else st["kind"],
+                    "expected": c.expected if c else "", "verified_by": "code check" if c and c.verify else "",
+                    "on_failure": c.on_failure if c else "", "est_usd": est, "evidence": (st["evidence"] or "")[:300],
+                    "error": (st["error"] or "")[:300]})
+    return out
+
+
 def reconcile_now(mid=None):
     """Re-check every unresolved item with READ-ONLY checks (files, Gmail), without restarting Jarvis. Nothing is ever
     re-run or re-sent here; items that can't be decided stay as they are and appear in pending_actions(). -> [notes]"""

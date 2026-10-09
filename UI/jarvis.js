@@ -521,6 +521,29 @@
       pb.append(r);
     }
 
+    // goal & plan: what was understood, success criteria (checked by code), the plan by step kind, why it changed
+    const gb = $("#mission-goal");
+    gb.innerHTML = "";
+    const g = d.goal || {};
+    const crit = g.criteria || [];
+    $("#mission-goal-tag").textContent = crit.length ? `${crit.filter(c => c.met).length}/${crit.length} criteria met` : "No goal recorded";
+    if (g.understood) gb.append(el("div", "m-item", `Understood: ${g.understood}`));
+    for (const c of crit) {
+      const r = el("div", "m-step");
+      r.append(tag(c.met ? "met" : "not yet", c.met ? "green" : "amber"), el("span", "m-name", c.what),
+               el("span", "m-meta", c.metric === "sent" ? `${c.got} sent` : `${c.got ?? "?"} / ${c.target}`));
+      gb.append(r);
+    }
+    if ((g.constraints || []).length) gb.append(el("div", "m-path", "Your limits: " + g.constraints.join("; ")));
+    if ((g.defaults || []).length) gb.append(el("div", "m-path", "Defaults used (not stated by you): " + g.defaults.join("; ")));
+    if ((g.learned || []).length) gb.append(el("div", "m-path", "From earlier verified results: " + g.learned.join("; ")));
+    const kinds = Object.entries(g.plan || {});
+    if (kinds.length) gb.append(el("div", "m-path", "Plan: " + kinds.map(([k, v]) => `${k} ${v.done}/${v.total}${v.failed ? ` (${v.failed} failed)` : ""}${v.running ? ` (${v.running} running)` : ""}`).join(" · ")));
+    for (const c of (g.changes || []).slice(-5)) gb.append(el("div", "m-ev warn", `Plan changed: ${c.why}`));
+    for (const f of (g.failed || []).slice(0, 5)) gb.append(el("div", "m-ev", `Failed (${f.kind}): ${f.step} — ${f.why}`));
+    const sp = Object.entries(g.spend || {});
+    if (sp.length) gb.append(el("div", "m-path", "Spend: " + sp.map(([k, v]) => `${k} ${v.calls} call${v.calls === 1 ? "" : "s"} $${v.usd.toFixed(4)} (${Object.entries(v.by_basis).map(([b, n]) => `${n} ${b}`).join(", ")})`).join(" · ")));
+
     // needs your decision (uncertain steps, unknown Gmail drafts, hand-edit conflicts, estimated charges)
     const ACTION_LABEL = { retry: "Retry (may cost again)", accept: "Accept as is", check: "Check Gmail again",
                            mark_created: "It's in Gmail", mark_not_created: "It's not in Gmail",

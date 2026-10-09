@@ -1,0 +1,35 @@
+{
+ "plans": {
+  "invalid_plans": 4,
+  "rejected_before_run": 0,
+  "valid_plan_accepted": true,
+  "detail": {
+   "unknown_kind": {
+    "refused": false,
+    "steps_run": 1
+   },
+   "dangling_dependency": {
+    "refused": false,
+    "steps_run": 1
+   },
+   "cycle": {
+    "refused": false,
+    "steps_run": 0
+   },
+   "duplicate_key": {
+    "refused": false,
+    "steps_run": 1
+   },
+   "valid": {
+    "refused": false,
+    "steps_run": 2
+   }
+  }
+ },
+ "goals": {
+  "available": false,
+  "note": "no goal interpreter in this version (the LLM fills tool arguments; not measurable offline)"
+ },
+ "commit": "0af9ef4",
+ "when": "2026-10-08 17:08"
+}

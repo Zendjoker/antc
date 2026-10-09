@@ -228,6 +228,8 @@ def mission_detail(mid):
             "operations": [{k: o[k] for k in ("id", "kind", "what", "state", "error", "created", "updated")}
                            for o in s.ops(mid)][-60:],
             "attention": engine.pending_actions(mid),
+            "goal": __import__("room_agent.missions.goals", fromlist=["explain"]).explain(mid),
+            "plan": engine.plan_view(mid)[-80:],
             "owner": __import__("room_agent.missions.ownership", fromlist=["info"]).info(),
             "events": [{k: e[k] for k in ("at", "level", "text")} for e in s.events(mid, 60)]}
 

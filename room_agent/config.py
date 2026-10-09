@@ -124,6 +124,13 @@ MISSION_MAX_BUDGET_USD = float(os.getenv("MISSION_MAX_BUDGET_USD", "") or "10.00
 MISSION_LIGHT_MODEL = os.getenv("MISSION_LIGHT_MODEL", "") or OPENAI_MODEL  # wording (email drafts, site copy): cheap model
 MISSION_STRONG_MODEL = (os.getenv("MISSION_STRONG_MODEL", "").strip() or "claude-sonnet-5-5")  # demo-site code edits (CODER_BACKEND=anthropic)
 MISSION_LLM_COPY = os.getenv("MISSION_LLM_COPY", "0") == "1"  # 1 = a model polishes outreach wording (costs a little); 0 = templates
+# goal-driven missions (missions/goals.py): contract verification, bounded replanning, parallel independent steps
+MISSION_VERIFY = os.getenv("MISSION_VERIFY", "1") == "1"  # a step is done only when its contract's code check passes
+MISSION_REPLAN = os.getenv("MISSION_REPLAN", "1") == "1"  # unmet success criterion -> the workflow may add free steps
+MISSION_MAX_REPLANS = int(os.getenv("MISSION_MAX_REPLANS", "") or "2")  # at most this many plan changes per mission
+MISSION_CONCURRENCY = max(1, int(os.getenv("MISSION_CONCURRENCY", "") or "1"))  # steps run at once (1 = one at a time)
+MISSION_ESCALATE_AFTER = int(os.getenv("MISSION_ESCALATE_AFTER", "") or "0")  # light-model outputs that failed their
+#   checks before wording moves to the strong model (0 = never escalate: no surprise cost)
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "").strip()  # optional: better business discovery (paid per request)
 PLACES_COST_PER_REQUEST = float(os.getenv("PLACES_COST_PER_REQUEST", "") or "0.035")  # USD estimate per Places Text Search call
 PLACES_DETAILS_COST_PER_REQUEST = float(os.getenv("PLACES_DETAILS_COST_PER_REQUEST", "") or "0.025")  # Place Details re-fetch

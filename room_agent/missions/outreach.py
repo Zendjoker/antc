@@ -145,19 +145,25 @@ def _facts_ok(text, lead):
     return not re.search(r"\$\s?\d|\breviews?\b|\bstars?\b|award", text, re.I)
 
 
-def polish(lead, subject, body):
-    """Optional: a light model rewrites the wording (same facts). Falls back to the template if anything is off."""
+_rejected = {}  # mission id -> how many model rewrites failed the fact check (llm.tier_for escalation)
+
+
+def polish(lead, subject, body, mission_id=""):
+    """Optional: a light model rewrites the wording (same facts). Falls back to the template if anything is off.
+    After MISSION_ESCALATE_AFTER rewrites in a mission failed the fact check, the strong tier is used (if configured)."""
     if not config.MISSION_LLM_COPY:
         return subject, body, ""
+    tier = llm.tier_for("wording", _rejected.get(mission_id, 0))
     prompt = ("Rewrite this cold email to be warm, short and natural. Keep every fact, the opt-out line and the signature "
               "exactly; add no new facts, numbers, links, prices, reviews or promises. Output the email body only.\n\n" + body)
     try:
-        text = llm.complete(prompt, tier="light", max_tokens=500, what="outreach wording").strip()
+        text = llm.complete(prompt, tier=tier, max_tokens=500, what="outreach wording").strip()
     except (llm.ModelUnavailable, meter.BudgetExceeded) as e:
         return subject, body, f"template used ({e.__class__.__name__})"
     except Exception as e:  # noqa: BLE001
         return subject, body, f"template used (model call failed: {e.__class__.__name__})"
     if not text or "no thanks" not in text.lower() or not _facts_ok(text, lead):
+        _rejected[mission_id] = _rejected.get(mission_id, 0) + 1
         return subject, body, "template used (the model's version added or dropped facts)"
     return subject, text, "wording polished by a model, facts checked"
 
@@ -181,7 +187,7 @@ def prepare(lead, mission_id, workspace, has_demo, s=None):
     folder.mkdir(parents=True, exist_ok=True)
     problems = sender_problems()
     subject, body = email_draft(lead, has_demo)
-    subject, body, note = polish(lead, subject, body)
+    subject, body, note = polish(lead, subject, body, mission_id)
     from room_agent.missions.websites import valid_email
 
     recipient = valid_email(lead.get("email"))

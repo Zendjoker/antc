@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from room_agent import config
-from room_agent.missions import discovery, engine, outreach, places, runctx, sitegen, websites
+from room_agent.missions import discovery, engine, meter, outreach, places, runctx, sitegen, websites
 from room_agent.missions.engine import StepResult, StepSpec, Workflow
 from room_agent.missions.store import norm_phone, norm_text, store
 
@@ -120,10 +120,12 @@ def step_discover(ctx, step):
     """Each batch (OpenStreetMap, then every paid Google page) is stored the moment it arrives and the progress is
     checkpointed, so a run cut off by a budget pause / restart resumes without buying the same pages again."""
     p = ctx.params
-    cp_key = f"discover:{ctx.id}"
+    radius = float(step["args"].get("radius_km") or p["radius_km"])
+    primary = step["key"] == "discover"
+    cp_key = f"discover:{ctx.id}" if primary else f"discover:{ctx.id}:{step['key']}"
     cp = ctx.store.cache_get(cp_key, 10 ** 9) or {}
     known = ctx.store.leads(mission_id=ctx.id, limit=1000)
-    if known and (cp.get("done") or not cp):  # (finished before, or stored by an older version: reuse, don't pay)
+    if known and (cp.get("done") or (not cp and primary)):  # (finished before, or stored by an older version: reuse)
         return StepResult(True, {"found": len(known), "reused": True},
                           evidence=f"{len(known)} businesses already found by this mission (not searched again)",
                           add=_research_steps(known))
@@ -141,7 +143,7 @@ def step_discover(ctx, step):
         raw.cache_put(cp_key, cp)
         ctx.check()
 
-    center, _, notes = discovery.discover(p["category"], p["location"], p["radius_km"], pool, p["use_places"],
+    center, _, notes = discovery.discover(p["category"], p["location"], radius, pool, p["use_places"],
                                           cancel=ctx.stop_requested, on_batch=store_batch, resume=cp)
     cp["done"] = True
     ctx.store.cache_put(cp_key, cp)
@@ -206,7 +208,8 @@ def step_research(ctx, step):
     if lead is None:
         return StepResult(False, error="the lead is gone from the database", final=True)
     flt = ctx.params["website_filter"]
-    if lead.get("researched") and time.time() - lead["researched"] < FRESH_S and lead["website_status"] != "unchecked":
+    if lead.get("researched") and time.time() - lead["researched"] < FRESH_S and \
+            lead["website_status"] not in ("unchecked", "unknown"):
         return _maybe_enough(ctx, lead, flt, StepResult(True, {"reused": True}, evidence=f"researched on "
                              f"{time.strftime('%Y-%m-%d', time.localtime(lead['researched']))}: {lead['website_status']}"))
     google_only = bool((lead.get("extra") or {}).get("google_only"))
@@ -306,6 +309,8 @@ def step_rank(ctx, step):
     researched = [x for x in s.leads(mission_id=ctx.id, limit=1000) if x.get("researched")]
     fits = sorted((x for x in researched if _matches_filter(x, flt)),
                   key=lambda x: (-(x.get("score") or 0), -(x.get("confidence") or 0), x["name"]))
+    with_demo = {proj["lead_id"] for proj in s.projects(ctx.id)}  # (a re-rank keeps the businesses whose demo exists)
+    fits = [x for x in fits if x["id"] in with_demo] + [x for x in fits if x["id"] not in with_demo]
     chosen = fits[:p["count"]]
     for rank, x in enumerate(chosen, 1):
         extra = dict(x.get("extra") or {})
@@ -313,8 +318,13 @@ def step_rank(ctx, step):
         s.update_lead(x["id"], status="qualified" if x["status"] in ("candidate", "not a fit") else x["status"], extra=extra)
     chosen_ids = {x["id"] for x in chosen}
     for x in researched:
-        if x["id"] not in chosen_ids and x["status"] == "candidate":
-            s.update_lead(x["id"], status="not a fit")
+        if x["id"] not in chosen_ids and (x["status"] == "candidate" or (
+                x["status"] == "qualified" and ctx.id in ((x.get("extra") or {}).get("rank") or {}))):
+            s.update_lead(x["id"], status="not a fit")  # (also one an earlier ranking of this mission had chosen)
+        if x["id"] not in chosen_ids and ctx.id in ((x.get("extra") or {}).get("rank") or {}):
+            extra = dict(x.get("extra") or {})
+            extra["rank"] = {k: v for k, v in extra["rank"].items() if k != ctx.id}
+            s.update_lead(x["id"], extra=extra)
     _, n = s.export(ctx.workspace / "leads.csv", ctx.id, "csv")
     s.export(ctx.workspace / "leads.json", ctx.id, "json")
     _write(ctx.workspace / "report.md", _report(ctx, chosen, researched))
@@ -322,7 +332,10 @@ def step_rank(ctx, step):
     if len(buildable) < len(chosen[:p["demos"]]):
         ctx.log("some top businesses are only known from Google Maps (no other source confirms them), so no demo is "
                 "built for them", "warn")
-    add = _demo_specs(buildable[:p["demos"]], p["outreach"])
+    steps = {st["key"]: st for st in s.steps(ctx.id)}
+    have = sum(1 for st in steps.values() if st["kind"] == "demo" and st["state"] not in ("failed", "blocked", "cancelled"))
+    fresh = [x for x in buildable if f"demo:{x['id']}" not in steps]
+    add = _demo_specs(fresh[:max(0, p["demos"] - have)], p["outreach"])  # (a re-rank never adds demos beyond the ask)
     if not chosen:
         ctx.log("no business matched the filter with enough evidence", "warn")
     return StepResult(True, {"qualified": len(chosen), "researched": len(researched), "report": str(ctx.workspace / "report.md")},
@@ -549,6 +562,174 @@ def reconcile(m, st):
                          "isn't repeated automatically (ask for the edit again: that costs again)")
 
 
+# ---------------------------------------------------------------- contracts: what each step promises, checked by code
+def _v_discover(ctx, st, res):
+    leads = store().leads(mission_id=ctx.id, limit=1000)
+    if not leads:
+        return ["no businesses were stored"]
+    nosrc = [x["name"] for x in leads if not (x.get("sources") or x.get("place_id"))]  # (Google-only: its place id)
+    return [f"{len(nosrc)} businesses have no source recorded (e.g. {nosrc[0]})"] if nosrc else []
+
+
+def _v_research(ctx, st, res):
+    lead = store().lead(st["args"]["lead_id"])
+    if lead is None:
+        return ["the lead is gone"]
+    if not lead.get("researched") or lead["website_status"] == "unchecked":
+        return ["the website status wasn't recorded"]
+    ev = " ".join(((lead.get("analysis") or {}).get("evidence") or []))
+    if lead["website_status"] == "unknown" and "failed (" in ev:
+        return ["the website check couldn't run (the web search failed), so nothing was verified"]
+    if lead["website_status"] in ("ok", "poor", "broken") and not (lead.get("analysis") or {}).get("evidence"):
+        return ["a website verdict without evidence"]
+    return []
+
+
+def _v_rank(ctx, st, res):
+    missing = [n for n in ("report.md", "leads.csv") if not (ctx.workspace / n).exists()]
+    return [f"{', '.join(missing)} not written"] if missing else []
+
+
+def _v_site(ctx, lead, folder):
+    folder = Path(folder)
+    if not (folder / "index.html").exists():
+        return [f"{folder.name}/index.html doesn't exist"]
+    owner, _, _ = sitegen.load_owner(ctx.workspace, folder.name)
+    problems = sitegen.check(folder, lead, owner)
+    known = sitegen.known_hash(ctx.workspace, folder.name)
+    if known and known != sitegen.live_hash(folder):
+        problems.append("the live site isn't the version Jarvis installed")
+    return problems
+
+
+def _v_demo(ctx, st, res):
+    s = store()
+    lead = s.lead(st["args"]["lead_id"])
+    proj = next((x for x in s.projects(ctx.id) if x["lead_id"] == st["args"]["lead_id"]), None)
+    if lead is None or proj is None:
+        return ["no demo project was recorded for this business"]
+    return _v_site(ctx, lead, proj["path"])
+
+
+def _v_outreach(ctx, st, res):
+    s = store()
+    lead = s.lead(st["args"]["lead_id"])
+    folder = ctx.workspace / "outreach" / sitegen.slug(lead["name"], lead["id"]) if lead else None
+    if folder is None:
+        return ["the lead is gone"]
+    missing = [n for n in ("email.txt", "call-notes.md", "proposal.md") if not (folder / n).exists()]
+    if missing:
+        return [f"not written: {', '.join(missing)}"]
+    rows = [o for o in s.outreach(lead_id=lead["id"]) if o["mission_id"] == ctx.id and o["kind"] == "email"]
+    if not rows:
+        return ["no outreach record"]
+    if any(o["status"] not in ("draft", "gmail_draft", "unknown", "sending_to_gmail") for o in rows):
+        return [f"unexpected outreach state: {rows[-1]['status']}"]
+    return []
+
+
+def _v_project(ctx, st, res):
+    s = store()
+    proj = next((x for x in s.projects(ctx.id) if x["id"] == st["args"].get("project_id")), None)
+    if proj is None:
+        return ["the demo site isn't part of this mission"]
+    return _v_site(ctx, s.lead(proj["lead_id"]), proj["path"])
+
+
+def _places_on(p):
+    return p.get("use_places") is True or (p.get("use_places") == "auto" and places.enabled())
+
+
+CONTRACTS = {
+    "discover": engine.Contract(
+        "find candidate businesses", "OpenStreetMap (+ Google Places when allowed)", "businesses stored, each with a source",
+        _v_discover, "retried (idempotent; bought pages are never bought again)",
+        lambda p, a: 3 * config.PLACES_COST_PER_REQUEST if _places_on(p) else 0.0),
+    "research": engine.Contract(
+        "verify one business's website status", "web search + their own site (robots.txt respected)",
+        "a website status with evidence", _v_research, "retried once (free); a check that can't run isn't counted",
+        lambda p, a: 0.0, parallel_safe=True, resource=lambda a: f"lead:{a.get('lead_id')}"),
+    "rank": engine.Contract(
+        "choose the best opportunities", "scoring from verified facts", "report.md + leads.csv with the ranked businesses",
+        _v_rank, "retried (idempotent)", lambda p, a: 0.0),
+    "demo": engine.Contract(
+        "build one demo site", "site generator (staged, checked, swapped in)",
+        "a site that passes the site checks and is the version Jarvis installed", _v_demo,
+        "not retried (final); replanning may pick the next-best business", lambda p, a: 0.0,
+        parallel_safe=True, resource=lambda a: f"lead:{a.get('lead_id')}"),
+    "outreach": engine.Contract(
+        "prepare outreach (nothing is sent)", "outreach drafts (+ an approval request for a Gmail draft)",
+        "email.txt, call-notes.md, proposal.md written; nothing sent", _v_outreach, "retried (it updates the same draft)",
+        lambda p, a: meter.model_estimate(config.MISSION_LIGHT_MODEL, 2500, 500) if config.MISSION_LLM_COPY else 0.0,
+        parallel_safe=True, resource=lambda a: f"lead:{a.get('lead_id')}"),
+    "redesign": engine.Contract(
+        "restyle a demo site", "site generator", "the new design passes the site checks", _v_project, "not retried",
+        lambda p, a: 0.0, resource=lambda a: f"project:{a.get('project_id')}"),
+    "edit": engine.Contract(
+        "change a demo site", "the sandboxed coding worker", "the edited site passes the site checks", _v_project,
+        "never repeated automatically (paid)", lambda p, a: config.CODER_MAX_USD,
+        resource=lambda a: f"project:{a.get('project_id')}"),
+}
+
+
+def replan(ctx, criteria):
+    """Steps that could still meet an unmet criterion. Only free work is added automatically: a wider OpenStreetMap
+    search (never when Google Places, which is paid, would run again), the next-best business for a demo that failed
+    its checks, outreach that's missing. -> ([StepSpec], why)"""
+    s, p = store(), ctx.params
+    by = {c["id"]: c for c in criteria}
+    steps = {st["key"]: st for st in s.steps(ctx.id)}
+    q = by.get("qualified")
+    if q and not q["met"]:
+        radius = max([float(st["args"].get("radius_km") or 0) for st in steps.values() if st["kind"] == "discover"]
+                     + [float(p["radius_km"])])
+        if radius >= 25:
+            return [], f"only {q['got']} of {q['target']} qualify within 25 km (the widest search): reported as is"
+        if _places_on(p):
+            return [], (f"only {q['got']} of {q['target']} qualify within {radius:g} km; a wider search would buy Google "
+                        "Places pages again, so it isn't done automatically (ask for it)")
+        n = sum(1 for st in steps.values() if st["kind"] == "discover")
+        wide = min(25.0, radius * 2)
+        key = f"discover:w{n}"
+        return [StepSpec(key, "discover", f"Search a wider area ({wide:g} km)", {"radius_km": wide}, ["discover"]),
+                StepSpec(f"rank:{n}", "rank", "Rank again after the wider search", {}, [key, "~research:*"])], (
+            f"only {q['got']} of {q['target']} qualifying businesses within {radius:g} km: searching {wide:g} km "
+            "(OpenStreetMap, free)")
+    specs, why = [], []
+    d = by.get("demos")
+    if d and not d["met"]:
+        ranked = sorted((x for x in s.leads(mission_id=ctx.id, limit=1000) if ctx.id in ((x.get("extra") or {}).get("rank") or {})),
+                        key=lambda x: x["extra"]["rank"][ctx.id])
+        failed = [st["title"] for st in steps.values() if st["kind"] == "demo" and st["state"] in ("failed", "blocked")]
+        nxt = [x for x in ranked if f"demo:{x['id']}" not in steps and not sitegen.demo_blockers(x)]
+        nxt = nxt[:max(0, d["target"] - d["got"])]
+        if nxt:
+            specs += _demo_specs(nxt, p["outreach"])
+            why.append(f"{d['got']} of {d['target']} demo sites passed their checks"
+                       + (f" ({len(failed)} failed)" if failed else "") + ": building the next-best: "
+                       + ", ".join(x["name"] for x in nxt))
+        elif not specs:
+            why.append(f"{d['got']} of {d['target']} demo sites, and no other qualifying business can get one")
+    dr = by.get("drafts")
+    if dr and not dr["met"] and p["outreach"]:
+        from room_agent.missions import goals
+
+        built = goals.measure(ctx.id).get("demo_leads") or []
+        miss = [lid for lid in built if f"outreach:{lid}" not in steps]
+        redo = [lid for lid in built if steps.get(f"outreach:{lid}", {}).get("state") in ("failed", "blocked")]
+        for lid in miss:
+            lead = s.lead(lid)
+            specs.append(StepSpec(f"outreach:{lid}", "outreach", f"Prepare outreach for {lead['name']}", {"lead_id": lid}, []))
+        for lid in redo:
+            lead = s.lead(lid)
+            n = sum(1 for k in steps if k.startswith(f"outreach:{lid}"))
+            specs.append(StepSpec(f"outreach:{lid}:r{n}", "outreach", f"Prepare outreach again for {lead['name']}",
+                                  {"lead_id": lid}, []))
+        if miss or redo:
+            why.append(f"{len(miss) + len(redo)} demo site(s) without an outreach draft")
+    return specs, "; ".join(why)
+
+
 def recover(m):
     """At startup: finish / undo half-done demo-site swaps in this mission's folder."""
     ws = Path(m["workspace"])
@@ -560,14 +741,14 @@ WORKFLOW = engine.register(Workflow(
     handlers={"discover": step_discover, "research": step_research, "rank": step_rank, "demo": step_demo,
               "outreach": step_outreach, "edit": step_edit, "redesign": step_redesign},
     describe=describe, summarize=summarize, progress=progress, status_line=status_line, recover=recover,
-    reconcile=reconcile,
+    reconcile=reconcile, contracts=CONTRACTS, replan=replan,
     timeouts={"discover": 300, "research": 180, "rank": 60, "demo": 60, "redesign": 60, "outreach": 120,
               "edit": config.CODER_TIMEOUT_S + 60}))
 
 
 # ---------------------------------------------------------------- what the voice tools / dashboard call
-def start(params, budget_usd=None):
-    return engine.create("business", normalize(params), budget_usd)
+def start(params, budget_usd=None, goal=None):
+    return engine.create("business", normalize(params), budget_usd, goal=goal)
 
 
 def build_demos(mid, n=3, lead_ids=None):

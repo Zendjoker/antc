@@ -156,6 +156,51 @@ Code CLI and the Windows Job Object, the dashboard in a browser, and the preview
 - Scraped emails are kept only if each one is exactly one valid address. Before a Gmail draft is claimed, the
   recipient is validated again and the message is built locally. A local failure leaves nothing claimed or sent.
 
+## 8. Goal-driven missions
+Code: `missions/goals.py`, `engine.py` (validate_plan, Contract, _replan, _run_parallel), `business.py` (CONTRACTS,
+replan). Tests: `tests/test_intelligence.py`. Benchmarks: `tests/mission_benchmark.py`, `tests/intelligence_eval.py`
+(results in `tests/benchmarks/`).
+1. **Goal.** The user's words are read by code (no model call): capability, count, filter, demos, outreach, budget,
+   Google on/off. Missing category or place: asked, never invented. Unstated values are labelled defaults.
+   - By voice, the model's tool arguments still win. Code fills in stated values the arguments left out, and says back
+     any contradiction. It never switches on Google (paid) by itself.
+2. **Success criteria.** Stored with the mission (table `goals`): N qualifying, N verified demos, N drafts, nothing sent.
+   They are checked against the database and files at the end, and shown on the dashboard.
+3. **Plan validation.** Before anything is created or added, a plan is refused if it has:
+   - a step kind nobody can run
+   - a dependency on a missing step
+   - a dependency cycle
+   - a duplicate key, or a step without a contract
+
+   A mission never ends "completed" with steps that never ran.
+4. **Contracts.** Each step kind has a purpose, capability, expected output, a code check, failure handling and an
+   estimated cost. A step is done only when its check passes (`MISSION_VERIFY=1`). A failed check is retried only if
+   the step is idempotent.
+   - Example: a research step whose web search failed is retried, not counted as "unknown".
+5. **Replanning** (`MISSION_REPLAN=1`, at most `MISSION_MAX_REPLANS`, goal-driven missions only). It adds only free
+   work:
+   - a wider OpenStreetMap search (never when Google Places would be bought again)
+   - the next-best business for a demo that failed its checks
+   - missing outreach drafts
+
+   Every change is logged with its reason.
+6. **Parallel steps** (`MISSION_CONCURRENCY`, default 1 = one at a time).
+   - Only parallel-safe kinds run together (research, demo, outreach); steps on the same business never overlap;
+     discover and rank run alone.
+   - Budget reservations stay atomic. A step that hits the budget lets the calls already in flight finish, then the
+     mission pauses.
+   - Pause and stop cancel every run.
+7. **Model tiers** (`missions/llm.py` `tier_for`): light for wording / extraction, strong for coding / planning.
+   Wording moves to strong only after `MISSION_ESCALATE_AFTER` failed fact checks (default 0 = never).
+8. **Learning.** After a mission, a verified result is kept: the radius actually needed for that category and place.
+   It's reused next time as a labelled hint. Nothing from web pages goes into goals or knowledge.
+9. **Explaining.** The dashboard's **Goal & plan** panel and the voice tool `explain_mission` show:
+   - what was understood, the criteria, and the plan by step kind
+   - why the plan changed
+   - failures, classified
+   - what waits for approval
+   - spend by model (provider-reported vs estimate)
+
 ## Not verified against real services
 Covered by `tests/test_missions.py` only with fakes, or not at all:
 - the Windows Job Object and NtResumeProcess calls

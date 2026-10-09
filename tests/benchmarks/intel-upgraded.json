@@ -1,0 +1,128 @@
+{
+ "plans": {
+  "invalid_plans": 4,
+  "rejected_before_run": 4,
+  "valid_plan_accepted": true,
+  "detail": {
+   "unknown_kind": {
+    "refused": true,
+    "steps_run": 0
+   },
+   "dangling_dependency": {
+    "refused": true,
+    "steps_run": 0
+   },
+   "cycle": {
+    "refused": true,
+    "steps_run": 0
+   },
+   "duplicate_key": {
+    "refused": true,
+    "steps_run": 0
+   },
+   "valid": {
+    "refused": false,
+    "steps_run": 2
+   }
+  }
+ },
+ "goals": {
+  "available": true,
+  "cases": 24,
+  "routing_accuracy": 1.0,
+  "field_accuracy": 1.0,
+  "clarification_accuracy": 1.0,
+  "misses": []
+ },
+ "goals_heldout": {
+  "available": true,
+  "cases": 10,
+  "routing_accuracy": 0.7,
+  "field_accuracy": 0.667,
+  "clarification_accuracy": 0.9,
+  "misses": [
+   [
+    "field",
+    "Can you get me a list of 40 barbers around Leeds that don't ",
+    "category",
+    null,
+    "barbers"
+   ],
+   [
+    "field",
+    "Can you get me a list of 40 barbers around Leeds that don't ",
+    "location",
+    null,
+    "Leeds"
+   ],
+   [
+    "field",
+    "Can you get me a list of 40 barbers around Leeds that don't ",
+    "count",
+    null,
+    40
+   ],
+   [
+    "field",
+    "Can you get me a list of 40 barbers around Leeds that don't ",
+    "demos",
+    null,
+    6
+   ],
+   [
+    "questions",
+    "Can you get me a list of 40 barbers around Leeds that don't ",
+    [
+     "category",
+     "location"
+    ],
+    []
+   ],
+   [
+    "route",
+    "I want to pitch websites to electricians in Tampa whose site",
+    "conversation"
+   ],
+   [
+    "field",
+    "I want to pitch websites to electricians in Tampa whose site",
+    "category",
+    null,
+    "electricians"
+   ],
+   [
+    "field",
+    "I want to pitch websites to electricians in Tampa whose site",
+    "location",
+    null,
+    "Tampa"
+   ],
+   [
+    "field",
+    "I want to pitch websites to electricians in Tampa whose site",
+    "website_filter",
+    null,
+    "poor"
+   ],
+   [
+    "field",
+    "locate accountants near Boston with poor websites and skip t",
+    "outreach",
+    true,
+    false
+   ],
+   [
+    "route",
+    "what's the population of Lisbon",
+    "conversation"
+   ],
+   [
+    "route",
+    "reject approval 4",
+    "conversation"
+   ]
+  ]
+ },
+ "commit": "0af9ef4",
+ "when": "2026-10-08 17:28"
+}

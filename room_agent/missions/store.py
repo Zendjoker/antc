@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS transitions(
     to_state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS transitions_mission ON transitions(mission_id, id);
 CREATE TABLE IF NOT EXISTS owner(id INTEGER PRIMARY KEY CHECK(id = 1), token TEXT NOT NULL, pid INTEGER, since REAL);
+CREATE TABLE IF NOT EXISTS goals(
+    mission_id TEXT PRIMARY KEY, goal TEXT NOT NULL, criteria TEXT NOT NULL DEFAULT '[]',
+    decisions TEXT NOT NULL DEFAULT '[]', replans INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+    created REAL NOT NULL, updated REAL NOT NULL);
 """
 # columns added after the first version (added to an existing database by _migrate)
 MIGRATIONS = [
@@ -119,7 +123,7 @@ LEAD_FIELDS = ("name", "category", "address", "city", "lat", "lon", "phone", "we
                "analysis", "score", "level", "reasons", "confidence", "missing", "status", "contact_status", "notes",
                "sources", "extra", "researched")
 JSON_FIELDS = {"analysis", "reasons", "missing", "sources", "extra", "params", "args", "depends", "result", "payload",
-               "history", "problems", "detail"}
+               "history", "problems", "detail", "goal", "criteria", "decisions"}
 # A verified field that already has a value is not replaced by a different one: the difference is recorded instead.
 PROTECTED = ("name", "address", "phone", "website", "email")
 
@@ -745,6 +749,32 @@ class Store:
             except ValueError:
                 return None
         return None
+
+    # ---------------------------------------------------------------- goals (missions/goals.py)
+    def set_goal(self, mid, goal):
+        now = time.time()
+        self._exec("INSERT INTO goals(mission_id, goal, created, updated) VALUES(?,?,?,?) ON CONFLICT(mission_id) DO "
+                   "UPDATE SET goal=excluded.goal, updated=excluded.updated", (mid, json.dumps(goal, default=str), now, now))
+
+    def goal(self, mid):
+        return self._one("SELECT * FROM goals WHERE mission_id=?", (mid,))
+
+    def update_goal(self, mid, **fields):
+        fields["updated"] = time.time()
+        self._update("goals", "mission_id", mid, fields)
+
+    def add_decision(self, mid, decision, replan=False):
+        """Append one decision (why the plan changed / what was decided) in one statement: concurrent writers can't
+        lose each other's entries. replan=True also counts it against the replanning limit."""
+        with self._lock:
+            row = self.db.execute("SELECT decisions FROM goals WHERE mission_id=?", (mid,)).fetchone()
+            if row is None:
+                return False
+            ds = json.loads(row[0] or "[]") + [dict(decision, at=time.time())]
+            self.db.execute("UPDATE goals SET decisions=?, replans=replans+?, updated=? WHERE mission_id=?",
+                            (json.dumps(ds[-200:], default=str), 1 if replan else 0, time.time(), mid))
+            self.db.commit()
+            return True
 
     def cache_put(self, key, value):
         self._exec("INSERT OR REPLACE INTO cache(key, value, at) VALUES(?,?,?)", (key, json.dumps(value, default=str), time.time()))

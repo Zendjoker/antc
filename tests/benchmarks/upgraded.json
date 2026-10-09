@@ -1,0 +1,182 @@
+{
+ "label": "upgraded",
+ "mode": "upgraded",
+ "when": "2026-10-08 17:27",
+ "commit": "0af9ef4",
+ "settings": {
+  "latency_s": 0.03,
+  "pace_scale": 0.02,
+  "concurrency": 4
+ },
+ "rows": [
+  {
+   "scenario": "dense",
+   "mode": "upgraded",
+   "state": "completed",
+   "success": true,
+   "completion": 1.0,
+   "got": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 134,
+   "duplicate_fetches": 4,
+   "searches": 33,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 1,
+   "wall_s": 2.76,
+   "steps": 68,
+   "failed_steps": 0,
+   "gmail_created": 0,
+   "demo_failure_injected": "",
+   "dup_urls": [
+    "https://own18.example/",
+    "https://own19.example/",
+    "https://own38.example/",
+    "https://own39.example/"
+   ],
+   "research_steps_run": 43
+  },
+  {
+   "scenario": "sparse",
+   "mode": "upgraded",
+   "state": "completed",
+   "success": true,
+   "completion": 1.0,
+   "got": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 135,
+   "duplicate_fetches": 4,
+   "searches": 33,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 1,
+   "wall_s": 2.93,
+   "steps": 61,
+   "failed_steps": 0,
+   "gmail_created": 0,
+   "demo_failure_injected": "",
+   "dup_urls": [
+    "https://own18.example/",
+    "https://own19.example/",
+    "https://own38.example/",
+    "https://own39.example/"
+   ],
+   "research_steps_run": 43
+  },
+  {
+   "scenario": "failures",
+   "mode": "upgraded",
+   "state": "finished_with_problems",
+   "success": true,
+   "completion": 1.0,
+   "got": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 123,
+   "duplicate_fetches": 3,
+   "searches": 41,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 1,
+   "wall_s": 3.33,
+   "steps": 70,
+   "failed_steps": 2,
+   "gmail_created": 0,
+   "demo_failure_injected": "Testville Kitchen 01",
+   "dup_urls": [
+    "https://own18.example/",
+    "https://own19.example/",
+    "https://own38.example/"
+   ],
+   "research_steps_run": 41
+  },
+  {
+   "scenario": "crash",
+   "mode": "upgraded",
+   "state": "completed",
+   "success": true,
+   "completion": 1.0,
+   "got": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "chosen": 20,
+   "false_qualified": 0,
+   "claims": {
+    "qualified": 20,
+    "demos": 5,
+    "drafts": 5
+   },
+   "unsupported_claims": 0,
+   "http_requests": 134,
+   "duplicate_fetches": 4,
+   "searches": 33,
+   "paid_calls": 5,
+   "model_calls": 5,
+   "cost_usd": 0.003625,
+   "interventions": 2,
+   "wall_s": 2.89,
+   "steps": 68,
+   "failed_steps": 0,
+   "gmail_created": 0,
+   "demo_failure_injected": "",
+   "dup_urls": [
+    "https://own18.example/",
+    "https://own19.example/",
+    "https://own38.example/",
+    "https://own39.example/"
+   ],
+   "research_steps_run": 43
+  }
+ ],
+ "aggregate": {
+  "scenarios": 4,
+  "success_rate": 1.0,
+  "mean_completion": 1.0,
+  "false_qualified": 0,
+  "unsupported_claims": 0,
+  "duplicate_fetches": 15,
+  "http_requests": 526,
+  "paid_calls": 20,
+  "total_cost_usd": 0.0145,
+  "cost_per_success_usd": 0.003625,
+  "interventions": 5,
+  "total_wall_s": 11.9
+ }
+}

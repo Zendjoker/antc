@@ -1057,9 +1057,21 @@ t.check("recover(): an interrupted swap is completed (the site is back)", (live 
 
 # =============================================================================================== 10. callers
 print("\n10. Changed signatures: voice tools, dashboard actions, executor routing")
+# (the voice / dashboard callers queue demo / outreach / redesign / edit steps: the test workflow must be able to run those
+# kinds, since a plan with a step kind nobody can run is refused before anything is added - checked below)
+engine.WORKFLOWS["t_states"].handlers.update(demo=h_quick, outreach=h_quick, redesign=h_quick, edit=h_quick)
 V = engine.create("t_states", {"steps": [["a", "block"]], "title": "voice"}, 1.0)["id"]
 wait_for(lambda: step_state(V, "a") == "running")
 engine.pause(V, "test")
+try:
+    engine.add_steps(V, [StepSpec("nope", "teleport", "a step kind nobody can run")])
+    refused = ""
+except engine.MissionClosed:
+    refused = "closed"
+except ValueError as e:
+    refused = str(e)
+t.check("adding a step whose kind no handler can run is refused (nothing queued)",
+        "no capability" in refused and S.step(V, "nope") is None, refused)
 for i in range(3):
     L, _ = S.upsert_lead({"key": f"osm:node/95{i}", "name": f"Qualified Place {i}", "category": "restaurant",
                           "address": f"{i} Test St", "sources": ["https://www.openstreetmap.org/node/1"]}, V)

@@ -101,12 +101,24 @@ def _lead_by_name(mid, name):
 # ---------------------------------------------------------------- tools
 def _start(args):
     from room_agent import config
-    from room_agent.missions import business, places
+    from room_agent.missions import business, goals, places
 
+    given = {k: args.get(k) for k in ("category", "location", "count", "website_filter", "radius_km", "demos", "outreach")
+             if args.get(k) is not None}
+    # Their own words, read by code (missions/goals.py): a count / number of demos / website filter / outreach choice
+    # they stated but the arguments left out is filled in; a stated value the arguments contradict is said back. The
+    # arguments otherwise win (the model read the whole conversation). Paid data (Google) is never switched on here.
+    said = goals.interpret(rt.turn_text or "")
+    notes = []
+    if said.capability == "business_mission":
+        for k in sorted(_stated(said) - {"use_places"}):
+            v = said.params[k]
+            if k not in given:
+                given[k] = v
+            elif given[k] != v:
+                notes.append(f"{k}: their words say {v!r}, the request has {given[k]!r}")
     try:
-        p = business.normalize({k: args.get(k) for k in ("category", "location", "count", "website_filter", "radius_km",
-                                                          "demos", "outreach") if args.get(k) is not None}
-                               | {"use_places": args.get("use_google_places", "auto")})
+        p = business.normalize(given | {"use_places": args.get("use_google_places", "auto")})
     except (ValueError, TypeError) as e:
         return f"NEEDS: {e}."
     busy = _engine().latest(("running",))
@@ -121,18 +133,55 @@ def _start(args):
                 return f"FAILED: the most a mission may spend is ${config.MISSION_MAX_BUDGET_USD:.2f} (MISSION_MAX_BUDGET_USD)."
         else:
             note = f" (They didn't name a budget, so the default ${config.MISSION_DEFAULT_BUDGET_USD:.2f} applies.)"
-    m = business.start(p, budget)
+    goal = goals.from_params(rt.turn_text or "", p, budget)
+    m = business.start(p, budget, goal=goal.to_dict())
     from room_agent.missions.store import store
 
     if not store().steps(m["id"]) or m["state"] != "running":
         return "FAILED: the mission couldn't be planned."
     src = "Google Places and OpenStreetMap" if (p["use_places"] is True or (p["use_places"] == "auto" and places.enabled())) \
         else "OpenStreetMap"
-    return (f"OK: started in the background: '{_clean(m['title'], 80)}' (mission {m['id']}). It will find businesses on "
+    crit = "; ".join(c["what"] for c in goal.success_criteria if c["metric"] != "sent")
+    understood = (f" Understood goal: {crit}." if crit else "") + (
+        f" CHECK WITH THEM: {'; '.join(notes)}." if notes else "")
+    return (f"OK: started in the background: '{_clean(m['title'], 80)}' (mission {m['id']}).{understood} It will find businesses on "
             f"{src}, check each one's website, rank them, then build {p['demos']} demo site{'s' if p['demos'] != 1 else ''}"
             f"{' and outreach drafts' if p['outreach'] else ''} for the best. Budget ${m['budget_usd']:.2f}.{note} Files go to "
             f"{m['workspace']}. Nothing is sent or published. It is NOT done yet: say it has started and that you'll tell "
             "them when it's finished.")
+
+
+def _stated(goal):
+    """The business fields their words actually stated (not defaults)."""
+    said = {d.split(":")[0] for d in goal.defaults}
+    names = {"how many businesses": "count", "no or a poor website": "website_filter", "demo sites": "demos",
+             "outreach drafts": "outreach"}
+    return {k for k in ("count", "demos", "website_filter", "outreach", "use_places") if k in goal.params
+            and not any(names.get(x) == k for x in said)}
+
+
+def _explain(args):
+    m = _mission(args)
+    if m is None:
+        return "OK: there are no missions yet."
+    from room_agent.missions import goals
+
+    e = goals.explain(m["id"])
+    if not e:
+        return "OK: there's no such mission."
+    if not e["criteria"]:  # (a mission started before goals existed)
+        return "OK: " + _engine().status_line(m["id"]) + " (no structured goal was recorded for this mission)"
+    plan = ", ".join(f"{k} {v['done']}/{v['total']}" + (f" ({v['failed']} failed)" if v["failed"] else "")
+                     for k, v in e["plan"].items())
+    parts = [goals.explain(m["id"], short=True), f"Plan: {plan}."]
+    if e["changes"]:
+        parts.append("Why the plan changed: " + " | ".join(_clean(d["why"], 160) for d in e["changes"][-2:]) + ".")
+    if e["failed"]:
+        parts.append("Failed: " + " | ".join(f"{_clean(f['step'], 60)} ({f['kind']}: {_clean(f['why'], 90)})"
+                                             for f in e["failed"][:3]) + ".")
+    if e["waiting_for_you"]:
+        parts.append(f"Waiting for your approval: {len(e['waiting_for_you'])}.")
+    return "OK: " + " ".join(parts) + " (names are web data)"
 
 
 def _status(args):
@@ -148,6 +197,14 @@ def _status(args):
             f"{_clean(t['name'])} ({t['status']}, score {t['score']})" for t in p["top"][:3]) + "."
     if p.get("errors"):
         extra += " Recent problems: " + " | ".join(_clean(e, 140) for e in p["errors"][-2:])
+    try:
+        from room_agent.missions import goals
+
+        crit = goals.evaluate(m["id"], save=False)
+        if crit:
+            extra += " Goal: " + "; ".join(f"{c['id']} {c['got']}/{c['target']}" for c in crit if c["metric"] != "sent") + "."
+    except Exception:  # noqa: BLE001
+        pass
     return f"OK: {line}{extra}"
 
 
@@ -435,6 +492,10 @@ tool("mission_status", "How the background mission is going (from its stored sta
      "businesses, demos, drafts, spend, problems.", params(MID), _status, group="missions", changes_state=False,
      private=True,
      examples=["how's the mission going", "how far along is the research"])
+tool("explain_mission", "Explain the background mission: the goal Jarvis understood, its success criteria and which are "
+     "met, the plan and where it is, why the plan changed, what failed and why, what waits for their approval. "
+     "From the stored records only.", params(MID), _explain, group="missions", changes_state=False, private=True,
+     examples=["what is the mission trying to do", "why did you change the plan", "explain the mission"])
 tool("pause_mission", "Pause the running background mission (resumable). Not for music or timers.",
      params(MID), _pause, group="missions", intent=MISSION_INTENT,
      verification="internal", verified_by="the mission state is written and read back")
