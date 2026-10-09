@@ -315,7 +315,19 @@ t.check("a decision on the same line as the words (seen on a live call) is NEVER
 t.check("...and a stray data fragment inside the words is removed", "{" not in errand._natural(
     'Sure {"status":"talking"} thing.') and "status" not in errand._natural('Sure "status": "talking", thing.'))
 
-print("\n5. Wrong number")
+print("\n5. Echo, holds, details")
+t.check("its own words picked up by their microphone are recognized as an echo, their own words aren't",
+        errand.echo_of("Hello? Hi there. Is this Luigi", "Hi there - is this Luigi's Trattoria?")
+        and not errand.echo_of("Yes, Luigi's, how can I help?", "Hi there - is this Luigi's Trattoria?")
+        and not errand.echo_of("So what can I do for you?", brief().opening())
+        and not errand.echo_of("Hi, Luigi's here!", "Hi there - is this Luigi's Trattoria?"))
+errand.THINK = fake_think
+e = brief()
+twiml, said, ended = run_errand(e, ["Hi", "We only have 8:45.", "No, that's all.", "You want me to lock it in?", "Okay bye"])
+t.check("'want me to lock it in?' for a time outside the brief: thanks, no need to hold it - nothing booked or held",
+        e.status == "needs_you" and "no need to hold" in " ".join(said).lower() and not e.agreed_time, (said, e.status))
+
+print("\n6. Wrong number")
 errand.THINK = fake_think
 errand.OPEN_WAIT_S = 0.2
 sent = []

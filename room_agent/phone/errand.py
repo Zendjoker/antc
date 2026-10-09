@@ -179,6 +179,21 @@ HOLD = re.compile(r"\b(hold on|hang on|one (sec|second|moment|minute)|just a (se
                   r"give me a (sec|second|moment|minute)|let me (check|see|look))\b", re.I)
 WRONG_PLACE = re.compile(r"^\W*(no|nope|nah)\b(?!.{0,20}\b(but|yes|yeah|it is|this is)\b)|wrong number|"
                          r"you('ve| have) the wrong|this (isn'?t|is not)\b|not (a|the) restaurant", re.I)
+HOLD_OFFER = re.compile(r"\b(lock (it|that) in|hold (it|that|the table)|put you down|reserve (it|that)|"
+                        r"want me to (book|hold|reserve|keep)|should i (book|hold|keep))\b", re.I)
+
+
+def echo_of(heard, said, run=4):
+    """Is what we 'heard' its own last line coming back through their microphone? An echo repeats its words IN ORDER:
+    `run` consecutive words of its line ("hi there is this luigi"). Sharing a few words isn't an echo ("Hi, Luigi's
+    here!", "so what can I do for you")."""
+    def words(x):
+        return [w[:5] for w in re.findall(r"[a-z0-9']+", str(x).lower())]
+    h, own = words(heard), words(said)
+    grams = {tuple(own[i:i + run]) for i in range(len(own) - run + 1)}
+    return any(tuple(h[i:i + run]) in grams for i in range(len(h) - run + 1))
+
+
 GOODBYE = re.compile(r"\b(bye|goodbye|good night|take care|have a (good|great|nice)|you too|talk (to you )?soon|"
                      r"see you|thank(s| you)|alright then|okay then|sounds good|perfect)\b", re.I)
 SYSTEM = """You're on a phone call with a restaurant, booking ONE table for your boss. The person on the line is ALWAYS
@@ -195,6 +210,7 @@ If they just acknowledge ("got it", "uh-huh", "what else?") without offering any
 question ("Do you have anything around 7?") - don't repeat the whole request.
 Asked something the brief doesn't say (an occasion, allergies, seating, a phone number): you don't know - say so
 simply ("Hmm, I'm not sure - I can ask him") and never make it up.
+Never add details that aren't in the brief (who's coming, why, preferences) - "four people" is all you know.
 Facts: you only know the brief below - never invent anything. Never share anything else (no phone number, email,
 address or payment details - your boss will sort that out when they come in). Never agree to pay or leave a deposit.
 A time inside the range (both ends included) is fine. Anything else (another time, day or party size): don't accept it.
@@ -426,8 +442,18 @@ class ErrandSession:
             if self._hung:
                 return
             e = self.e
+            last = next((x for who, x in reversed(e.transcript) if who == "jarvis"), "")
+            if last and echo_of(text, last):  # (its own words echoing back through their phone: not them)
+                log.info("errand %s: ignored an echo of its own words", e.id)
+                return
             e.turns += 1
             e.transcript.append(("them", str(text)[:500]))
+            if self.closing and HOLD_OFFER.search(str(text)) and e.status == "needs_you":
+                # (they offer to hold a time outside the brief: thank them, nothing is booked or held)
+                return self._speak(f"They offered to hold that time for you. Thank them, but say there's no need to hold "
+                                   f"it - you'll check with {e.first()} and call right back.",
+                                   f"Oh, that's so kind - no need to hold it, I'll check with {e.first()} and call "
+                                   "you right back!")
             if self.closing:
                 if GOODBYE.search(str(text)) and not offered_times(e, text) and "?" not in str(text):
                     return self._goodbye()
@@ -651,7 +677,16 @@ class ErrandSession:
         return said
 
     def closed(self):
-        """The line dropped / they hung up before an outcome."""
+        """The line dropped / they hung up before an outcome. (Waits for a reply in progress, so the outcome isn't
+        recorded twice.)"""
+        got = self._lock.acquire(timeout=5)
+        try:
+            self._closed_locked()
+        finally:
+            if got:
+                self._lock.release()
+
+    def _closed_locked(self):
         self._hung = True
         if not self.done:
             self.done = True
