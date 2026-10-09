@@ -128,10 +128,11 @@ async def voice(request):
     if voice_id:
         voice_attrs += f" voice={quoteattr(voice_id)}"
     if errand_call:  # (only real speech interrupts it, not its own voice echoing back or background noise)
-        voice_attrs += (' interruptSensitivity="low" welcomeGreetingInterruptible="none" ignoreBackchannel="true"')
+        voice_attrs += (' interruptSensitivity="low" ignoreBackchannel="true"')
     relay = _public(request, ws=True).split("/twilio/")[0] + "/twilio/relay"
     interrupt = "speech" if errand_call else "true"
-    return _twiml(f"<Connect><ConversationRelay url={quoteattr(relay)} welcomeGreeting={quoteattr(greeting)}"
+    welcome = "" if errand_call else f" welcomeGreeting={quoteattr(greeting)}"  # (an errand waits for them to answer)
+    return _twiml(f"<Connect><ConversationRelay url={quoteattr(relay)}{welcome}"
                   f' interruptible="{interrupt}"{voice_attrs}>'
                   f'<Parameter name="reason" value={quoteattr(reason)}/></ConversationRelay></Connect>')
 
