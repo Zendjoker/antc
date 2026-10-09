@@ -86,6 +86,7 @@ def new(goal, steps, kind="plan"):
                     "depends_on": [int(d) for d in s.get("depends_on") or []], "success": _redact(s.get("success", ""), 200),
                     "timeout_s": float(s.get("timeout_s") or SLOW_TOOLS.get(s["tool"], DEFAULT_TIMEOUT_S)),
                     "check": s.get("check") if isinstance(s.get("check"), dict) else None,
+                    "skip": s.get("_skip") or "", "orig": s.get("_orig") or i + 1,
                     "state": "PENDING", "attempts": 0, "result": "", "evidence": "", "started": 0.0, "ended": 0.0}
                    for i, s in enumerate(steps)]}
     with _lock:
@@ -197,6 +198,42 @@ def run_check(check):
                 return None, "the page text couldn't be read"
             found = str(arg).lower() in page["text"].lower()
             return found, f"the page {'shows' if found else 'does NOT show'} \"{str(arg)[:40]}\""
+        if kind == "dir_exists":
+            from room_agent.computer import files
+
+            path = _path(arg)
+            ok, why = files.allowed(os.path.join(path, "x.txt"))
+            if not ok:
+                return None, f"not checked: {why}"
+            return os.path.isdir(path), f"the folder {os.path.basename(path)} {'exists' if os.path.isdir(path) else 'does NOT exist'}"
+        if kind == "research_sources":
+            from room_agent.computer.context import desk
+
+            r = desk.research
+            n = len(r.sources) if r is not None else 0
+            return n >= int(arg or 1), f"{n} source(s) were actually read"
+        if kind == "citations_valid":
+            import re as _re
+
+            from room_agent.computer.context import desk
+
+            r = desk.research
+            cited = {int(x) for x in _re.findall(r"\[(\d+)\]", str(arg))}
+            have = len(r.sources) if r is not None else 0
+            bad = sorted(c for c in cited if not 1 <= c <= have)
+            if bad:
+                return False, f"the summary cites {', '.join(f'[{b}]' for b in bad)}, but only {have} source(s) were read"
+            return (True, f"every citation points at one of the {have} sources read") if cited else (
+                None, "the summary cites no source")
+        if kind == "draft_recipient":
+            from room_agent.actions.context import env
+            from room_agent.missions.websites import valid_email
+
+            d = env.item("draft")
+            if not d:
+                return False, "no draft was recorded"
+            ok = bool(valid_email(str(d.get("to", ""))) and str(arg).lower() in str(d.get("to", "")).lower())
+            return ok, f"the draft is addressed to {d.get('to')}" + ("" if ok else f", not to {arg}")
         if kind == "list_contains":
             from room_agent.tools import lists
 
@@ -269,6 +306,11 @@ def run(t, only_pending=False):
             continue
         if s["state"] not in ("PENDING", "BLOCKED", "WAITING", "CANCELED"):
             continue
+        if s.get("skip") and s["state"] == "PENDING":  # (left out by the plan review: their words ruled it out)
+            s.update(state="SKIPPED", result=_redact(f"left out: {s['skip']}", 300))
+            event(t, f"step {s['n']} ({s['tool']}) left out: {s['skip']}")
+            _save()
+            continue
         if _cancelled():
             for rest in t["steps"]:
                 if rest["state"] in ("PENDING", "BLOCKED", "WAITING"):
@@ -285,12 +327,27 @@ def run(t, only_pending=False):
         if cap is None:
             s.update(state="FAILED", result=f"there's no tool called {s['tool']}")
             continue
+        from room_agent.actions import supervisor
+
+        verdict, why = supervisor.before(t, s, max(0.0, budget.total() - cost0) + t.get("cost_usd", 0.0))
+        if verdict == "skip":
+            earlier = next(e for e in t["steps"] if e["state"] == "COMPLETED" and supervisor._key(e) == supervisor._key(s))
+            s.update(state="COMPLETED", result=_redact(f"not repeated: {why}", 300), evidence=earlier.get("evidence", ""))
+            _save()
+            continue
+        if verdict == "stop":
+            for rest in t["steps"]:
+                if rest["state"] in ("PENDING", "BLOCKED"):
+                    rest.update(state="CANCELED", result=f"not run: {why}")
+            event(t, f"stopped: {why}")
+            break
         while True:
             s.update(state="RUNNING", started=time.time(), attempts=s["attempts"] + 1)
             _save()  # (a crash from here on leaves this step UNKNOWN, never re-run blindly)
             result = _run_with_timeout(plan, s["tool"], s["args"], s["timeout_s"])
             s["ended"] = time.time()
             if result is None:
+                supervisor.after(t, s, timed_out=True)
                 if cap.changes_state:
                     s.update(state="UNKNOWN", result=f"no answer within {s['timeout_s']:.0f}s: it may still have happened")
                 else:
@@ -316,6 +373,19 @@ def run(t, only_pending=False):
                     time.sleep(0.05)
                 continue
             break
+        supervisor.after(t, s)
+        if s["state"] == "FAILED" and not _cancelled() and config.TASK_RECOVERY:  # (actions/recovery.py: bounded)
+            from room_agent.actions import recovery
+
+            rec = t.setdefault("recoveries", [])
+            if result is not None and plan.steps and plan.steps[-1] is result:
+                plan.steps.pop()  # (the alternative replaces this attempt: it isn't "an earlier step that failed")
+            ok, note = recovery.attempt(t, s, plan, s["result"], "success check failed" in s["result"],
+                                        lambda tool, args: _run_with_timeout(plan, tool, args, max(s["timeout_s"], 30.0)),
+                                        run_check, config.TASK_MAX_RECOVERIES - len(rec))
+            if note:
+                rec.append(_redact(note, 200))
+                event(t, note)
         if s["state"] == "FAILED":
             event(t, f"step {s['n']} ({s['tool']}) failed: {s['result'][:120]}")
         _save()
@@ -330,6 +400,18 @@ def run(t, only_pending=False):
     t["seconds"] = round(t["seconds"] + time.time() - t0, 2)
     t["cost_usd"] = round(t["cost_usd"] + max(0.0, budget.total() - cost0), 5)
     t["state"] = final_state(t)
+    if t["state"] == "COMPLETED":
+        from room_agent.actions import supervisor
+
+        if not supervisor.finish(t):  # (an output a step produced is gone: not reported as done)
+            t["state"] = "PARTIAL"
+    if t["state"] in ("COMPLETED", "PARTIAL", "FAILED") and config.TASK_EXPERIENCE:
+        try:
+            from room_agent.cognition import experience_v2
+
+            experience_v2.record_task(t)
+        except Exception as e:  # noqa: BLE001 (experience is a hint store: its failure never fails a task)
+            log.debug("task experience not recorded: %s", e)
     t["updated"] = time.time()
     _save()
     _observe(t)
@@ -337,7 +419,9 @@ def run(t, only_pending=False):
 
 
 def final_state(t):
-    states = [s["state"] for s in t["steps"]]
+    states = [s["state"] for s in t["steps"] if s["state"] != "SKIPPED"]  # (left out on purpose: not a failure)
+    if not states:
+        return "FAILED"
     if "WAITING" in states:
         return "WAITING"
     if "RUNNING" in states:
@@ -425,6 +509,16 @@ def report(t):
                         "resume_task.",
              "CANCELED": "It was stopped: say what ran before it stopped."}
     lines.append(rules.get(t["state"], ""))
+    rv = t.get("review") or {}
+    if rv.get("left_out"):
+        lines.append("Left out on purpose (tell them, in a few words): " + "; ".join(
+            f"step {x['step']} ({x['tool']}): {x['why']}" for x in rv["left_out"]))
+    if rv.get("notes"):
+        lines.append("Plan checks: " + "; ".join(rv["notes"][:3]))
+    if t.get("recoveries"):
+        lines.append("Recovered: " + "; ".join(t["recoveries"][:3]))
+    if t.get("supervisor"):
+        lines.append("Supervisor: " + "; ".join(t["supervisor"][:3]))
     prefix = "OK" if t["state"] in ("COMPLETED", "UNVERIFIED") else "NEEDS_CONFIRMATION" if t["state"] == "WAITING" else \
         "UNKNOWN" if t["state"] == "UNKNOWN" else "FAILED"
     return f"{prefix}: " + "\n".join(lines)

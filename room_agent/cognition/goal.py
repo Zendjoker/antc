@@ -91,4 +91,7 @@ class Goal:
             parts.append("done when: " + "; ".join(self.success_conditions[:3]))
         if self.constraints:
             parts.append("they said: " + "; ".join(c.text for c in self.constraints))
+        spec = getattr(self, "spec", None)
+        if spec is not None and (spec.permissions or spec.missing or spec.conflicts):
+            parts.append(spec.describe())
         return ". ".join(parts)

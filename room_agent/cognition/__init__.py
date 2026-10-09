@@ -85,6 +85,12 @@ def begin_turn(text):
                 goal.trigger = text
         goal.turns += 1
         goal.constraints += [c for c in constraints if all(c.text != k.text for k in goal.constraints)]
+        if config.GOAL_UNDERSTANDING:
+            from room_agent.cognition import understand
+
+            spec = understand.from_words(text)
+            goal.spec = understand.merge(spec, getattr(goal, "model_fields", None))
+            goal.constraints += [c for c in spec.constraints if all(c.text != k.text for k in goal.constraints)]
         goal.status = WAITING if goal.trigger else ACTIVE
         info["goal"] = goal
     elif goal and constraints:  # ("actually, don't open Chrome": the goal in progress gets the constraint)
@@ -185,8 +191,11 @@ def _call_key(name, args):
 def check_call(cap, args, subject=None):
     """Before an action runs: refused by a constraint, or retried too often? -> refusal text, or None."""
     goal = getattr(rt.turn, "goal", None) or active_goal()
-    if goal and cap.changes_state:
-        for c in goal.constraints:
+    rules = list(goal.constraints) if goal else []
+    if config.GOAL_UNDERSTANDING and cap.changes_state:
+        rules += [c for c in words_constraints(rt.turn_text) if all(c.text != k.text for k in rules)]
+    if cap.changes_state:
+        for c in rules:
             if c.blocks(cap.name, args, subject):
                 trace.note("BLOCKED", f"{cap.name} ({c.text})")
                 return f"FAILED: not done: they said \"{c.text}\". Leave that out and carry on with the rest."
@@ -196,6 +205,18 @@ def check_call(cap, args, subject=None):
         return (f"FAILED: not run again: {cap.name} with these arguments already failed {config.COG_MAX_RETRIES} times. "
                 "Try something different, or tell them plainly it isn't working.")
     return None
+
+
+_words_cache = {"text": None, "rules": []}
+
+
+def words_constraints(text):
+    """Explicit limits in these words (cognition/understand.py), cached per text: regexes, no model call."""
+    if text != _words_cache["text"]:
+        from room_agent.cognition import understand
+
+        _words_cache.update(text=text, rules=understand.from_words(text or "").constraints if text else [])
+    return _words_cache["rules"]
 
 
 def after_call(cap, args, result):
@@ -277,10 +298,24 @@ def update_goal(args):
             setattr(goal, key, [str(v)[:120] for v in value][:6])
     if args.get("summary"):
         goal.summary = str(args["summary"])[:200]
+    fields = {k: args.get(k) for k in ("capabilities", "constraints", "permissions", "deliverables", "missing",
+                                       "desired_state", "success_conditions", "summary") if args.get(k)}
+    note = ""
+    if fields and config.GOAL_UNDERSTANDING:
+        from room_agent.cognition import understand
+
+        goal.model_fields = {**(getattr(goal, "model_fields", None) or {}), **fields}
+        spec = understand.second_pass(understand.merge(understand.from_words(goal.user_request), goal.model_fields))
+        goal.spec = spec
+        goal.constraints += [c for c in spec.constraints if all(c.text != k.text for k in goal.constraints)]
+        if spec.conflicts:
+            note = " CONFLICT with their words: " + "; ".join(spec.conflicts) + " (ask them)."
+        if spec.missing:
+            note += " Still missing (ask, don't guess): " + ", ".join(spec.missing) + "."
     status = str(args.get("status") or "").upper()
     if status in (SATISFIED, BLOCKED, FAILED):
         goal.declared = (status, str(args.get("reason") or "")[:160])
-    return "OK: goal noted." + (" (Code double-checks that it's really done.)" if status == SATISFIED else "")
+    return "OK: goal noted." + (" (Code double-checks that it's really done.)" if status == SATISFIED else "") + note
 
 
 # ---------------------------------------------------------------- end of a turn
@@ -379,12 +414,21 @@ def _register():
 
     core.register_context(context_lines, order=27)
     register(Capability(
-        "update_goal", "Record what the current goal needs to end up true (desired_state, success_conditions), and "
+        "update_goal", "Record what the current goal needs to end up true (desired_state, success_conditions, "
+        "deliverables), what it needs (capabilities, permissions), their explicit limits (constraints) and what's missing, and "
         "its status once you know it: satisfied (verified done), blocked (needs them or something unavailable) or "
         "failed. Only while a goal is in progress; changes nothing in the world.",
         {"type": "object", "properties": {
             "desired_state": {"type": "array", "items": {"type": "string"}},
             "success_conditions": {"type": "array", "items": {"type": "string"}},
+            "capabilities": {"type": "array", "items": {"type": "string", "enum": [
+                "research", "browser", "desktop", "files", "business", "coding", "email", "calendar", "lists", "info"]}},
+            "constraints": {"type": "array", "items": {"type": "string"}, "description": "their explicit limits, quoted"},
+            "permissions": {"type": "array", "items": {"type": "string", "enum": [
+                "send_email", "delete", "move", "paid", "code_change", "calendar_write"]},
+                "description": "what it needs their yes / money for (never assumed granted)"},
+            "deliverables": {"type": "array", "items": {"type": "string"}},
+            "missing": {"type": "array", "items": {"type": "string"}, "description": "what must be asked first"},
             "status": {"type": "string", "enum": ["satisfied", "blocked", "failed"]},
             "reason": {"type": "string"}, "summary": {"type": "string"}}},
         update_goal, group="goal", changes_state=False, available=lambda: getattr(rt.turn, "goal", None) is not None))

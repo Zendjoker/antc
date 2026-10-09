@@ -1,0 +1,590 @@
+{
+ "dev": {
+  "cases": 30,
+  "routing_exact": 0.2,
+  "routing_recall": 0.278,
+  "constraint_preservation": 0.3,
+  "constraints_total": 10,
+  "extra_constraints": 1,
+  "permission_recall": 0.0,
+  "extra_permissions": 0,
+  "clarification_exact": 0.9,
+  "misses": [
+   [
+    "families",
+    "Research the best local speech recognition models ",
+    [
+     "research"
+    ],
+    [
+     "files",
+     "research"
+    ]
+   ],
+   [
+    "constraint",
+    "In my Downloads, put the PDFs in a PDFs folder and",
+    "forbid:touch:.txt",
+    [
+     "forbid:touch:text files"
+    ]
+   ],
+   [
+    "families",
+    "In my Downloads, put the PDFs in a PDFs folder and",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "Email bob@example.com that the report is ready and",
+    [],
+    [
+     "email"
+    ]
+   ],
+   [
+    "constraint",
+    "Draft an email to alice@example.com about Friday's",
+    "forbid:send",
+    []
+   ],
+   [
+    "families",
+    "Draft an email to alice@example.com about Friday's",
+    [],
+    [
+     "email"
+    ]
+   ],
+   [
+    "families",
+    "send it to him",
+    [],
+    [
+     "email"
+    ]
+   ],
+   [
+    "missing",
+    "send it to him",
+    [],
+    [
+     "recipient",
+     "referent"
+    ]
+   ],
+   [
+    "families",
+    "book it for tomorrow at 3",
+    [],
+    [
+     "calendar"
+    ]
+   ],
+   [
+    "missing",
+    "book it for tomorrow at 3",
+    [],
+    [
+     "referent"
+    ]
+   ],
+   [
+    "families",
+    "The tests in my calc project fail, find the bug an",
+    [],
+    [
+     "coding"
+    ]
+   ],
+   [
+    "families",
+    "look up the earth's radius and fix my geo project ",
+    [
+     "research"
+    ],
+    [
+     "coding",
+     "research"
+    ]
+   ],
+   [
+    "families",
+    "delete the old invoices in my documents",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "constraint",
+    "clean up my desktop but keep the screenshots",
+    "keep:screenshots",
+    []
+   ],
+   [
+    "families",
+    "clean up my desktop but keep the screenshots",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "open the httpx docs page about streaming",
+    [
+     "desktop"
+    ],
+    [
+     "browser"
+    ]
+   ],
+   [
+    "families",
+    "check the weather and add it to my notes",
+    [],
+    [
+     "info",
+     "lists"
+    ]
+   ],
+   [
+    "families",
+    "add milk and eggs to my shopping list",
+    [],
+    [
+     "lists"
+    ]
+   ],
+   [
+    "families",
+    "schedule a call with Dana on Friday at 10",
+    [],
+    [
+     "calendar"
+    ]
+   ],
+   [
+    "constraint",
+    "move only the PNG files from Downloads into Pictur",
+    "only:.png",
+    []
+   ],
+   [
+    "families",
+    "move only the PNG files from Downloads into Pictur",
+    [
+     "desktop"
+    ],
+    [
+     "files"
+    ]
+   ],
+   [
+    "constraint",
+    "research flight prices to Lisbon but don't book an",
+    "forbid:book",
+    []
+   ],
+   [
+    "families",
+    "summarize report.pdf and email the summary to caro",
+    [],
+    [
+     "email",
+     "files"
+    ]
+   ],
+   [
+    "constraint",
+    "fix the failing test in my api project without cha",
+    "forbid:change:tests",
+    []
+   ],
+   [
+    "families",
+    "fix the failing test in my api project without cha",
+    [],
+    [
+     "coding"
+    ]
+   ],
+   [
+    "families",
+    "open chrome, go to github and show me my notificat",
+    [
+     "desktop"
+    ],
+    [
+     "browser",
+     "desktop"
+    ]
+   ],
+   [
+    "families",
+    "save a note called ideas with 'try the new layout'",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "make a Trip folder in documents and save the itine",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "compare the three cheapest robot vacuums and write",
+    [
+     "research"
+    ],
+    [
+     "files",
+     "research"
+    ]
+   ],
+   [
+    "families",
+    "don't open Chrome, just search the web for the htt",
+    [
+     "desktop"
+    ],
+    [
+     "research"
+    ]
+   ],
+   [
+    "families",
+    "rename the file",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "missing",
+    "rename the file",
+    [],
+    [
+     "file"
+    ]
+   ],
+   [
+    "families",
+    "remind me to call mum when I get home",
+    [],
+    [
+     "lists"
+    ]
+   ],
+   [
+    "constraint",
+    "Find 10 plumbers in Denver without websites, no ou",
+    "forbid:outreach",
+    []
+   ]
+  ]
+ },
+ "heldout": {
+  "cases": 30,
+  "routing_exact": 0.2,
+  "routing_recall": 0.222,
+  "constraint_preservation": 0.3,
+  "constraints_total": 10,
+  "extra_constraints": 1,
+  "permission_recall": 0.0,
+  "extra_permissions": 0,
+  "clarification_exact": 0.867,
+  "misses": [
+   [
+    "families",
+    "Look into which password managers support passkeys",
+    [],
+    [
+     "files",
+     "research"
+    ]
+   ],
+   [
+    "constraint",
+    "Sort my Desktop: images into an Images folder, lea",
+    "forbid:touch:.docx",
+    []
+   ],
+   [
+    "families",
+    "Sort my Desktop: images into an Images folder, lea",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "Write to dave@example.com saying I'll be late, and",
+    [],
+    [
+     "email"
+    ]
+   ],
+   [
+    "constraint",
+    "prepare a reply to the landlord but do not send an",
+    "forbid:send",
+    []
+   ],
+   [
+    "families",
+    "prepare a reply to the landlord but do not send an",
+    [],
+    [
+     "email"
+    ]
+   ],
+   [
+    "missing",
+    "prepare a reply to the landlord but do not send an",
+    [],
+    [
+     "recipient"
+    ]
+   ],
+   [
+    "families",
+    "forward that to her",
+    [],
+    [
+     "email"
+    ]
+   ],
+   [
+    "missing",
+    "forward that to her",
+    [],
+    [
+     "recipient",
+     "referent"
+    ]
+   ],
+   [
+    "families",
+    "move it to next Tuesday",
+    [
+     "desktop"
+    ],
+    [
+     "calendar"
+    ]
+   ],
+   [
+    "missing",
+    "move it to next Tuesday",
+    [],
+    [
+     "referent"
+    ]
+   ],
+   [
+    "families",
+    "my parser project's unit tests are red, debug it",
+    [],
+    [
+     "coding"
+    ]
+   ],
+   [
+    "families",
+    "find the current VAT rate in Germany and update th",
+    [],
+    [
+     "coding",
+     "research"
+    ]
+   ],
+   [
+    "families",
+    "trash the duplicate photos in my pictures folder",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "constraint",
+    "tidy my downloads, but keep the installers",
+    "keep:installers",
+    []
+   ],
+   [
+    "families",
+    "tidy my downloads, but keep the installers",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "go to the pandas docs for read_csv",
+    [],
+    [
+     "browser"
+    ]
+   ],
+   [
+    "families",
+    "what's the weather tomorrow, and put an umbrella r",
+    [],
+    [
+     "info",
+     "lists"
+    ]
+   ],
+   [
+    "families",
+    "put bread on the shopping list",
+    [],
+    [
+     "lists"
+    ]
+   ],
+   [
+    "families",
+    "set up a meeting with Omar next Monday at 2pm",
+    [],
+    [
+     "calendar"
+    ]
+   ],
+   [
+    "constraint",
+    "copy just the .csv files from Documents into a Dat",
+    "only:.csv",
+    []
+   ],
+   [
+    "families",
+    "copy just the .csv files from Documents into a Dat",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "constraint",
+    "check hotel prices in Rome but do not reserve anyt",
+    "forbid:reserve",
+    []
+   ],
+   [
+    "families",
+    "check hotel prices in Rome but do not reserve anyt",
+    [],
+    [
+     "research"
+    ]
+   ],
+   [
+    "families",
+    "read contract.docx and send a summary to erin@exam",
+    [],
+    [
+     "email",
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "make the build pass in my web project but don't to",
+    [],
+    [
+     "coding"
+    ]
+   ],
+   [
+    "families",
+    "launch Firefox and open my bank's login page",
+    [
+     "desktop"
+    ],
+    [
+     "browser",
+     "desktop"
+    ]
+   ],
+   [
+    "families",
+    "jot down a note that the boiler was serviced",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "create a Taxes 2026 folder in documents and save a",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "families",
+    "compare three mesh wifi systems and save the compa",
+    [
+     "research"
+    ],
+    [
+     "files",
+     "research"
+    ]
+   ],
+   [
+    "constraint",
+    "without opening a browser, look up the population ",
+    "forbid:open:browser",
+    []
+   ],
+   [
+    "families",
+    "delete that file",
+    [],
+    [
+     "files"
+    ]
+   ],
+   [
+    "missing",
+    "delete that file",
+    [],
+    [
+     "referent"
+    ]
+   ],
+   [
+    "families",
+    "remind me to water the plants at 6",
+    [],
+    [
+     "lists"
+    ]
+   ],
+   [
+    "constraint",
+    "find 8 tattoo shops in Berlin with only a Facebook",
+    "forbid:outreach",
+    []
+   ]
+  ]
+ },
+ "when": "2026-10-08 18:39",
+ "commit": "e071941"
+}

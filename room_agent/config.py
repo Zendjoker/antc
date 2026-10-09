@@ -56,6 +56,20 @@ COG_MAX_TOOL_ROUNDS = int(os.getenv("COG_MAX_TOOL_ROUNDS", "6"))  # tool rounds 
 COG_MAX_TOOL_CALLS = int(os.getenv("COG_MAX_TOOL_CALLS", "14"))   # tool calls per request
 COG_MAX_TURN_S = float(os.getenv("COG_MAX_TURN_S", "90"))         # seconds of tool work per request
 COG_MAX_RETRIES = int(os.getenv("COG_MAX_RETRIES", "2"))          # the same failing action, at most this many times per goal
+# V2 general intelligence (cognition/understand.py, actions/planning.py, actions/supervisor.py, computer/coding.py)
+GOAL_UNDERSTANDING = os.getenv("GOAL_UNDERSTANDING", "1") == "1"  # explicit limits in their words are enforced on every goal
+GOAL_VERIFIER = os.getenv("GOAL_VERIFIER", "0") == "1"  # a cheap model re-reads AMBIGUOUS requests (paid: off by default)
+TASK_CONTRACTS = os.getenv("TASK_CONTRACTS", "1") == "1"  # run_task plans: contracts, validation, inferred dependencies
+TASK_RECOVERY = os.getenv("TASK_RECOVERY", "1") == "1"  # run_task: bounded, safe alternatives after a failure
+TASK_SUPERVISOR = os.getenv("TASK_SUPERVISOR", "1") == "1"  # run_task: deterministic progress monitoring
+TASK_MAX_RECOVERIES = int(os.getenv("TASK_MAX_RECOVERIES", "") or "3")  # alternative attempts per task
+TASK_MAX_USD = float(os.getenv("TASK_MAX_USD", "") or "0.50")  # a task that has cost more than this stops (supervisor)
+TASK_EXPERIENCE = os.getenv("TASK_EXPERIENCE", "1") == "1"  # verified procedures / failure patterns in experience.db
+EXPERIENCE_TTL_DAYS = int(os.getenv("EXPERIENCE_TTL_DAYS", "") or "90")  # learned procedures / patterns expire
+CODING = os.getenv("CODING", "1") == "1"  # run_tests (free, sandboxed copy); fix_code needs CODING_FIXER + budget
+CODING_FIXER = os.getenv("CODING_FIXER", "none").strip().lower()  # none (default) | anthropic: a paid model proposes fixes
+CODING_MAX_USD = float(os.getenv("CODING_MAX_USD", "") or "0.50")  # most one fix_code call may reserve (paid fixer only)
+CODING_ROOTS = [p for p in os.getenv("CODING_ROOTS", "").split(";") if p.strip()]  # extra project roots (default: home)
 
 # ---------- audio devices and rates ----------
 SR = 16000  # mic / wake word / STT rate

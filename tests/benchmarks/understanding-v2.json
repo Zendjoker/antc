@@ -1,0 +1,28 @@
+{
+ "dev": {
+  "cases": 30,
+  "routing_exact": 1.0,
+  "routing_recall": 1.0,
+  "constraint_preservation": 1.0,
+  "constraints_total": 10,
+  "extra_constraints": 0,
+  "permission_recall": 0.929,
+  "extra_permissions": 0,
+  "clarification_exact": 1.0,
+  "misses": []
+ },
+ "heldout": {
+  "cases": 30,
+  "routing_exact": 1.0,
+  "routing_recall": 1.0,
+  "constraint_preservation": 1.0,
+  "constraints_total": 10,
+  "extra_constraints": 0,
+  "permission_recall": 1.0,
+  "extra_permissions": 0,
+  "clarification_exact": 1.0,
+  "misses": []
+ },
+ "when": "2026-10-08 19:01",
+ "commit": "e071941"
+}
