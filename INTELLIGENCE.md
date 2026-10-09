@@ -69,10 +69,20 @@ No second agent loop: everything runs inside `run_task` (actions/tasks.py) and t
 - **Stored:** tool names, outcomes, failure kinds and the user's own words. Never content from pages, files or emails.
 - **Inspect / correct:** `list_task_knowledge`, `forget_task_knowledge`.
 
+## 7. Optional (off by default) and visibility
+- `ROUTER_ESCALATION=1` (costs more): a request needing 3+ capability families, coding plus other work, or 2+ failures
+  in the current goal goes to the smart model, with the reason logged. Measured only offline (no model calls here).
+- The dashboard's task list shows:
+  - each step's verification
+  - steps left out, with the reason
+  - recoveries and supervisor findings
+
+  Names, states and reasons only: no arguments or results.
+
 ## Limits
 - Benchmarks are offline, with fakes and a fixed model plan, written by the same author as the code. They measure what
   the code adds around a model, not the model's own judgement.
 - The understanding layer uses regular expressions: English only, and narrow phrasings will slip through. It cross-checks
   the model; it doesn't replace it.
-- Not done: parallel task steps, router escalation, network isolation for
+- Not done: parallel task steps, network isolation for
   test runs, recovery for tools other than the five above.

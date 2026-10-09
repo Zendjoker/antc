@@ -349,8 +349,11 @@
       head.append(el("span", `tag ${TASK_TONE[t.state] || ""}`, t.state.toLowerCase()), el("span", "task-goal", t.goal || "(request)"),
                   el("span", "task-meta", `${t.seconds}s${t.cost_usd ? ` · $${t.cost_usd.toFixed(4)}` : ""}`));
       const steps = el("div", "task-steps");
-      t.steps.forEach((s, i) => steps.append(el("span", `step ${TASK_TONE[s.state] || ""}`, `${i + 1}. ${s.tool} ${s.state.toLowerCase()}`)));
+      t.steps.forEach((s, i) => steps.append(el("span", `step ${TASK_TONE[s.state] || ""}`,
+        `${i + 1}. ${s.tool} ${s.state.toLowerCase()}${s.verified ? " ✓" : ""}${s.why ? ` (${s.why})` : ""}`)));
       row.append(head, steps);
+      for (const line of [...(t.notes || []), ...(t.recovered || []).map(x => "recovered: " + x),
+                          ...(t.supervisor || []).map(x => "supervisor: " + x)]) row.append(el("div", "task-note", line));
       box.append(row);
     }
   }

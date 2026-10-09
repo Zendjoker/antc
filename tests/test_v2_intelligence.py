@@ -263,4 +263,20 @@ config.EXPERIENCE_TTL_DAYS = 0
 t.check("expired knowledge isn't used", xp.pattern_score("open_url", "wrong_result", "same-site search") == 0)
 config.EXPERIENCE_TTL_DAYS = 90
 t.check("forget_task_knowledge removes it", xp.forget("all") >= 1 and xp.listing() == ([], []))
+# =============================================================================================== 8. phase 8
+print("\n8. Optional: router escalation (off by default), dashboard plan visibility")
+from room_agent.llm import router  # noqa: E402
+
+config.ROUTER_ESCALATION = False
+t.check("ROUTER_ESCALATION off (default): a multi-domain request isn't escalated",
+        router.escalation("research the radius, fix my geo project and email bob@example.com the result") == "")
+config.ROUTER_ESCALATION = True
+t.check("ROUTER_ESCALATION on: several capability families -> the smart model, with the reason",
+        "several capabilities" in router.escalation("research the radius, fix my geo project and email bob@example.com"))
+t.check("...a simple request stays on the default model", router.escalation("set a timer for ten minutes") == "")
+config.ROUTER_ESCALATION = False
+snap = tasks.snapshot(3)
+t.check("dashboard snapshot: per-step verification + reasons, no arguments / results (no payloads)",
+        snap and all({"tool", "state", "verified", "why"} == set(st) for x in snap for st in x["steps"])
+        and "args" not in json.dumps(snap) and "SECRET" not in json.dumps(snap))
 t.done("V2 INTELLIGENCE TESTS")

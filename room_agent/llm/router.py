@@ -38,7 +38,33 @@ def choose(text):
         return LLM_SMART, "long request"
     if any(topic in t for topic in LLM_COMPLEX_TOPICS):
         return LLM_SMART, "complex request"
+    why = escalation(t)
+    if why:
+        return LLM_SMART, why
     return default, "default"
+
+
+def escalation(text):
+    """ROUTER_ESCALATION (off by default: it costs more): measured difficulty from the request and this goal's failures
+    -> the reason to use the smart model, or "". No model call."""
+    from room_agent import config
+
+    if not config.ROUTER_ESCALATION:
+        return ""
+    try:
+        from room_agent import cognition
+        from room_agent.cognition import understand
+
+        fams = understand.from_words(text).families
+        if len(fams) >= 3:
+            return "escalated: needs several capabilities (" + ", ".join(fams) + ")"
+        if "coding" in fams and len(fams) >= 2:
+            return "escalated: coding combined with other work"
+        if sum(cognition._state.get("failures", {}).values()) >= 2:
+            return "escalated: repeated failures in this goal"
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
 
 
 def ask(history):

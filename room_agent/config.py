@@ -63,6 +63,7 @@ TASK_CONTRACTS = os.getenv("TASK_CONTRACTS", "1") == "1"  # run_task plans: cont
 TASK_RECOVERY = os.getenv("TASK_RECOVERY", "1") == "1"  # run_task: bounded, safe alternatives after a failure
 TASK_SUPERVISOR = os.getenv("TASK_SUPERVISOR", "1") == "1"  # run_task: deterministic progress monitoring
 TASK_MAX_RECOVERIES = int(os.getenv("TASK_MAX_RECOVERIES", "") or "3")  # alternative attempts per task
+ROUTER_ESCALATION = os.getenv("ROUTER_ESCALATION", "0") == "1"  # multi-domain / coding / repeated failures -> the smart model (costs more: off by default)
 TASK_MAX_USD = float(os.getenv("TASK_MAX_USD", "") or "0.50")  # a task that has cost more than this stops (supervisor)
 TASK_EXPERIENCE = os.getenv("TASK_EXPERIENCE", "1") == "1"  # verified procedures / failure patterns in experience.db
 EXPERIENCE_TTL_DAYS = int(os.getenv("EXPERIENCE_TTL_DAYS", "") or "90")  # learned procedures / patterns expire

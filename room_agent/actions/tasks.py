@@ -546,5 +546,8 @@ def context_lines(user_text):
 def snapshot(n=6):
     """For the dashboard: the latest tasks, short."""
     return [{"id": t["id"], "kind": t["kind"], "goal": t["goal"][:90], "state": t["state"], "seconds": t["seconds"],
-             "cost_usd": t["cost_usd"], "steps": [{"tool": s["tool"], "state": s["state"]} for s in t["steps"]],
-             "updated": t["updated"]} for t in reversed(recent(n))]
+             "cost_usd": t["cost_usd"],
+             "steps": [{"tool": s["tool"], "state": s["state"], "verified": s["state"] == "COMPLETED" and bool(s.get("evidence")), "why": (s.get("skip") or "")[:120]}
+                       for s in t["steps"]],
+             "notes": ((t.get("review") or {}).get("notes") or [])[:3], "recovered": (t.get("recoveries") or [])[:3],
+             "supervisor": (t.get("supervisor") or [])[:3], "updated": t["updated"]} for t in reversed(recent(n))]
