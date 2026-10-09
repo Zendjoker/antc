@@ -571,7 +571,21 @@ def _main():
         loop.run_forever()
 
     threading.Thread(target=run, daemon=True).start()
-    time.sleep(3)
+    # A new tunnel address can take a while to be reachable: never dial before it answers (else Twilio can't fetch the
+    # call's instructions and the person hears "an application error has occurred").
+    import requests
+
+    deadline = time.time() + 45
+    while True:
+        try:
+            if requests.get(f"{url}/phone/health", timeout=5).status_code == 200:
+                break
+        except requests.RequestException:
+            pass
+        if time.time() > deadline:
+            tunnel.stop()
+            raise SystemExit("the public tunnel never became reachable; no call was placed")
+        time.sleep(1.5)
     # (run as "python -m", this file is __main__: the phone server uses room_agent.phone.errand, so use that one)
     from room_agent.phone import errand as mod
 
