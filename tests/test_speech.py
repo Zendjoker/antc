@@ -310,6 +310,51 @@ speak(["The meeting's at three."], plan=[402])
 check("out of credits (402) -> the local voice from now on", PIPER == ["The meeting's at three."] and voices.provider() == "piper")
 voices.current.fallback = False
 
+# the speech profile (settings.json speech_profiles): its voice settings go with every request
+voices.save_setting("speech_profiles", {"default": {"stability": 0.35, "similarity_boost": 0.80, "style": 0.05,
+                                                    "speed": 1.0}})
+speaker._model["name"] = None
+speaker._unsupported.clear()
+speak(["The meeting's at three."])
+VS = (SENT[0]["body"].get("voice_settings") or {}) if SENT else {}
+check("the speech profile's stability / similarity / style are sent with the request; its speed 1.0 is the baseline "
+      "this reply's pace adjusts (0.7-1.2)", {k: VS.get(k) for k in ("stability", "similarity_boost", "style")}
+      == {"stability": 0.35, "similarity_boost": 0.80, "style": 0.05}
+      and 0.7 <= VS.get("speed", 0) <= 1.2, VS)
+PROFILE = {"stability": 0.35, "similarity_boost": 0.80, "style": 0.05, "speed": 1.0}
+check("speed: the profile's 1.0 is sent as is for a neutral reply, and scaled by their rate ('faster' 1.12)",
+      el.voice_settings(1.0, None, PROFILE) == PROFILE and el.voice_settings(1.12, None, PROFILE)["speed"] == 1.12
+      and el.voice_settings(1.0, None, None) is None, (el.voice_settings(1.0, None, PROFILE),
+                                                       el.voice_settings(1.12, None, PROFILE)))
+first_model = SENT[0]["body"]["model_id"] if SENT else ""
+speak(["The meeting's at three."], plan=[422, "ok"])
+check("the model refuses those settings (422) -> same model, without them (only the speed), same sentence; the model "
+      "isn't given up", PIPER == [] and len(SENT) == 2 and SENT[1]["body"]["model_id"] == first_model
+      and set(SENT[1]["body"].get("voice_settings") or {}) <= {"speed"}, [s["body"] for s in SENT])
+speak(["The first is at ten."])
+check("...remembered: the next sentence goes straight out without them", len(SENT) == 1
+      and "stability" not in (SENT[0]["body"].get("voice_settings") or {}) and SENT[0]["body"]["model_id"] == first_model,
+      [s["body"] for s in SENT])
+speaker._unsupported.clear()
+speak(["The meeting's at three."], plan=[422, 422, "ok"])
+check("refused with and without the settings -> the configured fallback model as before, with the settings",
+      PIPER == [] and len(SENT) == 3 and SENT[2]["body"]["model_id"] == "eleven_flash_v2_5"
+      and SENT[2]["body"].get("voice_settings", {}).get("stability") == 0.35, [s["body"] for s in SENT])
+speaker._model["name"] = None
+speaker._unsupported.clear()
+voices.save_setting("speech_profiles", {})
+check("Thomas is a known voice (switchable by name)", voices.ELEVEN_VOICES["Thomas"][0] == "f5gk6ENs9vgDBvfkTj7e")
+from room_agent import config  # noqa: E402
+
+_env, _was = config.EL_VOICE, dict(voices._saved)
+config.EL_VOICE = "f5gk6ENs9vgDBvfkTj7e"
+voices._saved.update(elevenlabs_voice="pNInz6obpgDQGcFmaJgB", elevenlabs_env="nPczCjzI2devNBz1zQrb")
+check("a new voice in .env wins over a voice picked by voice before it changed", voices._Current().eleven
+      == "f5gk6ENs9vgDBvfkTj7e")
+config.EL_VOICE = _env
+voices._saved.clear()
+voices._saved.update(_was)
+
 # interruption: the stream stops and nothing more is queued
 rt.engine.got.clear()
 SENT.clear()

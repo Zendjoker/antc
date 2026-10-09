@@ -109,8 +109,9 @@ def voice_settings(base_rate, p, profile=None):
     """voice_settings for the request: speed from their rate and this performance; the rest only from a tested profile
     (speech_profiles in settings.json), never invented: unset fields keep the voice's own saved settings."""
     out = dict(profile or {})
-    speed = round(max(0.7, min(1.2, base_rate * (p.pace if p else 1.0))), 3)
-    if speed != 1.0:
+    base = float(out.get("speed") or 1.0)  # (the profile's speed is the baseline their rate and this reply adjust)
+    speed = round(max(0.7, min(1.2, base * base_rate * (p.pace if p else 1.0))), 3)
+    if speed != 1.0 or "speed" in out:
         out["speed"] = speed
     return out or None
 

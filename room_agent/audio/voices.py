@@ -11,6 +11,7 @@ log = logging.getLogger("room-agent")
 # ElevenLabs: the standard voices every plan can use through the API. Piper: free local voices,
 # downloaded on first use. Add your own entries here.
 ELEVEN_VOICES = {
+    "Thomas": ("f5gk6ENs9vgDBvfkTj7e", "American man, calm"),
     "Brian": ("nPczCjzI2devNBz1zQrb", "American man, deep and relaxed"),
     "Adam": ("pNInz6obpgDQGcFmaJgB", "American man, deep"),
     "George": ("JBFqnCBsd6RMkjVDRZzb", "British man, warm"),

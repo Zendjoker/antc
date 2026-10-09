@@ -90,15 +90,23 @@ class InvalidAudio(Exception):
 
 
 _model = {"name": None}  # the ElevenLabs model in use (EL_MODEL, or EL_FALLBACK_MODEL after it was refused)
+_unsupported = set()  # models that refused the speech profile's voice settings: they get only the speed from now on
+
+
+def _profile(p, model):
+    """The tested voice settings (speech_profiles in settings.json) for this sentence, unless this model refused them."""
+    profiles = voices.saved("speech_profiles", {}) or {}
+    profile = profiles.get(p.purpose) or profiles.get("default")
+    if profile and model in _unsupported:
+        return {k: v for k, v in profile.items() if k == "speed"}
+    return profile
 
 
 def _payload(item, model):
     text, p = speech.provider_text(item, "elevenlabs", model)
     previous = " ".join(list(rt.turn_speech)[:-1])[-500:]  # (this reply so far, for prosody continuity)
-    profiles = voices.saved("speech_profiles", {}) or {}
     return elevenlabs.request_body(text, p, model, rt.speech_rate, previous_text=previous, language=p.language,
-                                   normalization=EL_TEXT_NORMALIZATION, seed=EL_SEED or None,
-                                   profile=profiles.get(p.purpose) or profiles.get("default"))
+                                   normalization=EL_TEXT_NORMALIZATION, seed=EL_SEED or None, profile=_profile(p, model))
 
 
 def stream_elevenlabs(item, out, model=None):
@@ -140,6 +148,22 @@ def _speak_elevenlabs(item, out):
             voices.fall_back_to_piper(f"status {code}, probably out of credits")
             return False
         model = _model["name"] or EL_MODEL
+        if code in (400, 422) and model not in _unsupported and voices.saved("speech_profiles"):
+            # (maybe only the voice settings were refused, e.g. a stability this model doesn't take: keep the model,
+            # drop the settings, before giving up the model itself)
+            _unsupported.add(model)
+            try:
+                stream_elevenlabs(item, out)
+                log.warning("ElevenLabs refused the speech profile's voice settings for %s (status %d): using the "
+                            "voice's own settings with this model", model, code)
+                return True
+            except requests.HTTPError as e2:
+                _unsupported.discard(model)  # (not the settings: the model itself is refused)
+                code = e2.response.status_code if e2.response is not None else code
+            except Exception as e2:  # noqa: BLE001
+                _unsupported.discard(model)
+                log.warning("ElevenLabs unavailable (%s): local voice for this sentence", e2.__class__.__name__)
+                return False
         if code in (400, 404, 422) and EL_FALLBACK_MODEL and model != EL_FALLBACK_MODEL:
             log.warning("ElevenLabs refused %s (status %d): switching to %s", model, code, EL_FALLBACK_MODEL)
             _model["name"] = EL_FALLBACK_MODEL
