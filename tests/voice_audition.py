@@ -9,7 +9,7 @@ Engines: the local voice (Piper) always; ElevenLabs when a real key is set, with
 is the only thing that differs.
 
     .venv\\Scripts\\python -m tests.voice_audition            generate clips + objective checks
-    .venv\\Scripts\\python -m tests.voice_audition serve      blind listening page on http://127.0.0.1:8770
+    .venv\\Scripts\\python -m tests.voice_audition serve      blind listening page on http://127.0.0.1:8773
     .venv\\Scripts\\python -m tests.voice_audition score      unblind your ratings
 
 Objective checks per clip (Whisper listens back): words heard vs the semantic text (did anything get dropped,
@@ -31,7 +31,7 @@ import numpy as np
 from tests.harness import ROOT, setup_env
 
 OUT = Path(ROOT) / "bench" / "audition"
-PORT = 8770
+PORT = 8773  # (8770 is the phone line, 8771 the dashboard link)
 SEED = int(os.getenv("AUDITION_SEED", "4242"))
 
 SCENARIOS = [  # (id, kind, what they said, failed turns just before, Jarvis's reply sentences, language)

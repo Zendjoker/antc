@@ -251,10 +251,10 @@ def main():
     models = list(dict.fromkeys(models))
     ws_models = [m for m in models if m.startswith("eleven_v4") or m.startswith("eleven_v3")]
     if a.selftest:
-        fake_elevenlabs(8771)
+        fake_elevenlabs(8772)
         time.sleep(0.3)
-        res = run("http://127.0.0.1:8771", "ws://127.0.0.1:8771", "fake-key", "voice1", models, ws_models, OUT_SR, 1, listen=False)
-        bad = run("http://127.0.0.1:8771", "ws://127.0.0.1:8771", "wrong-key", "voice1", models[:1], models[:1], OUT_SR, 1, listen=False)
+        res = run("http://127.0.0.1:8772", "ws://127.0.0.1:8772", "fake-key", "voice1", models, ws_models, OUT_SR, 1, listen=False)
+        bad = run("http://127.0.0.1:8772", "ws://127.0.0.1:8772", "wrong-key", "voice1", models[:1], models[:1], OUT_SR, 1, listen=False)
         ok = (res["http"][models[0]]["ok"] == f"{len(SENTENCES)}/{len(SENTENCES)}" and res["http"]["eleven_v4"]["ok"].startswith("0/")
               and "422" in res["http"]["eleven_v4"]["errors"][0] and res["websocket"][models[0]]["ok"] == "1/1"
               and res["websocket"][models[0]]["later_sentences_ttfb_median_s"] is not None and res["seed"][models[0]]["identical_audio"]

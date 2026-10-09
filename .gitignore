@@ -44,3 +44,4 @@ lists.json
 event_reminders.json
 eval/
 tasks.json
+google_auth.env
