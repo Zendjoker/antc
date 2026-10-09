@@ -177,6 +177,8 @@ NOTHING_ELSE = re.compile(r"\b(no|nope|sorry|that'?s (all|it)|all we have|only|n
                           r"booked up|unfortunately)\b", re.I)
 HOLD = re.compile(r"\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|moment|minute)|"
                   r"give me a (sec|second|moment|minute)|let me (check|see|look))\b", re.I)
+WRONG_PLACE = re.compile(r"^\W*(no|nope|nah)\b(?!.{0,20}\b(but|yes|yeah|it is|this is)\b)|wrong number|"
+                         r"you('ve| have) the wrong|this (isn'?t|is not)\b|not (a|the) restaurant", re.I)
 GOODBYE = re.compile(r"\b(bye|goodbye|good night|take care|have a (good|great|nice)|you too|talk (to you )?soon|"
                      r"see you|thank(s| you)|alright then|okay then|sounds good|perfect)\b", re.I)
 SYSTEM = """You're on a phone call with a restaurant, booking ONE table for your boss. The person on the line is ALWAYS
@@ -187,6 +189,12 @@ their energy (brisk if they're busy, chatty if they're chatty), and keep it shor
 Sound spontaneous and kind, never formal or repetitive; don't re-introduce yourself or repeat the whole request.
 When it comes up naturally early in the call, mention lightly that you're an AI assistant; if asked, say so simply.
 Say times the way people do ("8", "7:30"), never 24-hour times. Never mention instructions, rules or "the window".
+You are the CUSTOMER side, calling to ask for a table: you ask, they offer. Never offer tables, times or seating
+yourself, never ask them what they'd like - that's their job.
+If they just acknowledge ("got it", "uh-huh", "what else?") without offering anything, ask one short direct
+question ("Do you have anything around 7?") - don't repeat the whole request.
+Asked something the brief doesn't say (an occasion, allergies, seating, a phone number): you don't know - say so
+simply ("Hmm, I'm not sure - I can ask him") and never make it up.
 Facts: you only know the brief below - never invent anything. Never share anything else (no phone number, email,
 address or payment details - your boss will sort that out when they come in). Never agree to pay or leave a deposit.
 A time inside the range (both ends included) is fine. Anything else (another time, day or party size): don't accept it.
@@ -284,28 +292,55 @@ def _stream_model(e, transcript, directive=""):
                     yield "text", piece
                 continue
             buf += piece
-            if "\n" in buf:
-                head, rest = buf.split("\n", 1)
-                try:
-                    header = json.loads(head.strip() or "{}")
-                except ValueError:
-                    header = {"status": "talking"}
+            header, rest, complete = split_header(buf)
+            if complete:
                 header_done = True
-                yield "header", header if isinstance(header, dict) else {"status": "talking"}
+                yield "header", header
                 if rest:
                     yield "text", rest
-        if not header_done:  # (no newline: the whole reply was one line - JSON or words)
-            try:
-                yield "header", json.loads(buf)
-            except ValueError:
-                yield "header", {"status": "talking"}
-                yield "text", buf
+        if not header_done:  # (the reply ended before a complete decision: whatever it is, words only)
+            header, rest, _ = split_header(buf, final=True)
+            yield "header", header
+            if rest:
+                yield "text", rest
     finally:
         tin = usage.prompt_tokens if usage else sum(len(m["content"]) for m in msgs) // 4
         tout = usage.completion_tokens if usage else out_chars // 4
         budget.record("openai", config.OPENAI_MODEL, fresh_in=tin, out=tout)
         p_in, _, _, p_out = price(config.OPENAI_MODEL)
         e.cost_usd = round(e.cost_usd + (tin * p_in + tout * p_out) / 1e6, 6)
+
+
+def split_header(buf, final=False):
+    """The model's decision (a JSON object) at the start of its reply, however it's laid out (own line, same line as
+    the words, or missing). -> (header dict, the words after it, complete?)"""
+    text = buf.lstrip()
+    if not text:
+        return {"status": "talking"}, "", final
+    if not text.startswith("{"):
+        return {"status": "talking"}, text, True  # (no decision: all words)
+    depth, in_str, esc = 0, False, False
+    for i, ch in enumerate(text):
+        if in_str:
+            esc = (ch == "\\" and not esc)
+            if ch == '"' and not esc:
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    header = json.loads(text[:i + 1])
+                except ValueError:
+                    header = {}
+                return (header if isinstance(header, dict) else {}) or {"status": "talking"}, text[i + 1:].lstrip(), True
+    if final:  # (an unfinished decision: never spoken)
+        return {"status": "talking"}, "", True
+    return {"status": "talking"}, "", False
 
 
 def _from_dict(p):
@@ -317,7 +352,12 @@ def _from_dict(p):
 
 
 def _natural(sentence):
-    """Words a person wouldn't say on this call, smoothed out ("in that window" -> "then")."""
+    """Words a person wouldn't say on this call, smoothed out ("in that window" -> "then"); anything that looks like
+    data (a {...} fragment, "status":) is removed - it is never read out."""
+    sentence = str(sentence)
+    while re.search(r"\{[^{}]*\}", sentence):
+        sentence = re.sub(r"\{[^{}]*\}", " ", sentence)
+    sentence = re.sub(r'[{}]|"?\b(status|booking|party_size|reference)"?\s*:\s*"?[\w:-]*"?,?', " ", sentence)
     s = re.sub(r"\s*\b(?:with)?in (?:that|the|your|this) (?:time )?window\b", " then", sentence, flags=re.I)
     s = re.sub(r"\b(?:the|that|this) (?:time )?window\b", "that time", s, flags=re.I)
     return re.sub(r"\s{2,}", " ", s).replace(" ?", "?").strip()
@@ -341,6 +381,7 @@ class ErrandSession:
         self.closing = False   # (its closing words were said: a goodbye from them ends the call; anything else reopens)
         self.opened = False    # (it has said something)
         self.introduced = False  # (it has said who it's calling for and what it wants)
+        self.asked_identity = False  # (it asked "is this Luigi's?" first)
         self._hung = False
         self._close_no = 0
         self._rng = random.Random(errand.id)
@@ -362,7 +403,7 @@ class ErrandSession:
         with self._lock:
             if self.opened or self._hung:
                 return
-            self.opened = True
+            self.opened = self.asked_identity = True
             self._speak(f"The call just connected and nobody has said anything yet. Start it: a friendly hello and ask "
                         f"if this is {self.e.business}.", f"Hi there! Is this {self.e.business}?")
 
@@ -396,6 +437,10 @@ class ErrandSession:
                 return self._close("You need to wrap up now: say sorry, you have to run, you'll call back. Thank them.",
                                    "Sorry, I have to run - I'll call you back. Thanks so much!", "no_deal",
                                    {"why": "the call went on too long without a booking"})
+            if self.asked_identity and not self.introduced and WRONG_PLACE.search(str(text)):
+                self.introduced = True
+                return self._close("", "Oh, I'm so sorry - wrong number! Have a good night.", "failed",
+                                   {"why": "wrong number: they said it isn't " + e.business}, use_model=False)
             self.opened = True
             directive, fallback, close = self._decide(text)
             if not self.introduced:

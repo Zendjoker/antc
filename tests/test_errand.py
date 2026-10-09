@@ -297,4 +297,32 @@ s.answer("Can I get a phone number?")
 words = " ".join(x for x, last in sent)
 t.check("a sentence that would leak a number is stopped mid-stream; nothing after it is said",
         "0123" not in words and "can't share" in words and "Anything else" not in words, words)
+t.check("the decision is split off however the model lays it out (own line, same line, missing); never spoken",
+        errand.split_header('{"status": "talking", "booking": {"time": "19:00"}} Sorry, 7 or 7:30?')[:2]
+        == ({"status": "talking", "booking": {"time": "19:00"}}, "Sorry, 7 or 7:30?")
+        and errand.split_header('{"status": "booked"}\nGreat!')[:2] == ({"status": "booked"}, "Great!")
+        and errand.split_header("Just words.")[:2] == ({"status": "talking"}, "Just words.")
+        and errand.split_header('{"status": "talk', final=True)[1] == "")
+sent.clear()
+fake_stream('{"status":"talking","booking":{"date":"Friday","time":"19:00","party_size":4}} ', "Sorry, which ",
+            "time works better?")
+s.answer("Can you hear me?")
+words = " ".join(x for x, last in sent)
+t.check("a decision on the same line as the words (seen on a live call) is NEVER read out", "{" not in words
+        and "status" not in words and "which time works better?" in words, words)
+t.check("...and a stray data fragment inside the words is removed", "{" not in errand._natural(
+    'Sure {"status":"talking"} thing.') and "status" not in errand._natural('Sure "status": "talking", thing.'))
+
+print("\n5. Wrong number")
+errand.THINK = fake_think
+errand.OPEN_WAIT_S = 0.2
+sent = []
+e = brief()
+s = errand.ErrandSession(e, lambda text, last: sent.append(text), hang_up=lambda: sent.append("<END>"))
+time.sleep(0.6)
+errand.OPEN_WAIT_S = 60
+s.answer("No.")
+time.sleep(0.6)
+t.check("'is this Luigi's?' - 'No.' -> an apology for the wrong number, no request, the call ends",
+        e.status == "failed" and "wrong number" in " ".join(sent) and "table" not in " ".join(sent[1:]), sent)
 t.done("ERRAND CALL TESTS")
