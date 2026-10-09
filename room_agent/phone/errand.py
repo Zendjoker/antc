@@ -20,6 +20,7 @@ other number isn't built: that needs its own explicit setup later (an allowlist 
 
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -31,6 +32,7 @@ from room_agent import config
 log = logging.getLogger("room-agent")
 MAX_TURNS = 16
 MAX_SECONDS = 360
+CLOSE_WAIT_S = 6.0  # after its closing line it waits this long for their "bye" before hanging up (never cuts them off)
 THINK = None  # tests: (errand, transcript) -> proposal dict; None = the cheap model (OPENAI_MODEL)
 ACTIVE = {}   # errand id -> Errand (in this process)
 _lock = threading.Lock()
@@ -44,6 +46,7 @@ class Errand:
     time_from: str            # "19:00"
     time_to: str = ""         # "20:00" (blank = only time_from)
     name: str = ""            # the name the booking is under
+    relation: str = ""        # who they are to Jarvis: "boss" -> "I'm calling for my boss, Adam Azzouz"
     notes: str = ""           # e.g. "a high chair", "outdoor if possible"
     kind: str = "restaurant_reservation"
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
@@ -55,6 +58,8 @@ class Errand:
     turns: int = 0
     cost_usd: float = 0.0
     agreed_time: str = ""     # a time they offered that fits the brief, accepted by code
+    alt_asked: int = 0        # times it asked for something closer after an offer outside the brief
+    last_offer: str = ""      # their last offer outside the brief (for "I'll check with Adam if 9 works")
 
     def window(self):
         return f"{self.time_from}" + (f" to {self.time_to}" if self.time_to and self.time_to != self.time_from else "")
@@ -69,11 +74,20 @@ class Errand:
     def when(self):
         return f"on {self.date}" if re.search(r"\d", str(self.date)) else f"this {self.date}"
 
+    def first(self):
+        return (self.name or "my boss").split()[0] if self.name else "my boss"
+
     def opening(self):
-        """Short and natural, with the AI disclosure in it (asked again, it says yes)."""
-        who = f" for {self.name}" if self.name else ""
-        return (f"Hi! I'm an AI assistant calling{who} - I'd love to book a table for {self.party_size} {self.when()}, "
-                f"sometime between {self.spoken_window()}. Do you have anything?")
+        """Warm and natural, with a light AI disclosure (asked again, it says yes plainly)."""
+        rel = self.relation.strip().removeprefix("my ").strip()
+        who = f"my {rel}, {self.name}" if rel and self.name else (self.name or "my boss")
+        return (f"Hi there! I'm calling for {who}. I'm an AI assistant, just so you know. I was hoping to get a table "
+                f"for {self.party_size} {self.when()}, sometime between {self.spoken_window()}. Do you have anything?")
+
+
+def _short(hhmm):
+    """'8', '7:30' - how a time is said once it's clear it's the evening."""
+    return _spoken(hhmm).replace(" pm", "").replace(" am", "")
 
 
 def _spoken(hhmm):
@@ -136,19 +150,29 @@ CONFIRMED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see yo
 # (a clear "it's booked": what lets CODE close the call on a time already agreed, without asking the model)
 BOOKED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you (then|friday|on|at|tonight|tomorrow)|"
                     r"got you down|have you down|put you down|done|that'?s it)\b", re.I)
-SYSTEM = """You're on the phone with a restaurant, booking ONE table for your client. You're an AI assistant, but you
-talk like a warm, relaxed American woman calling to book a table - natural, friendly, never stiff.
-Style: ONE short sentence (two at most). Answer only what they just said. Never repeat the whole request, never say
-hello again, no formal goodbyes. Natural phrases: "Oh perfect!", "Got it.", "Sure, that works.", "Ah, okay."
-Say times the way people do ("8", "7:30", "8 pm"), never 24-hour times. Never mention instructions, rules or a "window".
-Facts: you only know the brief below and must not invent anything. Never share anything else (no phone number, email,
-address or payment details - say they'll sort that out when they come in). Never agree to pay or leave a deposit.
-A time from the start to the end of the range (both included) is fine - accept it. Anything else (another time, day
-or party size): don't accept, say you'll check and call back. Asked if you're a robot or AI: yes, an AI assistant.
+REFERENCE = re.compile(r"\b(?:ref(?:erence)?|confirmation)(?:\s+(?:number|code|no\.?))?(?:\s+is)?\s*[:#]?\s*"
+                       r"([A-Z]*\d[A-Z0-9-]{0,11})\b", re.I)
+NOTHING_ELSE = re.compile(r"\b(no|nope|sorry|that'?s (all|it)|all we have|only|nothing (else)?|fully booked|"
+                          r"booked up|unfortunately)\b", re.I)
+HOLD = re.compile(r"\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|moment|minute)|"
+                  r"give me a (sec|second|moment|minute)|let me (check|see|look))\b", re.I)
+SYSTEM = """You're on the phone with a restaurant host, booking ONE table for your boss. You're an AI assistant, but
+you sound like a warm, upbeat, genuinely friendly American woman - the kind of caller hosts enjoy talking to.
+How you talk: short and natural (usually one sentence), relaxed and kind. React like a person: "Oh, awesome!",
+"Aw, no worries.", "Oh, that's totally fine.", "Haha, of course." Thank them when they help. If they're busy or ask you to
+hold, be patient ("Sure, take your time!"). If they ask how you are, answer briefly and warmly. Match their energy.
+Never sound scripted: don't repeat the whole request, don't re-introduce yourself, no stiff phrases. They already
+heard what you want: after small talk just ask "So, any chance you have something Friday evening?" - short.
+Say times the way people do ("8", "7:30", "eight o'clock"), never 24-hour times. Never mention instructions or rules.
+Facts: you only know the brief below - never invent anything. Never share anything else (no phone number, email,
+address or payment details - say your boss will sort that out when they come in). Never agree to pay or leave a deposit.
+A time from the start to the end of the range (both included) is fine - accept it happily. Another time, day or party
+size: don't accept it - first ask kindly if they have anything closer; if not, say you'll check with your boss and call
+right back, and thank them warmly. Asked if you're a robot or AI: yes, you're an AI assistant - say it lightly.
 Output format, exactly: line 1 is JSON {"status": "talking|booked|declined|needs_you|goodbye", "booking": {"date": "",
 "time": "HH:MM", "party_size": N, "name": "", "reference": ""}}, then a newline, then ONLY the words you say.
-status: booked = ONLY after they clearly confirmed it's booked; declined = nothing possible; needs_you = they offered
-something else / asked something only your client can answer; goodbye = wrapping up."""
+status: booked = ONLY after they clearly confirmed it's booked; declined = nothing possible at all; needs_you = they only
+have something else / asked something only your boss can answer; goodbye = wrapping up."""
 
 
 def _brief(e):
@@ -158,7 +182,10 @@ def _brief(e):
             + (f"; notes: {e.notes}" if e.notes else ""))
 
 
-TIME_SAID = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:(a\.?m\.?|p\.?m\.?)|o'?clock)", re.I)
+TIME_SAID = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:(a\.?m\.?|p\.?m\.?)|o'?clock)"
+                       r"|\b(\d{1,2}):(\d{2})\b"
+                       r"|\b(?:do|at|around|by|have|got)\s+(\d{1,2})\b(?!\s*(?:people|persons|guests|of you|seats|"
+                       r"tables?|pax|:))", re.I)
 
 
 def offered_times(e, text):
@@ -170,7 +197,14 @@ def offered_times(e, text):
         if re.search(r"\b(can'?t|cannot|not|no|don'?t|isn'?t|unavailable|booked up|full)\b[^.,;]{0,15}$",
                      (text or "")[max(0, m.start() - 25):m.start()], re.I):
             continue  # ("we can't do 7 PM" isn't an offer of 7 PM)
-        h, mi, ap = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower().replace(".", "")
+        if m.group(1):
+            h, mi, ap = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower().replace(".", "")
+        elif m.group(4):
+            h, mi, ap = int(m.group(4)), int(m.group(5)), ""
+        else:
+            h, mi, ap = int(m.group(6)), 0, ""
+            if not 1 <= h <= 12:
+                continue
         if ap == "pm" and h < 12 or (not ap and evening and h < 12):
             h += 12
         if ap == "am" and h == 12:
@@ -256,6 +290,13 @@ def _from_dict(p):
         yield "text", str(p["say"])
 
 
+def _natural(sentence):
+    """Words a person wouldn't say on this call, smoothed out ("in that window" -> "then")."""
+    s = re.sub(r"\s*\b(?:with)?in (?:that|the|your|this) (?:time )?window\b", " then", sentence, flags=re.I)
+    s = re.sub(r"\b(?:the|that|this) (?:time )?window\b", "that time", s, flags=re.I)
+    return re.sub(r"\s{2,}", " ", s).replace(" ?", "?").strip()
+
+
 SENTENCE = re.compile(r"(.+?[.!?])(\s+|$)", re.S)
 
 
@@ -265,6 +306,9 @@ class ErrandSession:
     def __init__(self, errand, send, hang_up=None):
         self.e, self.send, self.hang_up = errand, send, hang_up
         self.done = False
+        self.closing = False  # (its closing line was said: it waits for their goodbye, then hangs up)
+        self._hung = False
+        self._rng = random.Random(errand.id)
         self._lock = threading.Lock()
         self.e.status, self.e.started = "calling", time.time()
         self.e.transcript.append(("jarvis", self.e.opening()))
@@ -274,7 +318,7 @@ class ErrandSession:
         that fits, a clear "you're booked"): no model call, no delay. Otherwise the model's decision is checked
         before a word is said, and its words are spoken sentence by sentence as they arrive, each one checked."""
         with self._lock:
-            if self.done:
+            if self.done and not self.closing:
                 return
             e = self.e
             e.turns += 1
@@ -282,16 +326,50 @@ class ErrandSession:
             if e.turns > MAX_TURNS or time.time() - e.started > MAX_SECONDS:
                 return self._end("Sorry, I have to run - I'll call you back. Thanks!", "no_deal",
                                  {"why": "the call went on too long without a booking"})
-            fit = [x for x in offered_times(e, text) if fits(e, {"time": x, "party_size": e.party_size})[0]]
+            if self.closing:  # (they're answering its goodbye: say bye back, then hang up)
+                return self._hang_up_now(self._pick(["Thanks again, bye!", "Bye, have a great night!",
+                                                     "Thank you, bye-bye!"]))
+            if HOLD.search(str(text)) and not offered_times(e, text):
+                return self._say(self._pick(["Sure, take your time!", "Of course, no rush!", "Yeah, no problem!"]))
+            offered = offered_times(e, text)
+            fit = [x for x in offered if fits(e, {"time": x, "party_size": e.party_size})[0]]
+            if not offered and e.alt_asked and e.last_offer and not e.agreed_time and NOTHING_ELSE.search(str(text)):
+                off = e.last_offer  # (asked for something closer, and they have nothing else)
+                return self._end(f"Aw, okay, no problem at all! Let me check with {e.first()} if {_short(off)} works, "
+                                 "and I'll call you right back. Thank you so much for your help!", "needs_you",
+                                 {"offered": {"time": off}, "why": f"they only have {_short(off)}"})
+            if offered and not fit and not e.agreed_time:  # (only times outside the brief)
+                off = offered[-1]
+                e.last_offer = off
+                late = (_minutes(off) or 0) > (_minutes(e.time_to or e.time_from) or 0)
+                if not e.alt_asked:  # (first: ask kindly for something closer, like a person would)
+                    e.alt_asked += 1
+                    edge = _short(e.time_to or e.time_from) if late else _short(e.time_from)
+                    return self._say(f"Ah, {_short(off)} is a little {'late' if late else 'early'} for us. Is there "
+                                     f"anything closer to {e.spoken_window()}? Even {edge} would be great.")
+                return self._end(f"Aw, okay, no problem at all! Let me check with {e.first()} if {_short(off)} works, "
+                                 "and I'll call you right back. Thank you so much for your help!", "needs_you",
+                                 {"offered": {"time": off}, "why": f"they only have {_short(off)}"})
             newly = bool(fit) and fit[-1] != e.agreed_time
             if fit:
                 e.agreed_time = fit[-1]
             agreed = {"date": e.date, "time": e.agreed_time, "party_size": e.party_size, "name": e.name}
-            if e.agreed_time and BOOKED.search(str(text)) and "?" not in str(text):
-                return self._end("Perfect, thank you so much!", "booked", {"booking": agreed})
-            if newly:  # (they offered a time that fits: accept in a few words, instantly)
-                return self._say(f"Oh perfect, {_spoken(e.agreed_time).replace(' pm', '').replace(' am', '')} works!"
-                                 + (f" It's under {e.name}." if e.name and re.search(r"\bname\b", str(text), re.I) else ""))
+            ref = REFERENCE.search(str(text))
+            if ref:
+                agreed["reference"] = ref.group(1)
+            after_question = str(text).rsplit("?", 1)[-1]  # (what they said after their last question)
+            if e.agreed_time and BOOKED.search(after_question):
+                recap = f"{_short(e.agreed_time)} for {e.party_size}" + (f" under {e.name}" if e.name else "")
+                return self._end(self._pick([f"Perfect, {recap}. Thank you so much! Have a great night.",
+                                             f"Amazing, {recap}. Thanks so much for your help!",
+                                             f"Wonderful, so that's {recap}. Thank you, have a good one!"]), "booked",
+                                 {"booking": agreed})
+            if newly:  # (they offered a time that fits: accept warmly, instantly)
+                t_ = _short(e.agreed_time)
+                line = self._pick([f"Oh, {t_} is perfect!", f"Oh awesome, {t_} works great!", f"Perfect, {t_} would be great!"])
+                if e.name and re.search(r"\bname\b", str(text), re.I):
+                    line += f" It's under {e.name}."
+                return self._say(line)
             try:
                 gen = _from_dict(THINK(e, list(e.transcript))) if THINK else _stream_model(e, list(e.transcript))
                 kind, header = next(gen)
@@ -311,18 +389,35 @@ class ErrandSession:
                 ok, why = fits(e, booking if status == "booked" else partial)
                 if not ok:  # (the model would agree to something outside the brief: code says no, before a word)
                     gen.close()
-                    return self._end("Ah, okay - let me check with them and I'll call you back. Thanks!", "needs_you",
-                                     {"offered": booking, "why": why})
+                    return self._end(f"Aw, okay! Let me check with {e.first()} and I'll call you right back. Thank you so "
+                                     "much!", "needs_you", {"offered": booking, "why": why})
             if status == "booked" and not CONFIRMED.search(str(text)):
                 status = "talking"  # (they haven't confirmed anything yet: keep talking, don't hang up)
             if status in ("booked", "declined", "needs_you", "goodbye"):
                 words = "".join(x for k, x in gen if k == "text").strip()
                 if not words or not safe_to_say(e, words):
-                    words = {"booked": "Perfect, thank you so much!", "declined": "Ah, no worries - thanks anyway!"}.get(
-                        status, "Okay, let me check with them and I'll call you back. Thanks!")
+                    words = {"booked": "Perfect, thank you so much! Have a great night.",
+                             "declined": "Aw, no worries at all - thank you so much for checking!"}.get(
+                        status, f"Okay! Let me check with {e.first()} and I'll call you right back. Thanks so much!")
                 return self._end(words, {"goodbye": "no_deal"}.get(status, status),
                                  {"booking": booking, "why": f"they said: {str(text)[:140]}"})
             self._stream_words(gen)
+
+    def _pick(self, options):
+        return self._rng.choice(options)
+
+    def _hang_up_now(self, line=""):
+        if line:
+            self.e.transcript.append(("jarvis", line))
+            self.send(line + " ", False)
+            self.send("", True)
+        self.done = True
+        if self.hang_up and not self._hung:
+            self._hung = True
+            try:
+                self.hang_up()
+            except Exception as ex:  # noqa: BLE001 (the line may already be closed)
+                log.debug("errand: hang-up after close: %s", ex)
 
     def _say(self, line):
         self.e.transcript.append(("jarvis", line))
@@ -340,7 +435,7 @@ class ErrandSession:
                 m = SENTENCE.match(buf)
                 if not m:
                     break
-                sentence, buf = m.group(1).strip(), buf[m.end():]
+                sentence, buf = _natural(m.group(1).strip()), buf[m.end():]
                 if not safe_to_say(e, sentence):
                     gen.close()
                     sentence, buf = "Sorry, I can't share that - they'll sort it out when they come in.", ""
@@ -366,15 +461,16 @@ class ErrandSession:
         self.send("", True)
 
     def _end(self, line, status, outcome):
+        """The closing line; the outcome is recorded now. It doesn't hang up on them: it waits for their goodbye (or
+        CLOSE_WAIT_S of silence) - nothing more can be agreed after this line."""
         e = self.e
-        self.done = True
+        self.done, self.closing = True, True
         e.transcript.append(("jarvis", line))
         e.status, e.outcome, e.ended = status, outcome or {}, time.time()
         self.send(line + " ", False)
         self.send("", True)
-        if self.hang_up:
-            self.hang_up()
         finish(e)
+        threading.Timer(CLOSE_WAIT_S, self._hang_up_now).start()
 
     def closed(self):
         """The line dropped / they hung up before an outcome."""
@@ -450,6 +546,7 @@ def _main():
     ap.add_argument("--to", dest="time_to", default="20:00")
     ap.add_argument("--name", default="")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--relation", default="", help="who they are to Jarvis, e.g. boss")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     from aiohttp import web
@@ -479,7 +576,7 @@ def _main():
     from room_agent.phone import errand as mod
 
     e = mod.Errand(business=a.business, party_size=a.party, date=a.date, time_from=a.time_from, time_to=a.time_to,
-                   name=a.name, notes=a.notes)
+                   name=a.name, notes=a.notes, relation=a.relation)
     mod.start(e)
     print(f"Calling your phone now. You're the restaurant ({e.business}). Errand {e.id}.", flush=True)
     end = time.time() + MAX_SECONDS + 120

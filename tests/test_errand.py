@@ -41,6 +41,7 @@ class FakeTwilio:
         raise AssertionError("an errand must never change the number's settings")
 
 
+errand.CLOSE_WAIT_S = 0.3  # (it waits for their goodbye before hanging up; short in tests)
 TW = FakeTwilio()
 server.twilio = lambda: TW
 server.start()
@@ -126,6 +127,8 @@ for bad in ("Sure, his number is 415 555 0199.", "You can email adam@example.com
     t.check(f"never said: {bad[:40]!r}", not errand.safe_to_say(e, bad))
 t.check("a normal line is fine", errand.safe_to_say(e, "Great, 7:30 for 4 people under Adam, thank you!"))
 t.check("times are spoken naturally ('between 7 and 8 pm')", "between 7 and 8 pm" in e.opening(), e.opening())
+t.check("'calling for my boss, Adam Azzouz' when they're the boss", "calling for my boss, Adam Azzouz"
+        in brief(name="Adam Azzouz", relation="boss").opening())
 
 # =============================================================================================== 2. calls
 print("\n2. Calls through the real phone server (simulated Twilio)")
@@ -135,7 +138,7 @@ e = brief()
 twiml, said, ended = run_errand(e, ["Yes, we have 7:30 for four, under what name? Okay, Adam, booked, reference A12."])
 t.check("the call goes to THEIR OWN phone (test mode), from Jarvis's number; the number's settings untouched",
         TW.calls[-1]["to"] == config.MY_PHONE and TW.calls[-1]["from"] == config.TWILIO_NUMBER)
-t.check("Twilio is told to open with the AI-assistant introduction", "AI assistant calling for Adam" in twiml, twiml)
+t.check("Twilio is told to open with the AI-assistant introduction", "calling for Adam" in twiml and "AI assistant" in twiml, twiml)
 t.check("a booking inside the brief: confirmed, the call ends", e.status == "booked" and ended and said
         and "7:30" in said[-1], (e.status, said, ended))
 t.check("the outcome is texted to them (calendar NOT changed)", SMS and "Booked at Luigi's" in SMS[-1]
@@ -145,9 +148,9 @@ t.check("...and saved (errands.json)", json.loads(config.ERRANDS_FILE.read_text(
 script({"say": "Sure, 9pm works, see you then!", "status": "booked",
         "booking": {"date": "Friday", "time": "21:00", "party_size": 4}})
 e = brief()
-twiml, said, ended = run_errand(e, ["We only have 9pm, is that okay?"])
+twiml, said, ended = run_errand(e, ["We can do 7 tomorrow?", "Okay, we only have 9pm on Friday, is that okay?"])
 t.check("the model tried to accept 9pm (outside 7-8): code refused, said it'll check with them, nothing booked",
-        e.status == "needs_you" and "check with them" in said[-1] and "9pm works" not in " ".join(said) and ended,
+        e.status == "needs_you" and "check with Adam" in said[-1] and "9pm works" not in " ".join(said) and ended,
         (e.status, said))
 t.check("...they're told it needs their decision", "needs your decision" in SMS[-1] and "Nothing was booked" in SMS[-1],
         SMS[-2:])
@@ -170,16 +173,20 @@ script({"say": "Under Adam, please.", "status": "booked", "booking": {"time": "1
 e = brief()
 twiml, said, ended = run_errand(e, ["7:30 works. What name should I put it under?", "Okay Adam, you're booked."])
 t.check("'booked' is accepted only after THEY confirm (a question about the name isn't a confirmation)",
-        said[0] == "Under Adam, please." and len(said) == 2 and e.status == "booked", (said, e.status))
+        "under Adam" in said[0] and len(said) == 2 and e.status == "booked", (said, e.status))
 
 t.check("offered times are read by code: 'can't 7PM, but we can do 8PM' -> 20:00 offered, 19:00 not",
         errand.offered_times(brief(), "We can't 7PM, but we can do a 8PM.") == ["20:00"])
+t.check("'we can do 7:30' / 'we can do 8' are offers; 'a table for 8' / '8 people' aren't",
+        errand.offered_times(brief(), "Okay, we can do 7:30.") == ["19:30"]
+        and errand.offered_times(brief(), "We can do 8.") == ["20:00"]
+        and errand.offered_times(brief(), "We have a table for 8 people") == [])
 script({"say": "My client asked between 19:00 and 20:00; I'll check and call back.", "status": "needs_you"},
        {"say": "Thank you!", "status": "booked", "booking": {"party_size": 4}})
 e = brief()
 twiml, said, ended = run_errand(e, ["We can't do 7PM, but we can do 8PM. Does that sound good?", "Great, you're booked."])
 t.check("they offer 8 pm (the window's end) and the model hesitates: code accepts it in plain words, then it's booked "
-        "at 20:00", said[0].startswith("Oh perfect, 8 works") and e.status == "booked"
+        "at 20:00", "8" in said[0] and not said[0].lower().startswith(("sorry", "ah")) and e.status == "booked"
         and e.outcome["booking"]["time"] == "20:00", (said, e.status, e.outcome))
 
 script(*[{"say": "Could you repeat that?", "status": "talking"}] * 30)
@@ -189,6 +196,24 @@ twiml, said, ended = run_errand(e, ["hello?"] * 5)
 errand.MAX_TURNS = 16
 t.check("a call going nowhere ends after MAX_TURNS, politely, nothing booked", e.status == "no_deal" and ended
         and "call you back" in said[-1], (e.status, said[-1:]))
+
+script({"say": "unused", "status": "talking"})
+e = brief()
+twiml, said, ended = run_errand(e, ["We only have 9PM.", "No, sorry, 9 is all we have."])
+t.check("an offer outside the brief: first it asks kindly for something closer (not a flat no)",
+        "closer" in said[0] and "late" in said[0] and len(said) == 2, said)
+t.check("...only then it says it'll check with Adam, warmly, and records 'needs your decision'",
+        e.status == "needs_you" and "check with Adam" in said[1] and "thank" in said[1].lower(), (e.status, said))
+e = brief()
+twiml, said, ended = run_errand(e, ["Hold on one second.", "Okay, we can do 7:30.", "Great, you're booked for 7:30."])
+t.check("'hold on' -> patient ('take your time' kind of line), no model call; then 7:30 accepted and booked",
+        any(w in said[0].lower() for w in ("take your time", "no rush", "no problem")) and e.status == "booked", (said, e.status))
+errand.CLOSE_WAIT_S = 3.0  # (a real pause after its closing line, so their "bye" arrives in time)
+e = brief()
+twiml, said, ended = run_errand(e, ["We can do 8.", "Okay you're all set.", "Bye!"])
+errand.CLOSE_WAIT_S = 0.3
+t.check("it doesn't hang up on them: after its closing line it answers their 'bye', then the call ends",
+        e.status == "booked" and len(said) == 3 and "bye" in said[2].lower() and ended, (said, ended))
 
 
 def boom(e, tr):
@@ -252,10 +277,10 @@ t.check("a sentence that would leak a number is stopped mid-stream; nothing afte
         "0123" not in words and "can't share" in words and "Anything else" not in words, words)
 sent.clear()
 fake_stream('{"status": "booked", "booking": {"time": "21:00", "party_size": 4}}\n', "Great, 9 it is, see you then!")
-s.answer("We can do 9, you're booked.")
+s.answer("Yes, we can fit you in, you're booked.")
 words = " ".join(x for x, last in sent)
 t.check("a decision outside the brief is refused BEFORE any of the model's words are spoken",
-        e.status == "needs_you" and "9 it is" not in words and "check with them" in words, (e.status, words))
+        e.status == "needs_you" and "9 it is" not in words and "check with Adam" in words, (e.status, words))
 
 form = {"Direction": "outbound-api", "To": config.MY_PHONE, "From": config.TWILIO_NUMBER}
 
