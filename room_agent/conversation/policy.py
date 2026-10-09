@@ -108,7 +108,7 @@ def classify(text, info=None):
     words = re.findall(r"[a-z']+", t.lower())
     if not words:
         return p
-    if corrections.is_denial(t) or getattr(rt.turn, "correction", ""):
+    if corrections.is_denial(t, corrections.misheard_text()) or getattr(rt.turn, "correction", ""):
         p.kind, p.why = CORRECTION, ["denies what Jarvis heard"]
         return p
     if _ENDING.match(t):

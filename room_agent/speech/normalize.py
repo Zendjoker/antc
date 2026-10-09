@@ -51,8 +51,11 @@ def _money(m):
     return f"{amount} {scale + ' ' if scale else ''}{CURRENCY[sym]}"
 
 
+CITATION = re.compile(r"\s*\[(?:\d+(?:\s*[,–-]\s*\d+)*|sources?(?: used)?|source \d+)\]", re.I)
+
+
 def speech_text(text, level="full", acronyms=ACRONYMS):
-    t = str(text)
+    t = CITATION.sub("", str(text))  # (source markers "[2]" / "[sources used]" are for the screen, never read out)
     t = EMAIL.sub(lambda m: spoken_form(m.group(0).lower()), t)
     t = URL.sub(_url, t)
     t = ISO_DATE.sub(_date, t)

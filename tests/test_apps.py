@@ -218,6 +218,21 @@ rt.last_active_app = {"name": "Spotify", "action": "opened", "at": time.time()}
 r = tool("close_app", app_name="it", confidence=0.9)
 check("last_active_app: 'close it' after 'Open Spotify' means Spotify", "Spotify" in r, r)
 
+from types import SimpleNamespace  # noqa: E402
+
+from room_agent.abilities import computer as computer_tools  # noqa: E402
+
+
+def opened(title):
+    return computer_tools._spoken(SimpleNamespace(capability="open_url", parameters={}, message=(
+        f'OK: opened sf.eater.com in a new Opera tab (it\'s in front); it\'s showing "{title}".')))
+
+
+check("a page still loading is named by its site ('Opened sf.eater.com'), never 'Opened Loading...'; a real title is used",
+      opened("Loading\u2026") == "Opened sf.eater.com in Opera." and opened("") == "Opened sf.eater.com in Opera."
+      and opened("The 38 Essential Restaurants - Eater SF") == "Opened The 38 Essential Restaurants in Opera.",
+      [opened("Loading\u2026"), opened("The 38 Essential Restaurants - Eater SF")])
+
 print("\nALL APP TESTS PASSED" if not FAILS else f"\nFAILED: {FAILS}")
 sys.stdout.flush()
 os._exit(1 if FAILS else 0)

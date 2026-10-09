@@ -25,6 +25,8 @@ from room_agent.abilities._kit import CONFIDENCE, params, tool
 from room_agent.actions.core import Group, Risk, register_context, register_group
 
 HINTS = re.compile(r"\bmissions?\b|\bleads?\b|\bprospects?\b|without (a |any )?websites?|(no|poor|bad|weak|old) websites?|"
+                   r"\b(do(es)?n'?t|do(es)? not|don'?t|never) (have|has|got) (a |an |any )?(own )?(web ?sites?|sites?)\b|"
+                   r"\b(lack(s|ing)?|missing|have no|has no|with no) (a |any )?(web ?sites?|online presence)\b|"
                    r"\bdemo( sites?)?s?\b|outreach|how far (are you|along)|approv(e|al)|\bthe best (one|two|three|\d+)\b",
                    re.I)
 START_INTENT = re.compile(r"\b(websites?|web ?sites?|demos?|leads?|prospects?|missions?|outreach|clients?)\b", re.I)

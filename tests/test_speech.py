@@ -357,4 +357,7 @@ check("conversation history and memory keep the semantic reply (no tags, no capi
       "No way, you actually got it working." in hist and "[excited" not in hist and "ACTUALLY" not in hist
       and all("[" not in m["text"] for m in rt.recent))
 
+t.check("source markers ('[2]', '[sources used]') are never read out",
+        N("It's on rentechdigital.com [2], and another one [5] [sources used].", "light")
+        == "It's on rentechdigital dot com, and another one.", N("x [2] y [sources used].", "light"))
 t.done("SPEECH TESTS")

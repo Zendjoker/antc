@@ -67,7 +67,10 @@ register_group(Group("research", RESEARCH_HINTS, _recent, "web research", "reads
     "- For 'research...', 'compare...', 'what's the best...', 'find the docs for...': call research_web (depth=deep for "
     "comparisons / 'research'). Answer only from its passages, cite [n], say where sources disagree, keep the spoken "
     "answer short; never invent a source or a link.",
-    "- Before a deep research call, say one short line first (\"I'll compare the main options.\")."]))
+    "- A research request with no topic ('can you do a research?'): ask what about, in a few words - never guess one.",
+    "- Finding actual businesses (e.g. restaurants without a website) is a mission (start_business_mission), not "
+    "research_web: articles won't list them.",
+    "- Before a deep research call, say one short line first that names THEIR topic (\"Looking into <topic> now.\")."]))
 register_line("other PC control (files, settings, shutdown)", "not built", available=lambda: False)
 register_claim("browser", r"\b(opened|pulled up|loaded|navigated|went|clicked|typed|scrolled|switched|refreshed|reloaded)\b"
                           r".{0,40}\b(tab|page|site|website|youtube|google|link|result|video|browser|opera|chrome|edge|"
@@ -93,10 +96,12 @@ def _window(args):
 def _spoken(result):
     """The short line said after a reflex worked (built from the verified result, no URLs)."""
     msg = result.message
-    m = re.search(r'opened \S+ in a new (.+?) tab.*?showing "(.*?)"', msg)
+    m = re.search(r'opened (\S+) in a new (.+?) tab.*?showing "(.*?)"', msg)
     if m:
-        page = re.split(r"\s+[-|–]\s+", m.group(2))[0][:40] or "it"
-        return f"Opened {page} in {m.group(1)}." if result.capability != "browser_search" else f"Here are the results in {m.group(1)}."
+        title = re.split(r"\s+[-|–]\s+", m.group(3))[0][:40]
+        page = m.group(1) if not title or re.fullmatch(r"(loading|untitled|new tab)\W*", title, re.I) else title
+        browser = m.group(2)  # ("Loading..." / an empty title: the site's name instead)
+        return f"Opened {page} in {browser}." if result.capability != "browser_search" else f"Here are the results in {browser}."
     if result.capability == "browser_navigate":
         return {"back": "Went back.", "forward": "Went forward.", "refresh": "Reloaded.", "new_tab": "New tab's open."}.get(
             result.parameters.get("action"), "Done.")

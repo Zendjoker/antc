@@ -24,8 +24,26 @@ DENIAL = re.compile(
     r"|where\s+did\s+you\s+get\s+that|who\s+said\s+anything\s+about)\b", re.I)
 
 
-def is_denial(text):
-    return bool(DENIAL.search(text or ""))
+ABOUT = re.compile(r"\b(?:tell|told|ask|asked|want|wanted)\s+(?:you\s+)?(?:to\s+|for\s+)?(?P<what>[^.!?;]+)", re.I)
+STOP = set("a an the to you your me my it this that them of for and or but so just all any some i".split())
+
+
+def _content(text):
+    return {w[:6] for w in re.findall(r"[a-z0-9']+", str(text or "").lower()) if w not in STOP and len(w) > 1}
+
+
+def is_denial(text, heard=""):
+    """'I didn't say that' / 'you misheard'. "I didn't tell you to open 21 best restaurants" is NOT one when what it
+    names isn't in what Jarvis heard them say last: that's a complaint about what Jarvis DID, and their request stands."""
+    m = DENIAL.search(text or "")
+    if not m:
+        return False
+    about = ABOUT.search(text[m.start():m.end() + 80]) if re.search(r"tell|told|ask|want", m.group(0), re.I) else None
+    if about and heard:
+        named = _content(re.split(r"\b(?:i|but)\b", about.group("what"), flags=re.I)[0])
+        if len(named) >= 2 and len(named & _content(heard)) < len(named) / 2:
+            return False
+    return True
 
 
 def misheard_text():
@@ -36,9 +54,9 @@ def misheard_text():
 
 def on_user_turn(text):
     """Called at the start of every turn. -> the misheard text it discarded, or ''."""
-    if not is_denial(text):
-        return ""
     wrong = misheard_text()
+    if not is_denial(text, wrong):
+        return ""
     if not wrong or wrong.startswith(MISHEARD):
         return ""
     from room_agent.actions import pending

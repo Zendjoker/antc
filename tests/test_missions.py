@@ -1232,4 +1232,10 @@ r_ = net._request("GET", "https://huge.example/robots.txt", max_bytes=net.ROBOTS
 t.check("robots.txt is size-capped", r_.bytes <= net.ROBOTS_MAX_BYTES, r_.bytes)
 unroute(big)
 
+from room_agent.abilities import missions as mission_tools  # noqa: E402
+
+t.check("the mission tools are offered for 'restaurants that doesn't have a website' (seen live), not for 'find "
+        "restaurants near me'", mission_tools.HINTS.search("make a research of restaurants that doesn't have a website")
+        and mission_tools.HINTS.search("businesses that don't have a site") and mission_tools.HINTS.search(
+            "restaurants lacking a website") and not mission_tools.HINTS.search("find restaurants near me"))
 t.done("MISSION TESTS")

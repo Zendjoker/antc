@@ -87,4 +87,13 @@ rt.turn_interrupted = False
 rt.recent[:] = [{"role": "assistant", "text": t_, "time": ""} for t_ in ("Got it, done.", "Got it, all set.", "Got it.")]
 lines = "\n".join(P.context_lines("thanks"))
 t.check("a worn-out opener ('got it') is flagged so replies vary", "'got it'" in lines, lines)
+from room_agent.conversation import corrections  # noqa: E402
+
+t.check("'I didn't tell you to open 21 best restaurants' (about what Jarvis DID, not what it heard) isn't 'you misheard'",
+        not corrections.is_denial("I didn't tell you to open 21 best restaurant I told you to make the research",
+                                  "You just opened two. I told you to open all of them."))
+t.check("...real ones still are: 'I didn't say that', 'I didn't ask for the weather', 'you misheard me'",
+        corrections.is_denial("I didn't say that", "Set a timer for 10 minutes")
+        and corrections.is_denial("I didn't ask for the weather", "What's the weather like?")
+        and corrections.is_denial("you misheard me", "call mom"))
 t.done("CONVERSATION POLICY")
