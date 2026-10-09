@@ -51,7 +51,8 @@ def choose(text):
 DISCUSSION = re.compile(r"\b(?:i think|i feel|what do you think|your (?:opinion|take|thoughts?)|ideas?|brainstorm\w*|"
                         r"strateg\w*|plans?|planning|project|business|clients?|customers?|money|grow\w*|should (?:i|we)|"
                         r"what if|how (?:could|can|should|would) (?:i|we)|is it worth|worth it|not working|makes? sense|"
-                        r"pros and cons|figure out|advice)\b", re.I)
+                        r"pros and cons|figure out|advice|(?:do|did) you remember|"
+                        r"we (?:decided|discussed|talked about|agreed|said))\b", re.I)
 # What a clear command or status check acts on (understand.TurnIntent.scope / .op): these stay on the cheap model.
 ACTION_SCOPES = {"tab", "page", "app", "window", "device", "media", "volume", "timer", "mission", "memory"}
 ACTION_OPS = {"open", "close", "switch", "search", "set", "raise", "lower", "turn_on", "turn_off", "play", "pause",
@@ -68,10 +69,17 @@ def conversational(text):
     t = " ".join(str(text or "").split())
     kind = getattr(getattr(rt.turn, "policy", None), "kind", "")
     intent = getattr(rt.turn, "intent", None)
-    if not t or kind in (policy.CLARIFICATION, policy.CONTINUATION, policy.ENDING):
+    if not t or kind == policy.ENDING:
         return ""
+    if kind in (policy.CLARIFICATION, policy.CONTINUATION):
+        # (an answer to what Jarvis just asked in a conversation stays in it; an answer to a task's question - a pending
+        # request - stays cheap like the task)
+        talked = getattr(rt, "conversation_turn", None) == rt.turn_no - 1
+        return "continuing the conversation" if talked and rt.pending is None else ""
     discussing = bool(DISCUSSION.search(t))
-    acting = intent is not None and (intent.scope in ACTION_SCOPES or intent.op in ACTION_OPS)
+    asking = kind == policy.QUESTION  # ("do you remember ...?" is about the past, not a request to save something)
+    acting = intent is not None and (intent.scope in ACTION_SCOPES - ({"memory"} if asking else set())
+                                     or intent.op in ACTION_OPS - ({"remember"} if asking else set()))
     if acting and not (discussing and kind != policy.COMMAND):
         return ""
     words = len(t.split())
@@ -125,6 +133,7 @@ def ask(history):
         talk = conversational(rt.turn_text)
         if talk:
             model, reasoning, why = OPENAI_CONVERSATION_MODEL, OPENAI_CONVERSATION_REASONING, talk
+    rt.conversation_turn = rt.turn_no if model else None  # (the next turn's answer to it stays in the conversation)
     name = model or NAMES.get(provider, provider)
     log.info("model: %s (%s)", name, why)
     trace.note("MODEL", f"{name} ({why})")

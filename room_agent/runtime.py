@@ -73,6 +73,7 @@ def new_turn(text, must_answer=False, output=None):
 # ---------------------------------------------------------------- SESSION
 session_started = datetime.datetime.now()
 turn_no = 0                 # counts user turns (conversation/turn.py)
+conversation_turn = None     # the turn that last used the conversation model (llm/router.py)
 recent = []                 # dialogue saved across restarts: [{"role", "text", "time"}] (conversation/history.py)
 last_reply = ""             # what the agent last said, to know whether it's waiting for an answer
 pending = None              # an unfinished request, or one waiting for a yes (tools/validate.py, actions/executor.py)
