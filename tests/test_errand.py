@@ -259,6 +259,12 @@ async def other_number():
 
 t.check("a call to any other number is rejected by the server (only their own phone in test mode)",
         "<Reject/>" in asyncio.run(other_number()))
+script({"say": "Oh got it, you don't want that person. I can't call your boss.", "status": "needs_you"})
+e = brief(name="Adam Azzouz", relation="boss")
+twiml, said, ended = run_errand(e, ["We have 8:30.", "Call your boss and let him know."])
+t.check("'call your boss and let him know' -> it agrees warmly (code), never confuses who it's talking to",
+        e.status == "needs_you" and "check with Adam" in said[-1] and "your boss" not in said[-1], (said, e.status))
+
 # =============================================================================================== 3. streaming
 print("\n3. The model's words are streamed sentence by sentence; its decision is checked before any word")
 from types import SimpleNamespace as NS  # noqa: E402
@@ -278,6 +284,15 @@ errand.THINK = None
 sent = []
 e = brief()
 s = errand.ErrandSession(e, lambda text, last: sent.append((text, last)))
+fake_stream('{"status": "talking"}\n', "Got it, ", "four people. ", "Do you have ", "anything around 7?")
+s.answer("Hi, how many people?")
+words = [x for x, last in sent if x.strip()]
+sent.clear()
+fake_stream('{"status": "talking"}\n', "Oh nice. ", "That sounds lovely. ", "I mean it, really. ", "Anyway, Friday?")
+s.answer("We just redid the patio!")
+words = [x for x, last in sent if x.strip()]
+t.check("at most two short sentences per reply (the rest isn't said)", words == ["Oh nice. ", "That sounds lovely. "], words)
+sent.clear()
 fake_stream('{"status": "talking"}\n', "Got it, ", "four people. ", "Do you have ", "anything around 7?")
 s.answer("Hi, how many people?")
 words = [x for x, last in sent if x.strip()]

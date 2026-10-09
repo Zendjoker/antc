@@ -170,11 +170,15 @@ def other_day(e, text):
     return ""
 
 
+ASK_BOSS = re.compile(r"\b((call|ask|check with|talk to|text) (your|the) (boss|client|employer)|let (him|her|them) know|"
+                      r"get back to (me|us)|call (me|us) back|check and call)\b", re.I)
 NOTHING_ELSE = re.compile(r"\b(no|nope|sorry|that'?s (all|it)|all we have|only|nothing (else)?|fully booked|"
                           r"booked up|unfortunately)\b", re.I)
 HOLD = re.compile(r"\b(hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|moment|minute)|"
                   r"give me a (sec|second|moment|minute)|let me (check|see|look))\b", re.I)
-SYSTEM = """You're on the phone with a restaurant host, booking ONE table for your boss. You're an AI assistant, but
+SYSTEM = """You're on the phone with a restaurant host, booking ONE table for your boss. The person talking to you is
+ALWAYS the restaurant's host - never your boss, never your client. If they ask you to check with your boss / call him /
+let him know, just agree warmly ("Of course! I'll check with him and call you right back."). You're an AI assistant, but
 you sound like a warm, upbeat, genuinely friendly American woman - the kind of caller hosts enjoy talking to.
 How you talk: short and natural (usually one sentence), relaxed and kind. React like a person: "Oh, awesome!",
 "Aw, no worries.", "Oh, that's totally fine.", "Haha, of course." Thank them when they help. If they're busy or ask you to
@@ -347,6 +351,12 @@ class ErrandSession:
             if self.closing:  # (they're answering its goodbye: say bye back, then hang up)
                 return self._hang_up_now(self._pick(["Thanks again, bye!", "Bye, have a great night!",
                                                      "Thank you, bye-bye!"]))
+            if ASK_BOSS.search(str(text)) and not e.agreed_time:  # ("check with your boss": agree, warmly - code)
+                return self._end(self._pick([f"Of course! I'll check with {e.first()} and call you right back. "
+                                             "Thank you so much!", f"Sure thing! Let me check with {e.first()} and I'll "
+                                             "call you back. Thanks so much for your help!"]), "needs_you",
+                                 {"offered": {"time": e.last_offer} if e.last_offer else {},
+                                  "why": f"they asked to check with {e.first()}: {str(text)[:120]}"})
             if HOLD.search(str(text)) and not offered_times(e, text):
                 return self._say(self._pick(["Sure, take your time!", "Of course, no rush!", "Yeah, no problem!"]))
             offered = offered_times(e, text)
@@ -422,11 +432,13 @@ class ErrandSession:
             if status == "booked" and not CONFIRMED.search(str(text)):
                 status = "talking"  # (they haven't confirmed anything yet: keep talking, don't hang up)
             if status in ("booked", "declined", "needs_you", "goodbye"):
-                words = "".join(x for k, x in gen if k == "text").strip()
-                if not words or not safe_to_say(e, words):
-                    words = {"booked": "Perfect, thank you so much! Have a great night.",
-                             "declined": "Aw, no worries at all - thank you so much for checking!"}.get(
-                        status, f"Okay! Let me check with {e.first()} and I'll call you right back. Thanks so much!")
+                gen.close()  # (closing lines come from code: short, warm, never improvised)
+                words = {"booked": self._pick(["Perfect, thank you so much! Have a great night.",
+                                               "Amazing, thank you so much for your help!"]),
+                         "declined": self._pick(["Aw, no worries at all - thank you so much for checking!",
+                                                 "Oh, that's okay! Thanks so much for checking."])}.get(
+                    status, self._pick([f"Of course! I'll check with {e.first()} and call you right back. Thanks so much!",
+                                        f"Okay! Let me check with {e.first()} and I'll call you right back. Thank you!"]))
                 return self._end(words, {"goodbye": "no_deal"}.get(status, status),
                                  {"booking": booking, "why": f"they said: {str(text)[:140]}"})
             self._stream_words(gen)
@@ -472,6 +484,7 @@ class ErrandSession:
     def _stream_words(self, gen):
         """Speak the model's words sentence by sentence as they arrive; each sentence is checked before it's sent."""
         e, buf, spoken = self.e, "", []
+        limit = {"sentences": 2, "words": 35}
         for kind, piece in gen:
             if kind != "text":
                 continue
@@ -489,6 +502,10 @@ class ErrandSession:
                     break
                 spoken.append(sentence)
                 self.send(sentence + " ", False)
+                if len(spoken) >= limit["sentences"] or sum(len(x.split()) for x in spoken) >= limit["words"]:
+                    gen.close()  # (short replies only: the rest isn't said)
+                    buf = ""
+                    break
             else:
                 continue
             if spoken and spoken[-1].startswith("Sorry, I can't share"):
