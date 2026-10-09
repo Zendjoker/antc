@@ -125,6 +125,7 @@ for bad in ("Sure, his number is 415 555 0199.", "You can email adam@example.com
             "We can pay the deposit now"):
     t.check(f"never said: {bad[:40]!r}", not errand.safe_to_say(e, bad))
 t.check("a normal line is fine", errand.safe_to_say(e, "Great, 7:30 for 4 people under Adam, thank you!"))
+t.check("times are spoken naturally ('between 7 and 8 pm')", "between 7 and 8 pm" in e.opening(), e.opening())
 
 # =============================================================================================== 2. calls
 print("\n2. Calls through the real phone server (simulated Twilio)")
@@ -157,6 +158,19 @@ e = brief()
 twiml, said, ended = run_errand(e, ["Can I have a phone number for the booking?", "Okay, 7 o'clock for four, done."])
 t.check("asked for a phone number: the model's leak was blocked before it was spoken; the call continued",
         "0199" not in " ".join(said) and "can't share that" in said[0] and e.status == "booked", (said, e.status))
+
+script({}, {"say": "No problem, thank you anyway!", "status": "declined"})
+e = brief()
+twiml, said, ended = run_errand(e, ["Sorry, we're fully booked.", "No, nothing at all on Friday."])
+t.check("an empty model reply -> 'could you say that again', never the privacy line; then a decline ends the call",
+        said[0] == "Sorry, could you say that again?" and e.status == "declined" and ended, (said, e.status))
+
+script({"say": "Under Adam, please.", "status": "booked", "booking": {"time": "19:30", "party_size": 4}},
+       {"say": "Thank you!", "status": "booked", "booking": {"time": "19:30", "party_size": 4}})
+e = brief()
+twiml, said, ended = run_errand(e, ["7:30 works. What name should I put it under?", "Okay Adam, you're booked."])
+t.check("'booked' is accepted only after THEY confirm (a question about the name isn't a confirmation)",
+        said[0] == "Under Adam, please." and len(said) == 2 and e.status == "booked", (said, e.status))
 
 script(*[{"say": "Could you repeat that?", "status": "talking"}] * 30)
 errand.MAX_TURNS = 3

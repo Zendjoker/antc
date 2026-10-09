@@ -58,10 +58,25 @@ class Errand:
     def window(self):
         return f"{self.time_from}" + (f" to {self.time_to}" if self.time_to and self.time_to != self.time_from else "")
 
+    def spoken_window(self):
+        """'7 and 8 pm' / '7:30 pm' (how a person says it on the phone, after "between")."""
+        a, b = _spoken(self.time_from), _spoken(self.time_to) if self.time_to and self.time_to != self.time_from else ""
+        if b and a.split()[-1] == b.split()[-1]:
+            a = a.rsplit(" ", 1)[0]
+        return f"{a} and {b}" if b else a
+
     def opening(self):
         who = self.name or "my client"
         return (f"Hi, this is an AI assistant calling on behalf of {who}. I'd like to book a table for {self.party_size} "
-                f"on {self.date}, around {self.window()}. Do you have anything available?")
+                f"on {self.date}, between {self.spoken_window()}. Do you have anything available?")
+
+
+def _spoken(hhmm):
+    m = _minutes(hhmm)
+    if m is None:
+        return str(hhmm or "")
+    h, mi = divmod(m, 60)
+    return f"{(h % 12) or 12}{f':{mi:02d}' if mi else ''} {'pm' if h >= 12 else 'am'}"
 
 
 def _minutes(hhmm):
@@ -111,6 +126,8 @@ def safe_to_say(e, text):
                          text, re.I)
 
 
+CONFIRMED = re.compile(r"\b(booked|confirmed|reserved|all set|you'?re set|see you|got you down|have you down|"
+                       r"put you down|done|that'?s fine|perfect|great|no problem|sure thing)\b", re.I)
 SYSTEM = """You are an AI assistant on a phone call with a restaurant, making ONE reservation for your client.
 You only know the brief below. You have no other information about your client and must not invent any.
 Rules: be brief and polite (one or two short sentences per reply). Never share anything not in the brief (no phone
@@ -120,7 +137,8 @@ match the brief; if they offer something else, don't accept it: say you'll check
 If they ask whether you're a robot or AI, say yes, you're an AI assistant booking for your client.
 Reply with JSON only: {"say": "...", "status": "talking|booked|declined|needs_you|goodbye",
  "booking": {"date": "...", "time": "HH:MM", "party_size": N, "name": "...", "reference": "..."}}
-status: booked = they confirmed a booking that matches; declined = they can't take it at all; needs_you = they offered
+status: booked = ONLY once they have clearly confirmed the reservation is made (not while they're still asking
+questions such as the name); declined = they can't take it at all; needs_you = they offered
 something outside the brief or asked something only your client can answer; goodbye = the call is wrapping up."""
 
 
@@ -140,8 +158,18 @@ def _think_model(e, transcript):
     msgs = [{"role": "system", "content": SYSTEM + "\n\n" + _brief(e)}]
     for who, text in transcript:
         msgs.append({"role": "assistant" if who == "jarvis" else "user", "content": text})
-    r = openai_client().with_options(max_retries=0, timeout=20).chat.completions.create(
-        model=config.OPENAI_MODEL, messages=msgs, response_format={"type": "json_object"}, max_completion_tokens=400)
+    import openai
+
+    c = openai_client().with_options(max_retries=0, timeout=20)
+    kw = dict(model=config.OPENAI_MODEL, messages=msgs, response_format={"type": "json_object"},
+              max_completion_tokens=1500)  # (includes GPT-5's thinking tokens: too few and the reply comes back empty)
+    try:  # ("minimal" thinking: a phone reply has to come back in a second or two)
+        r = c.chat.completions.create(reasoning_effort=config.OPENAI_REASONING, **kw) if config.OPENAI_REASONING \
+            else c.chat.completions.create(**kw)
+    except openai.BadRequestError as ex:  # (400, not billed: this model doesn't take reasoning_effort)
+        if "reasoning" not in str(ex).lower():
+            raise
+        r = c.chat.completions.create(**kw)
     u = r.usage
     budget.record("openai", config.OPENAI_MODEL, fresh_in=u.prompt_tokens, out=u.completion_tokens)
     try:
@@ -186,16 +214,25 @@ class ErrandSession:
                                  {"why": f"model error ({ex.__class__.__name__})"})
             say = str(p.get("say") or "").strip()[:400]
             status = str(p.get("status") or "talking")
-            if not say or not safe_to_say(e, say):
+            if not say:  # (nothing usable came back: ask again, don't guess)
+                log.warning("errand %s: the model's reply was empty (keys: %s)", e.id, ", ".join(sorted(p))[:80])
+                say, status = "Sorry, could you say that again?", "talking"
+            elif not safe_to_say(e, say):
                 say = "I'm sorry, I can't share that, but my client will provide it when they arrive."
                 status = "talking" if status not in ("goodbye",) else status
-            if status == "booked":
-                ok, why = fits(e, p.get("booking"))
-                if not ok:  # (the model wanted to accept something outside the brief: code says no)
+            booking = p.get("booking") if isinstance(p.get("booking"), dict) else {}
+            accepting = status == "booked" or (status == "talking" and (booking.get("time") or booking.get("party_size")))
+            if accepting and status != "declined":
+                partial = {**{"party_size": e.party_size, "time": e.time_from}, **{k: v for k, v in booking.items() if v}}
+                ok, why = fits(e, booking if status == "booked" else partial)  # (while talking: only what it states)
+                if not ok:  # (the model would accept / agree to something outside the brief: code says no, first)
                     return self._end("Thank you - that's a little different from what I was asked to book, so I'll "
                                      f"check with {e.name or 'my client'} and call you back.", "needs_you",
-                                     {"offered": p.get("booking"), "why": why})
-                return self._end(say, "booked", {"booking": p.get("booking")})
+                                     {"offered": booking, "why": why})
+            if status == "booked" and not CONFIRMED.search(str(text)):
+                status = "talking"  # (they haven't confirmed anything yet: keep talking, don't hang up)
+            if status == "booked":
+                return self._end(say, "booked", {"booking": booking})
             if status in ("declined", "needs_you", "goodbye"):
                 return self._end(say, {"goodbye": "no_deal"}.get(status, status),
                                  {"booking": p.get("booking"), "why": status})
@@ -313,14 +350,17 @@ def _main():
 
     threading.Thread(target=run, daemon=True).start()
     time.sleep(3)
-    e = Errand(business=a.business, party_size=a.party, date=a.date, time_from=a.time_from, time_to=a.time_to,
-               name=a.name, notes=a.notes)
-    start(e)
+    # (run as "python -m", this file is __main__: the phone server uses room_agent.phone.errand, so use that one)
+    from room_agent.phone import errand as mod
+
+    e = mod.Errand(business=a.business, party_size=a.party, date=a.date, time_from=a.time_from, time_to=a.time_to,
+                   name=a.name, notes=a.notes)
+    mod.start(e)
     print(f"Calling your phone now. You're the restaurant ({e.business}). Errand {e.id}.", flush=True)
     end = time.time() + MAX_SECONDS + 120
     while time.time() < end and e.status in ("new", "calling"):
         time.sleep(1)
-    print("Outcome:", summary(e), flush=True)
+    print("Outcome:", mod.summary(e), flush=True)
     print("Transcript:", flush=True)
     for who, text in e.transcript:
         print(f"  {who}: {text}", flush=True)

@@ -165,6 +165,7 @@ async def relay(request):
 
                     e = errand.ACTIVE.get(item.get("errand_id"))
                     if e is None:
+                        log.warning("phone: an errand call connected, but its errand isn't known here; closing")
                         await ws.close()
                         break
                     session = errand.ErrandSession(e, send, hang_up=hang_up)
