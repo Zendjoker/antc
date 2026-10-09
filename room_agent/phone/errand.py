@@ -346,7 +346,7 @@ class ErrandSession:
                     e.alt_asked += 1
                     edge = _short(e.time_to or e.time_from) if late else _short(e.time_from)
                     return self._say(f"Ah, {_short(off)} is a little {'late' if late else 'early'} for us. Is there "
-                                     f"anything closer to {e.spoken_window()}? Even {edge} would be great.")
+                                     f"anything closer to {e.spoken_window().replace(" and ", " or ")}? Even {edge} would be great.")
                 return self._end(f"Aw, okay, no problem at all! Let me check with {e.first()} if {_short(off)} works, "
                                  "and I'll call you right back. Thank you so much for your help!", "needs_you",
                                  {"offered": {"time": off}, "why": f"they only have {_short(off)}"})
