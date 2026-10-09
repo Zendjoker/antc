@@ -81,6 +81,19 @@ def to_openai(history):
 # recent words make it worth offering, and when it's in use anyway ("close it" right after an app was opened). Plain
 # chat doesn't pay for tools it can't need. Capabilities with no area are always offered.
 RECENT_MESSAGES = 6
+_NOTE = re.compile(r"\s*\(System note\b.*$", re.S)  # (code's notes appended to their message: from turn.py, pending.py)
+_PREFIX = re.compile(r"^\(I cut you off mid-reply\)\s*|\s*\(answer now, don't wait for more\)\s*$")
+
+
+def _own_words(text):
+    """What they actually said in a user message: code's notes are cut off ("(System note: ... gmail_create_draft ...)"
+    named tools and switched their areas on for every turn), and the system's own checks aren't theirs at all."""
+    text = str(text or "")
+    if text.startswith("(Automatic check from the system"):
+        return ""
+    return _PREFIX.sub("", _NOTE.sub("", text))
+
+
 def _recent_text(history):
     """The words that decide which tool areas are offered: what THEY said recently, the tools used recently, and only
     Jarvis's last reply if it asked them something (so "yes" to "want me to set a timer?" still has the timer tools).
@@ -91,13 +104,17 @@ def _recent_text(history):
     last_reply = next((i for i in range(len(recent) - 1, -1, -1) if recent[i]["role"] == "assistant"), None)
     for i, m in enumerate(recent):
         if isinstance(m["content"], str):
-            if m["role"] == "user" or (i == last_reply and m["content"].rstrip().endswith("?")):
+            if m["role"] == "user":
+                parts.append(_own_words(m["content"]))
+            elif i == last_reply and m["content"].rstrip().endswith("?"):
                 parts.append(m["content"])
             continue
         for b in _blocks(m["content"]):
             if b.get("type") == "tool_use":
                 parts.append(b.get("name") or "")  # (a tool used recently counts as touching its group)
-            elif m["role"] == "user" or (i == last_reply and str(b.get("text") or "").rstrip().endswith("?")):
+            elif m["role"] == "user":
+                parts.append(_own_words(b.get("text")))
+            elif i == last_reply and str(b.get("text") or "").rstrip().endswith("?"):
                 parts.append(b.get("text") or "")
     return " ".join(parts)
 
@@ -123,19 +140,21 @@ def openai_tools(tools):
                                                "parameters": t["input_schema"]}} for t in tools]
 
 
-def create(model, messages, **kw):
-    """One request, with GPT-5's thinking effort set when the model accepts it (it's retried without otherwise)."""
+def create(model, messages, reasoning=None, **kw):
+    """One request, with GPT-5's thinking effort set when the model accepts it (it's retried without otherwise).
+    `reasoning`: this call's effort (default OPENAI_REASONING)."""
     import openai
 
-    if OPENAI_REASONING and _reasoning_ok.get(model, True):
+    effort = OPENAI_REASONING if reasoning is None else reasoning
+    if effort and _reasoning_ok.get(model, True):
         try:
             return openai_client().chat.completions.create(model=model, messages=messages,
-                                                           reasoning_effort=OPENAI_REASONING, **kw)
+                                                           reasoning_effort=effort, **kw)
         except openai.BadRequestError as e:
             if "reasoning" not in str(e).lower():
                 raise
             _reasoning_ok[model] = False
-            log.info("%s doesn't take reasoning_effort=%s; using its default", model, OPENAI_REASONING)
+            log.info("%s doesn't take reasoning_effort=%s; using its default", model, effort)
     return openai_client().chat.completions.create(model=model, messages=messages, **kw)
 
 
@@ -153,8 +172,8 @@ def record_openai_usage(usage, model):
 class OpenAICall:
     provider = "openai"
 
-    def __init__(self, history, fixed, changing, tools, model=OPENAI_MODEL):
-        self.model = model
+    def __init__(self, history, fixed, changing, tools, model=OPENAI_MODEL, reasoning=None):
+        self.model, self.reasoning = model, reasoning
         offered = relevant_tools(tools, history)
         from room_agent.prompt import fixed_prompt
 
@@ -164,7 +183,7 @@ class OpenAICall:
         self.text, self.calls, self.usage, self.finished = "", {}, None, False
 
     def __enter__(self):
-        self._resp = create(self.model, self.messages, tools=self.tools or None, stream=True,
+        self._resp = create(self.model, self.messages, reasoning=self.reasoning, tools=self.tools or None, stream=True,
                             stream_options={"include_usage": True},
                             max_completion_tokens=MAX_TOKENS_REPLY * 3,  # (includes GPT-5's thinking tokens)
                             prompt_cache_key="jarvis")
@@ -214,5 +233,6 @@ class OpenAICall:
         return False
 
 
-def ask_openai(history):
-    run_model(history, OpenAICall)
+def ask_openai(history, model=None, reasoning=None):
+    """`model` / `reasoning`: this turn's OpenAI model and thinking effort (router.ask); default OPENAI_MODEL."""
+    run_model(history, lambda *a: OpenAICall(*a, model=model or OPENAI_MODEL, reasoning=reasoning))

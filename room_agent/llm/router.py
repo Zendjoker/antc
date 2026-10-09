@@ -1,13 +1,16 @@
 """Picks the model for each turn, in code (no extra model call to decide):
 
-  cheap model (OpenAI, LLM_DEFAULT)  everyday conversation and simple tool use
+  cheap model (OpenAI, LLM_DEFAULT)  clear commands, status checks and simple tool use
+  conversation model (OpenAI,        natural conversation, open questions, ambiguous requests, project / business
+    OPENAI_CONVERSATION_MODEL)       discussions (conversational(): from the turn's policy and intent, no model call)
   smart model (Claude, LLM_SMART)    you ask for it ("ask Claude", "think hard"), or the request is long/complex,
-                                     or the cheap model fails before saying anything
+                                     DEEP reasoning, or the cheap model fails before saying anything
   local model (Ollama)               LLM_PROVIDER=ollama, or today's paid budget is used up
 """
 
 import datetime
 import logging
+import re
 
 import requests
 
@@ -16,7 +19,7 @@ from room_agent import trace
 from room_agent.audio.speaker import finish_speaking, say
 from room_agent.config import (BUDGET_FALLBACK, LEVEL_DEEP, LLM_COMPLEX_TOPICS, LLM_COMPLEX_WORDS, LLM_DEFAULT,
                                LLM_PROVIDER, LLM_SMART, LLM_SMART_TRIGGERS, MODEL, OLLAMA_MODEL_DEEP, OLLAMA_URL, OPENAI_KEY,
-                               OPENAI_MODEL)
+                               OPENAI_CONVERSATION_MODEL, OPENAI_CONVERSATION_REASONING, OPENAI_MODEL)
 from room_agent.llm.budget import budget
 from room_agent.llm.claude import ask_claude
 from room_agent.llm.ollama import ask_ollama
@@ -42,6 +45,45 @@ def choose(text):
     if why:
         return LLM_SMART, why
     return default, "default"
+
+
+# Talking something through (not a command): ideas, plans, strategy, opinions, a business or project.
+DISCUSSION = re.compile(r"\b(?:i think|i feel|what do you think|your (?:opinion|take|thoughts?)|ideas?|brainstorm\w*|"
+                        r"strateg\w*|plans?|planning|project|business|clients?|customers?|money|grow\w*|should (?:i|we)|"
+                        r"what if|how (?:could|can|should|would) (?:i|we)|is it worth|worth it|not working|makes? sense|"
+                        r"pros and cons|figure out|advice)\b", re.I)
+# What a clear command or status check acts on (understand.TurnIntent.scope / .op): these stay on the cheap model.
+ACTION_SCOPES = {"tab", "page", "app", "window", "device", "media", "volume", "timer", "mission", "memory"}
+ACTION_OPS = {"open", "close", "switch", "search", "set", "raise", "lower", "turn_on", "turn_off", "play", "pause",
+              "resume", "stop", "cancel", "cancel_for_good", "start", "find", "remember", "report"}
+OPEN_QUESTION_WORDS = 10  # a question at least this long, about no device / app / timer, is an open question
+
+
+def conversational(text):
+    """Why this turn deserves the conversation model, or "" for the cheap one. Decided from what code already read:
+    the turn's kind (conversation/policy.py) and intent (cognition/understand.read_turn). A clear device / media / app
+    command or a short status question stays cheap; answers to Jarvis's own questions and sign-offs too."""
+    from room_agent.conversation import policy
+
+    t = " ".join(str(text or "").split())
+    kind = getattr(getattr(rt.turn, "policy", None), "kind", "")
+    intent = getattr(rt.turn, "intent", None)
+    if not t or kind in (policy.CLARIFICATION, policy.CONTINUATION, policy.ENDING):
+        return ""
+    discussing = bool(DISCUSSION.search(t))
+    acting = intent is not None and (intent.scope in ACTION_SCOPES or intent.op in ACTION_OPS)
+    if acting and not (discussing and kind != policy.COMMAND):
+        return ""
+    words = len(t.split())
+    if discussing and words >= 4:
+        return "project discussion"
+    if kind in (policy.CASUAL, policy.EMOTIONAL, policy.CORRECTION) and words >= 3:
+        return "conversation"
+    if kind == policy.QUESTION and words >= OPEN_QUESTION_WORDS:
+        return "open question"
+    if kind == policy.COMMAND and intent is not None and intent.op is None and intent.scope is None and words >= 5:
+        return "open request"
+    return ""
 
 
 def escalation(text):
@@ -78,13 +120,19 @@ def ask(history):
     provider, why = choose(rt.turn_text)
     if level == "DEEP" and LEVEL_DEEP == "smart" and provider != LLM_SMART:
         provider, why = LLM_SMART, "deep reasoning"
-    log.info("model: %s (%s)", NAMES.get(provider, provider), why)
-    trace.note("MODEL", f"{NAMES.get(provider, provider)} ({why})")
+    model, reasoning = None, None
+    if provider == "openai" and OPENAI_CONVERSATION_MODEL and OPENAI_CONVERSATION_MODEL != OPENAI_MODEL:
+        talk = conversational(rt.turn_text)
+        if talk:
+            model, reasoning, why = OPENAI_CONVERSATION_MODEL, OPENAI_CONVERSATION_REASONING, talk
+    name = model or NAMES.get(provider, provider)
+    log.info("model: %s (%s)", name, why)
+    trace.note("MODEL", f"{name} ({why})")
     if provider != "openai":
         return ask_claude(history)
     spoken_before, size_before = rt.spoken_count, len(history)
     try:
-        return ask_openai(history)
+        return ask_openai(history, model=model, reasoning=reasoning)
     except Exception as e:
         if rt.spoken_count != spoken_before:
             raise  # it already said something: answering again from the top would repeat it

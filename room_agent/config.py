@@ -31,6 +31,11 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")  # gpt-5-nano is ~5x cheaper still, but follows the rules less reliably
 OPENAI_MEMORY_MODEL = os.getenv("OPENAI_MEMORY_MODEL", "") or OPENAI_MODEL  # background memory work
 OPENAI_REASONING = os.getenv("OPENAI_REASONING", "minimal")  # GPT-5 thinking effort: minimal is fastest/cheapest (blank = model default)
+# Natural conversation, open questions, ambiguous requests and project discussions get a stronger OpenAI model; clear
+# commands and status checks stay on OPENAI_MODEL (router.conversational). Blank = always OPENAI_MODEL. "gpt-5" at
+# minimal thinking answered in ~1s in a measured test (Oct 9 2026); "low" thinks more but takes ~3.5-4s to first words.
+OPENAI_CONVERSATION_MODEL = os.getenv("OPENAI_CONVERSATION_MODEL", "gpt-5").strip()
+OPENAI_CONVERSATION_REASONING = os.getenv("OPENAI_CONVERSATION_REASONING", "minimal").strip()
 LLM_DEFAULT = os.getenv("LLM_DEFAULT", "openai" if OPENAI_KEY else "claude").lower()  # openai | claude
 LLM_SMART = os.getenv("LLM_SMART", "claude").lower()  # model for important requests
 LLM_SMART_TRIGGERS = [t.strip().lower() for t in os.getenv(
