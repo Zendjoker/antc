@@ -182,6 +182,7 @@ class AudioEngine:
 
         self.mic_q: "queue.Queue[tuple[np.ndarray, float]]" = queue.Queue()
         self.interrupted = threading.Event()  # set when you talk over the agent
+        self.cancel_seq = 0  # +1 each time what's being said is cancelled: speech queued before it never plays (speaker.py)
         self.BARGE = object()  # marker put in mic_q where your interruption starts
         self.barge_preroll = 0  # frames after the marker recorded while the agent was still audible
         self.voice_heard_at = 0.0  # last time something that might be you got through while it talked
@@ -514,6 +515,7 @@ class AudioEngine:
                 self.mic_q.put(it)
             self._armed = False
             self.flush()
+            self.cancel_seq += 1
             self.interrupted.set()
         log.info("TTS cancelled")
 

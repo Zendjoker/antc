@@ -237,8 +237,17 @@ EL_VOICE = os.getenv("ELEVENLABS_VOICE_ID", "nPczCjzI2devNBz1zQrb")
 PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-ryan-high")  # browse: huggingface.co/rhasspy/piper-voices
 EL_FALLBACK_MODEL = os.getenv("ELEVENLABS_FALLBACK_MODEL", "eleven_flash_v2_5").strip()  # if the main model is refused
 EL_TEXT_NORMALIZATION = os.getenv("ELEVENLABS_TEXT_NORMALIZATION", "auto").strip().lower()  # auto | on | off
+# how sentences reach ElevenLabs: auto (the HTTP stream; a model it refuses that the Text to Dialogue WebSocket serves,
+# like eleven_v4_turbo, moves there) | http | dialogue (always the WebSocket for v3 / v4 models)
+EL_TRANSPORT = os.getenv("ELEVENLABS_TRANSPORT", "auto").strip().lower()
 EL_SEED = os.getenv("ELEVENLABS_SEED", "").strip()  # a fixed seed: repeatable audio for A/B tests (blank = natural variation)
 SPEECH_DEBUG = os.getenv("SPEECH_DEBUG", "0") == "1"  # log SEMANTIC / STRATEGY / PERFORMANCE / MODEL per sentence
+# How much the voice performs (speech/director.py), for models that take audio tags (v3 / v4); a value said out loud and
+# kept in settings.json wins: off (plain words, like a reader) | subtle | natural | expressive
+SPEECH_EXPRESSIVENESS = os.getenv("SPEECH_EXPRESSIVENESS", "natural").strip().lower()
+SPEECH_EMOTION = os.getenv("SPEECH_EMOTION", "1") != "0"  # 0: no emotional colouring (warm, excited, laughs...) at all
+SPEECH_PAUSES = os.getenv("SPEECH_PAUSES", "1") != "0"  # 0: no added pauses (thoughtful "Well..." , gaps between thoughts)
+TTS_FALLBACK = os.getenv("TTS_FALLBACK", "piper").strip().lower()  # when ElevenLabs fails: piper (local voice) | none
 
 # ---------- integrations ----------
 HA_URL = os.getenv("HA_URL", "").rstrip("/")

@@ -6,7 +6,8 @@ import re
 
 STOP = {
     "en": "the and you is are was it that this what with for have not just",
-    "fr": "le la les et est je tu vous pas une des que qui pour avec mais c'est",
+    "fr": "le la les et est je tu vous pas une des que qui pour avec mais c'est de du ça tout suis dans sur ce cette il elle "
+          "on nous oui non très",
     "es": "el la los las y es que de no por para una con pero está lo ahora mismo eso esto hay muy aquí qué cómo yo",
     "de": "der die das und ist ich du nicht ein eine mit für auch",
     "it": "il lo la gli e è che di non per una con ma sono",

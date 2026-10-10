@@ -120,7 +120,15 @@ How a sentence is performed is decided separately from what it says (`room_agent
   apology, a surprise, a warning...) into a few delivery words, a pace and at most one emphasized word. Most sentences get
   none: plain is the default.
 - `speech/elevenlabs.py` renders it per model (tags only for v3/v4, never SSML there; plain words for other models) and
-  validates it (same words, at most 2 tags, no laughing at bad news); anything doubtful goes out plain.
+  validates it (same words, at most 2 tags, only allowed tag words, no laughing at bad news); anything doubtful goes out
+  plain. v4 gets only stability and similarity (it takes no speed or style), Flash gets money and percentages written out.
+- What a sentence carries limits the acting: security warnings sound serious and clear, a yes/no before an action calm and
+  clear, money / codes / emails / addresses plain. `SPEECH_EXPRESSIVENESS` (off | subtle | natural | expressive),
+  `SPEECH_EMOTION` and `SPEECH_PAUSES` set how much it performs; short pauses go between thoughts, never before the first
+  sound.
+- `eleven_v4_turbo`'s documented real-time path is the Text to Dialogue WebSocket (`speech/dialogue_ws.py`): with
+  `ELEVENLABS_TRANSPORT=auto` it's used when the HTTP stream refuses the model, one connection per reply.
+- Talking over it cancels everything already queued for that reply, even audio still on its way.
 - If ElevenLabs times out, disconnects, returns no audio or refuses the model, that sentence is said by the local voice
   (or the fallback model): expressiveness can be lost, the sentence never is.
 - Say "say AimChart like aim chart" to fix a pronunciation (spoken only; the spelling stays).

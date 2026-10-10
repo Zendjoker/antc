@@ -31,7 +31,7 @@ CATEGORIES = {
                     "test_texts", "test_pcsettings", "test_safety", "test_eval_scoring", "test_cancellation", "test_google_health",
                     "test_tool_registry", "test_task_engine", "test_benchmark_scoring",
                     "test_reliability_compare", "test_missions", "test_security", "test_recovery", "test_hardening", "test_intelligence", "test_v2_intelligence", "test_errand", "test_action_safety", "test_memory_context",
-                    "test_security_hardening", "test_personality"],
+                    "test_security_hardening", "test_personality", "test_voice_engine"],
     "audio": ["test_listening", "test_speaker", "test_latency"],
     "hardware": ["apps_live", "media_live", "windows_live", "actions_live", ("computer_live", "--act")],
     "live_api": [("test_turn_taking", "--live-api"), "test_ring_ack", "cognition_live", "pending_live"],

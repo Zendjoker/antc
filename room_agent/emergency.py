@@ -39,6 +39,7 @@ def stop_everything(via="voice"):
     if eng is not None:
         try:
             eng.flush()
+            eng.cancel_seq = getattr(eng, "cancel_seq", 0) + 1  # (whatever was still coming never plays)
             if not voice:
                 eng.interrupted.set()  # (by voice it was already listening: "Stopped." must still be heard)
             done.append("speaking")

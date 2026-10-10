@@ -317,11 +317,14 @@ speaker._model["name"] = None
 speaker._unsupported.clear()
 speak(["The meeting's at three."])
 VS = (SENT[0]["body"].get("voice_settings") or {}) if SENT else {}
-check("the speech profile's stability / similarity / style are sent with the request; its speed 1.0 is the baseline "
-      "this reply's pace adjusts (0.7-1.2)", {k: VS.get(k) for k in ("stability", "similarity_boost", "style")}
-      == {"stability": 0.35, "similarity_boost": 0.80, "style": 0.05}
-      and 0.7 <= VS.get("speed", 0) <= 1.2, VS)
+check("v4: the speech profile's stability and similarity are sent; style and speed aren't (v4 takes neither: docs)",
+      VS == {"stability": 0.35, "similarity_boost": 0.80}, VS)
 PROFILE = {"stability": 0.35, "similarity_boost": 0.80, "style": 0.05, "speed": 1.0}
+FLASH = el.request_body("x", director.SpeechPerformance("x"), "eleven_flash_v2_5", profile=PROFILE).get("voice_settings", {})
+check("Flash: stability / similarity / style are sent; its speed 1.0 is the baseline this reply's pace adjusts (0.7-1.2)",
+      {k: FLASH.get(k) for k in ("stability", "similarity_boost", "style")} == {"stability": 0.35, "similarity_boost": 0.80,
+                                                                              "style": 0.05}
+      and 0.7 <= FLASH.get("speed", 0) <= 1.2, FLASH)
 check("speed: the profile's 1.0 is sent as is for a neutral reply, and scaled by their rate ('faster' 1.12)",
       el.voice_settings(1.0, None, PROFILE) == PROFILE and el.voice_settings(1.12, None, PROFILE)["speed"] == 1.12
       and el.voice_settings(1.0, None, None) is None, (el.voice_settings(1.0, None, PROFILE),

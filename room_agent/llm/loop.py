@@ -16,7 +16,7 @@ from room_agent.audio.fillers import LOOP, filler
 from room_agent.audio.speaker import say
 from room_agent.llm.guard import (correction_note, interrupted_now, new_guard, release_checked, speak_checked,
                                   stop_for_interruption)
-from room_agent.audio.styles import semantic_content
+from room_agent.audio.styles import clean_args, semantic_content
 from room_agent.prompt import system_parts
 from room_agent.speech import chunking
 from room_agent.actions import core, pending
@@ -115,6 +115,9 @@ def run_model(history, make_call):
             speak_checked(guard, buf.strip(), spoken)
 
         if reply.stop == "tool_use":
+            for u in reply.uses:  # (speech direction never reaches a tool: an email body, a text or a note has no tags)
+                if clean_args(u.input):
+                    log.info("delivery tags removed from %s's arguments", u.name)
             history.append({"role": "assistant", "content": semantic_content(reply.content)})
             uses = reply.uses
             if (not rt.must_answer and not spoken and not current_pending()
