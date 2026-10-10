@@ -57,5 +57,16 @@ def valid(url, params, token, sig):
 
 
 def same_number(a, b):
-    digits = lambda n: "".join(ch for ch in str(n or "") if ch.isdigit())[-10:]
-    return bool(digits(a)) and digits(a) == digits(b)
+    """The whole number, country code included: +44 415 555 0199 is NOT +1 415 555 0199 (numbers are compared as E.164
+    digits; MY_PHONE must be written with its country code, as Twilio sends it)."""
+    digits = lambda n: "".join(ch for ch in str(n or "") if ch.isdigit()).lstrip("0")
+    return len(digits(a)) >= 8 and digits(a) == digits(b)
+
+
+def attested(stir_verstat, trusted=None):
+    """Did the carrier vouch that the caller really owns the number (STIR/SHAKEN, Twilio's StirVerstat parameter)?"""
+    from room_agent import config
+
+    levels = config.PHONE_TRUSTED_ATTESTATION if trusted is None else trusted
+    value = str(stir_verstat or "").strip()
+    return any(value == f"TN-Validation-Passed-{lvl}" for lvl in levels)

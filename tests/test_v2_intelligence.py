@@ -13,7 +13,7 @@ from pathlib import Path
 
 from tests.harness import setup_env
 
-setup_env()
+setup_env(CODING_ALLOW_UNSANDBOXED="1")  # (its own temp test project; on Windows the Job sandbox is used anyway)
 
 from tests import sim_pc  # noqa: E402,F401
 from room_agent import config  # noqa: E402

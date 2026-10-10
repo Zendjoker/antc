@@ -20,6 +20,11 @@ register_group(Group("coding", HINTS, lambda: False, "coding",
                             "apply_code_fix (asks them). Report test results exactly; never say it's fixed unless "
                             "apply_code_fix said the tests pass on the live project."]))
 PROJECT = {"type": "string", "description": "The project folder as they named it, e.g. 'projects/calc' or a full path"}
+# run_tests / fix_code run the project's own code (its tests): their words must ask for it, and outside content can never
+# choose the project (executor: runs_code)
+RUN_INTENT = re.compile(r"\b(tests?|testing|run|check|fix\w*|debug\w*|failing|fails|broken|build|pass(es|ing)?)\b", re.I)
+FIX_INTENT = re.compile(r"\b(fix\w*|debug\w*|repair|correct\w*|solve|make (?:the |them |it )?(?:tests? )?pass|failing|"
+                        r"broken)\b", re.I)
 CODE_INTENT = re.compile(r"\b(fix\w*|apply|change|update|correct\w*|debug\w*|repair|make (?:the )?(?:tests?|build) pass|"
                          r"go ahead|do it)\b", re.I)
 
@@ -87,12 +92,13 @@ def _describe(args):
 
 tool("run_tests", "Run a project's tests (in a sandbox copy: changes nothing) and report what passes / fails.",
      params({"project": PROJECT}, ["project"]), _run_tests, group="coding", changes_state=False, available=_available,
-     examples=["run the tests in my calc project", "why are my tests failing"], untrusted_output=True)
+     examples=["run the tests in my calc project", "why are my tests failing"], untrusted_output=True,
+     intent=RUN_INTENT, runs_code=True)
 tool("fix_code", "Find a fix for a project (e.g. its failing tests): a coding model proposes it and the tests must pass in "
      "a sandbox copy. Nothing in the project changes; apply_code_fix applies it after they agree.",
      params({"project": PROJECT, "instruction": {"type": "string", "description": "What to fix, in their words"}},
-            ["project"]), _fix, group="coding", changes_state=False, available=_available,
-     verification="internal", verified_by="the project's own tests pass in a sandbox copy with the fix")
+            ["project"]), _fix, group="coding", changes_state=False, available=_available, intent=FIX_INTENT, runs_code=True,
+     untrusted_output=True, verification="internal", verified_by="the project's own tests pass in a sandbox copy with the fix")
 tool("apply_code_fix", "Apply the verified fix (from fix_code) to the project: backs up the files it changes, re-runs the "
      "tests on the live project, restores the backup if they fail.",
      params({"project": PROJECT}, ["project"]), _apply, group="coding", risk=Risk.SENSITIVE, intent=CODE_INTENT,

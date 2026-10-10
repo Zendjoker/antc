@@ -76,6 +76,10 @@ class Capability:
     named_in_words: Optional[Callable[[dict, str], bool]] = None  # (args, their words) -> True when the words name
                                                    # what it acts on (CONFIRM: checked by code, not the model's confidence)
     asks: Any = None                               # regex: their words asking for it (the taint check: it's their request)
+    risk_for: Optional[Callable[[dict], "Risk"]] = None  # (args) -> the risk of THIS call, when it depends on what it
+                                                   # acts on (a lamp vs a door lock); never lower than needed: an error
+                                                   # in it counts as SENSITIVE (executor.risk_of)
+    runs_code: bool = False                        # runs a project's own code (tests): never on outside content's say-so
 
     def schema(self):
         """The tool definition the model sees."""

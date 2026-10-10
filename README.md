@@ -67,7 +67,7 @@ The script installs dependencies, checks your keys, and installs a systemd servi
 | `python main.py --memory` | Shows everything it remembers about you |
 | `python main.py --capabilities` | What it can and can't do right now |
 | `python main.py --connect google` | Connect Gmail + Calendar in your browser (see google.md); `--connections` shows status |
-| `python UI/server.py` | Dashboard at http://127.0.0.1:8765: status, settings, Settings > Connections |
+| `python UI/server.py` | Dashboard at http://127.0.0.1:8765: status, settings, Settings > Connections. It opens (and prints) a one-time link that signs this browser in; other programs on the PC can't use the dashboard without it |
 | `python -m room_agent.calibrate` | Measures your room so it knows when you've stopped talking |
 
 ## Settings (.env)

@@ -29,6 +29,25 @@ when who how is was are be been am being look looked looking stare staring good 
 school least last first all once night noon one the a an and or but so just still also even only arrive arrived
 meet meeting see seen laugh laughing point pointed aim aimed shoot shot""".split())
 CUES = {"to", "email", "e-mail", "address", "is", "it's", "its", "mail", "send", "contact"}
+WRITTEN = re.compile(r"(?<![\w.+-])([\w.+-]+@[\w-]+(?:\.[\w-]+)+)(?![\w-])")
+
+
+def said_addresses(texts):
+    """The exact addresses in what someone said: written ones whole, spoken ones only when confidently recognized. Never
+    a fragment ('e@acme.co' isn't in 'joe@acme.com')."""
+    out = set()
+    for text in texts:
+        out.update(a.lower().rstrip(".") for a in WRITTEN.findall(str(text or "")))
+        out.update(c["email"].lower() for c in find(str(text or ""), expecting=True) if c["confidence"] >= ACCEPT)
+    return out
+
+
+def name_matches_address(name, addr):
+    """Does a first name they said name this address? Only as a whole part of its local part: 'Sam' -> sam.jones@...,
+    sam_k@..., never samsung-promo@... (a near miss means asking for the address, never guessing it)."""
+    word = str(name or "").strip().split()[0].lower() if str(name or "").strip() else ""
+    local = str(addr or "").split("@")[0].lower()
+    return bool(word) and word in [p for p in re.split(r"[._+\-\d]+", local) if p]
 
 
 def _tokens(text):

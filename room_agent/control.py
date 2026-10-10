@@ -1,5 +1,6 @@
 """Jarvis's live link for the dashboard (UI/server.py): what it's doing right now, typed commands, and the dashboard's
-buttons. Local only (127.0.0.1:CONTROL_PORT); only the dashboard's own page may change anything.
+buttons. Local only (127.0.0.1:CONTROL_PORT), and every request needs the control token (room_agent/localauth.py):
+only the dashboard's server has it.
 
     GET  /live       state, the conversation, timers, where you are, what's playing, volume, activity, spend, timing
     GET  /knowledge  what Jarvis remembers about you (memory) and how you like things done (learned preferences)
@@ -549,6 +550,10 @@ def local_host(host):
 async def _only_local(request, handler):
     if not local_host(request.headers.get("Host", "")):
         return web.json_response({"error": "refused: not a local request"}, status=403)
+    from room_agent import localauth
+
+    if not localauth.valid(request.headers.get(localauth.HEADER, "")):  # (any local program can reach 127.0.0.1)
+        return web.json_response({"error": "refused: missing or wrong control token"}, status=403)
     return await handler(request)
 
 
@@ -610,6 +615,10 @@ def start():
     from room_agent.actions.events import events
 
     events.on("*", _on_event)
+
+    from room_agent import localauth
+
+    localauth.token()  # (made now, so the dashboard finds it)
 
     def run():
         loop = asyncio.new_event_loop()

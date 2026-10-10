@@ -33,8 +33,11 @@ def record(cap, result, via="model"):
         if not cap.changes_state and outcome == "OK":
             return  # (reads are not audited: only what changes something, and what was refused)
         private = bool(getattr(cap, "private", False))
+        from room_agent.actions.executor import risk_of
+
+        risk = risk_of(cap, result.parameters) if hasattr(cap, "risk_for") else cap.risk
         row = {"t": round(time.time(), 3), "clock": time.strftime("%Y-%m-%d %H:%M:%S"), "action": cap.name,
-               "risk": str(getattr(cap.risk, "value", cap.risk)), "outcome": outcome, "verified": bool(result.verified),
+               "risk": str(getattr(risk, "value", risk)), "outcome": outcome, "verified": bool(result.verified),
                "via": via, "turn": rt.turn_no}
         if private:
             row["args"] = sorted((result.parameters or {}).keys())

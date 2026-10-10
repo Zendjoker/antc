@@ -79,11 +79,12 @@ try:
 except AuthCanceled:
     check("closed browser / timeout -> canceled", True)
 FG.browser_action = "csrf"
-try:
-    connect()
+try:  # (a forged callback is ignored and the real sign-in keeps waiting: one can't cancel it - tests/test_security_hardening)
+    G.connect(open_browser=FG.open_browser, timeout=1.5)
     check("forged state (CSRF) -> refused", False)
 except IntegrationError as e:
-    check("forged state (CSRF) -> refused, nothing stored", e.code == "error" and not G.accounts() and not FG.refresh)
+    check("forged state (CSRF) -> its code is never used, nothing stored", e.code == "canceled" and not G.accounts()
+          and not FG.refresh)
 FG.browser_action = "approve"
 r = connect(levels={"gmail": ["read"], "calendar": ["read"]})
 check("connect: account identity from Google", r["account"] == "adam@gmail.test")
@@ -383,6 +384,9 @@ sys.path.insert(0, os.path.join(ROOT, "UI"))
 import server  # noqa: E402
 
 client = server.app.test_client()
+from room_agent import localauth  # noqa: E402
+
+client.get(f"/?key={localauth.token()}")  # (signed in the way the user's browser is: tests/test_security_hardening.py)
 FG.browser_account = "adam@gmail.test"
 connect()
 view = client.get("/api/connections").get_json()

@@ -48,3 +48,7 @@ google_auth.env
 errands.json
 missions.db.owner
 actions_journal.json.bak-*
+control.token
+control.token.*.tmp
+.env.*.tmp
+.env.setup.tmp

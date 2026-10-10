@@ -380,7 +380,7 @@ def _verified_addresses(param, value):
                                       "rejected: not something they said, and not a known contact")
         else:
             said = (name or addr).strip()
-            hits = sorted(a for a in env.known_addresses if said and said.split()[0].lower() in a.split("@")[0])
+            hits = sorted(a for a in env.known_addresses if emails.name_matches_address(said, a))
             if len(hits) == 1:
                 out.append(hits[0])
                 log.info("email: %r -> %s (a known contact)", said, hits[0])

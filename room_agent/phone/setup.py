@@ -19,7 +19,9 @@ def set_env(key, value):
         text = re.sub(rf"^{key}=.*$", line, text, count=1, flags=re.M)
     else:
         text = text.rstrip("\n") + ("\n\n# --- Phone mode ---\n" if "# --- Phone mode ---" not in text else "\n") + line + "\n"
-    ENV.write_text(text, encoding="utf-8")
+    tmp = ENV.with_name(".env.setup.tmp")  # (swapped in whole: a crash never leaves .env half-written)
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(ENV)
     setattr(config, key, value)
 
 

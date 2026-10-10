@@ -10,10 +10,13 @@ Writes only run when the user's own words asked for them (intent), so an email c
 """
 
 import datetime
+import hashlib
+import json
 import re
 import time
 from email.utils import getaddresses, parseaddr
 
+from room_agent import emails
 from room_agent import runtime as rt
 from room_agent.actions import pending
 from room_agent.actions.context import env
@@ -119,9 +122,10 @@ def _status_line(service):
             if "write" in levels else "adding or changing events is switched off (Connections)"))
 
 
-def _recent_user_words():
-    words = [rt.turn_text or ""] + [m.get("text", "") for m in list(rt.recent)[-12:] if m.get("role") == "user"]
-    return " ".join(words).lower()
+def _recent_user_texts():
+    return [rt.turn_text or ""] + [m.get("text", "") for m in list(rt.recent)[-12:] if m.get("role") == "user"]
+
+
 
 
 GMAIL_HINTS = re.compile(r"e-?mails?|mail|inbox|gmail|message|sent me|wrote|write|reply|respond|draft|send|thread|"
@@ -279,7 +283,8 @@ def gmail_get_attachments(args):
 
 def _allowed_recipient(addr, reply_to_msg=None):
     addr = addr.lower()
-    return (addr in _recent_user_words() or addr in env.known_addresses or addr == (google().active() or "")
+    return (addr in emails.said_addresses(_recent_user_texts()) or addr in env.known_addresses
+            or addr == (google().active() or "")
             or addr in pending.TRUSTED_EMAILS  # (said out loud clearly, or read back and confirmed: actions/pending)
             or bool(reply_to_msg and addr in reply_to_msg.get("participants", [])))
 
@@ -293,7 +298,7 @@ def _resolve_recipients(to, reply_to_msg=None):
     for name, addr in getaddresses([to]):
         if not addr or "@" not in addr:
             wanted = (name or addr).lower().strip()
-            hits = sorted(a for a in env.known_addresses if wanted and wanted.split()[0] in a)
+            hits = sorted(a for a in env.known_addresses if emails.name_matches_address(wanted, a))
             if len(hits) != 1:
                 raise Unclear(f"{name or addr}'s email address (say it, or find an email from them first)", param="to")
             addr = hits[0]
@@ -333,11 +338,32 @@ def gmail_update_draft(args):
     return f"OK: draft updated, still NOT sent. To: {draft['to']}. Subject: {draft['subject']}. Text: \"{draft['body']}\"."
 
 
+def _fingerprint(draft):
+    """What exactly would be sent (recipients, subject, text): a yes is bound to this, so a draft changed after the
+    question (in Gmail, or by another request) is never sent on the old yes."""
+    what = {k: str(draft.get(k) or "").strip() for k in ("to", "cc", "subject", "body")}
+    return hashlib.sha256(json.dumps(what, sort_keys=True).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _prep_send(args):
+    """Resolve 'current' to the draft's id, read the draft as it is NOW and bind the call to its content."""
+    out = _prep(draft_id=("draft", None))(args)
+    svc = _gmail()
+    draft = svc.get_draft(out["draft_id"])
+    env.remember_item("draft", {"id": out["draft_id"], "account": svc.account, "to": draft["to"], "cc": draft.get("cc", ""),
+                                "subject": draft["subject"], "body": draft.get("body", "")},
+                      label=f"draft to {parseaddr(draft['to'])[1] or draft['to']} (not sent yet)")
+    return {**out, "fingerprint": _fingerprint(draft)}
+
+
 @guarded
 def gmail_send(args):
     svc = _gmail()
     did = _ref("draft", args.get("draft_id"))
     draft = svc.get_draft(did)
+    if args.get("fingerprint") and args["fingerprint"] != _fingerprint(draft):
+        raise ValueError("the draft changed after they were asked (recipients, subject or text), so it wasn't sent. "
+                         "Read them the new version and ask again")
     for _, addr in getaddresses([draft["to"], draft.get("cc", "")]):  # (checked again: the draft could have changed)
         if addr and not _allowed_recipient(addr):
             raise ValueError(f"the draft is addressed to {addr}, which didn't come from them; not sent")
@@ -348,10 +374,14 @@ def gmail_send(args):
 
 
 def _describe_send(args):
+    """The confirmation question names everything that will go out: recipients (cc too), subject and the text."""
     d = env.item("draft")
     if d and d["id"] == args.get("draft_id"):
-        return f"send the email to {d['to']}, subject '{d['subject']}'"
-    return "send that email"
+        body = " ".join(str(d.get("body") or "").split())
+        body = body if len(body) <= 240 else body[:240].rsplit(" ", 1)[0] + " ..."
+        return (f"send the email to {d['to']}" + (f", cc {d['cc']}" if d.get("cc") else "") + f", subject "
+                f"'{d['subject']}', saying: \"{body}\" (read them the recipient and the text before they answer)")
+    return "send that email (read them the recipient and the text first)"
 
 
 def _draft_state(args, before=None):
@@ -638,7 +668,7 @@ register(Capability("gmail_update_draft", "Change the current draft (make it sho
 register(Capability("gmail_send", "Send the current draft. Only when they say send; Jarvis always asks them to confirm "
                     "first.", S({"draft_id": {"type": "string", "description": "'current' for the draft being worked on"}}),
                     gmail_send, group="gmail", available=gmail_compose, risk=Risk.SENSITIVE, intent=SEND_INTENT,
-                    confirm_keys=["draft_id"], prepare=_prep(draft_id=("draft", None)), describe=_describe_send,
+                    confirm_keys=["draft_id", "fingerprint"], prepare=_prep_send, describe=_describe_send,
                     event="email.sent", private=True, claim=["message", "access"]))
 register(Capability("calendar_list_calendars", "Their calendars.", S({}), calendar_list_calendars, group="calendar",
                     available=cal_read, changes_state=False, **COMMON))

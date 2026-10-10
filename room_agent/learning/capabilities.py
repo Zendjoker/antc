@@ -68,7 +68,7 @@ def learn_preference(args):
         cap = core.get(subject.replace(" ", "_"))
         if cap is None:
             return f"FAILED: there's no action called {subject}."
-        if cap.risk == Risk.SENSITIVE and str(value).lower() == "dont_ask":
+        if (cap.risk == Risk.SENSITIVE or cap.risk_for is not None) and str(value).lower() == "dont_ask":
             return f"FAILED: {subject} always needs a yes first (it can't be taken back), so that can't be turned off."
     try:
         key, stored = learning.user_model().teach(kind, value, subject, because=f"you said: \"{said.strip()[:120]}\"")
