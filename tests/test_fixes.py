@@ -167,14 +167,31 @@ def size(req):
             + len(enc.encode(json.dumps(req.get("tools") or []))))
 
 
-rt.last_ring = None
-REQUESTS.clear()
-fake.scripts = [{"text": "Pretty good, you?"}]
-turn([], "how's it going?")
-simple = size(REQUESTS[0])
+from room_agent import config as _config  # noqa: E402
+from room_agent.social import personality as _personality  # noqa: E402
+
+
+def simple_turn(preset):
+    """The input tokens of one simple turn with this personality profile."""
+    _config.PERSONALITY = preset
+    _personality._cache["key"] = None  # (the profile is cached for a second)
+    rt.last_ring = None
+    REQUESTS.clear()
+    fake.scripts = [{"text": "Pretty good, you?"}]
+    turn([], "how's it going?")
+    return size(REQUESTS[0])
+
+
+_preset = _config.PERSONALITY
+street = simple_turn("street")
+simple = simple_turn("friend")  # (the optimization below predates personality profiles: measured with the original one)
+_config.PERSONALITY = _preset
+_personality._cache["key"] = None
 BEFORE = 5017  # measured the same way before this change (17 tools, full rules, full capability details)
 print(f"     simple turn: {BEFORE} -> {simple} input tokens ({(1 - simple / BEFORE) * 100:.0f}% fewer)")
 check("simple turn sends at least 30% fewer input tokens", simple <= BEFORE * 0.7, simple)
+print(f"     street personality: +{street - simple} input tokens over friend")
+check("the street personality adds at most 600 input tokens to a simple turn", street - simple <= 600, street - simple)
 check("simple turn still has memory, weather, search, quiet", {"recall", "remember", "get_weather", "web_search",
                                                               "go_quiet"} <= tools_sent(REQUESTS[0]))
 for text, tool in [("talk a bit slower", "set_speaking_rate"), ("good morning", "daily_briefing"),
