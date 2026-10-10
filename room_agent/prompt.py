@@ -1,6 +1,7 @@
 """The system prompt, assembled from parts, plus the runtime context (verified facts) built fresh for every request.
 
-    persona.md        who Jarvis is (edit it to tune the personality; no code)
+    persona.md        who Jarvis is (edit it to tune the personality; no code); its {identity}, {character} and
+                      {address} slots come from the personality profile (social/personality.py)
     CONVERSATION      how to handle requests, tools and turn-taking (general, here)
     area rules        each area's own rules (abilities/*.py, integrations, ...), sent only when its tools are offered
     TRUTH             what may be claimed (general, here)
@@ -66,7 +67,9 @@ def persona():
         text = config.PERSONA_FILE.read_text(encoding="utf-8")
     except OSError:
         text = "You are the voice agent living in {user}'s room, a friend more than an assistant. Talk casually and briefly."
-    return text.replace("{user}", USER_NAME).strip()
+    from room_agent.social import personality
+
+    return personality.fill(text).replace("{user}", USER_NAME).strip()
 
 
 def fixed_prompt(tool_names=None, tools=None):

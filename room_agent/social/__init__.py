@@ -5,7 +5,7 @@ sounds, without announcing what it noticed.
     on_user_turn(text)      before the model is called: evidence -> SocialState -> ResponseStrategy + VoiceDelivery
                             (rt.turn.strategy / rt.turn.delivery); no extra model call, a few ms
     after_turn(reply,...)   what happened (failed? interrupted? ended with a question? used their name?)
-    scrub(sentence)         stock assistant phrasing out, before anything is spoken
+    scrub(sentence, said)   stock assistant phrasing out, and the personality's limits kept, before anything is spoken
     over_cap(said)          a "tiny reply" turn has said enough
 
 Separate from everything long-term: SocialState lives in memory only and is never written to memory.db, learning.db
@@ -19,7 +19,7 @@ import time
 from room_agent import runtime as rt
 from room_agent import trace
 from room_agent.config import USER_NAME
-from room_agent.social import habits, meaning, prosody, signals
+from room_agent.social import habits, meaning, personality, prosody, signals
 from room_agent.social.delivery import VoiceDelivery, from_strategy  # noqa: F401 (re-exported)
 from room_agent.social.state import SocialState
 from room_agent.social.strategy import ResponseStrategy, derive, long_term  # noqa: F401 (re-exported)
@@ -82,7 +82,7 @@ def on_user_turn(text):
         log.warning("social layer skipped this turn: %s", e)
         strategy, delivery, snap, evidence = ResponseStrategy(), VoiceDelivery(), None, []
     rt.turn.strategy, rt.turn.delivery = strategy, delivery
-    state.note_turn(user=text, reply="", failed=False, interrupted=False, question=False, name_used=False)
+    state.note_turn(user=text, reply="", failed=False, interrupted=False, question=False, name_used=False, nickname=False)
     if snap and (evidence or not strategy.is_default()):
         log.info("social: mode %s, mood %s, energy %s (confidence %.2f%s) -> %s; voice %s x%.2f", snap["interaction_mode"],
                  snap["mood_signal"], snap["energy"], snap["confidence"],
@@ -103,9 +103,31 @@ def after_turn(reply, plan=None, interrupted=False):
                       name_used=habits.uses_name(reply, USER_NAME))
 
 
-def scrub(sentence):
+def scrub(sentence, said=()):
+    """`said`: the sentences of this reply already let through."""
     recent = state.history[-3:-1]  # (the replies before this one)
-    return habits.scrub(sentence, USER_NAME, name_recently=any(h.get("name_used") for h in recent))
+    s = habits.scrub(sentence, USER_NAME, name_recently=any(h.get("name_used") for h in recent))
+    if not s:
+        return s
+    try:  # the personality's hard limits (social/personality.py; nothing for the original friend profile)
+        if personality.profile().preset == "friend":
+            return s
+        from room_agent.truth import PERMISSION_Q
+
+        f = personality.flavor()
+        confirming = f.confirming or bool(getattr(rt.pending, "confirm", False)) or bool(PERMISSION_Q.search(s))
+        from room_agent.actions import core
+
+        steps = getattr(getattr(rt.turn, "plan", None), "steps", None) or []
+        outside = any(getattr(core.get(st.capability), "untrusted_output", False) for st in steps)
+        replies = [h.get("reply") or "" for h in state.history[:-1] if h.get("reply")][-4:]
+        s = habits.enforce(s, f, said=said, recent=replies, confirming=confirming, reporting=bool(steps), outside=outside)
+        if s:
+            personality.note_spoken(s, f)
+        return s
+    except Exception as e:  # (never in the way of what has to be said)
+        log.debug("personality limits skipped: %s", e)
+        return s
 
 
 def over_cap(said):

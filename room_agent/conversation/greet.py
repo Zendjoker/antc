@@ -20,6 +20,7 @@ log = logging.getLogger("room-agent")
 request = threading.Event()  # set when there's a greeting to say: the voice loop wakes up for it
 pending = {"text": "", "at": 0.0}
 last_greeting = {"at": 0.0}
+composed = {"stock": False}  # (the last line compose() made was a stock one: the model couldn't be asked)
 
 # used when the model can't be asked (no budget, offline, slow): still varied, still human
 FALLBACK = {
@@ -111,7 +112,8 @@ def compose(now=None):
     worker.start()
     worker.join(4.0)  # (they're walking in: a stock line now beats a perfect one later)
     line = (box.get("text") or "").strip().strip('"').split("\n")[0]
-    if not line or len(line.split()) > 20:
+    composed["stock"] = not line or len(line.split()) > 20
+    if composed["stock"]:
         line = random.choice(FALLBACK[when])
     return line
 
@@ -155,7 +157,10 @@ def on_door(event):
         return
 
     def work():
+        from room_agent.social import personality
+
         line = compose()
+        line = personality.greeting_line(line, stock=composed["stock"])  # (the personality's limits and nickname)
         ok2, why2 = should_greet()  # (things may have changed while it was written)
         if not ok2:
             log.info("door opened: greeting dropped (%s)", why2)
