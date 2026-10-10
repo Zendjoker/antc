@@ -81,6 +81,26 @@ CLAIMS = [
 CLAIMS = [(kind, re.compile(rx, re.I)) for kind, rx in CLAIMS]
 # nothing can confirm these (no tool does them), so such a claim is always false; "done" is checked specially
 VERIFIED_BY = {"timer_limit": set(), "future_action": set(), "access": set(), "done": set()}
+# Claims that something was written down somewhere: true only if a writing tool returned OK this turn AND none of those
+# tools failed or came back unconfirmed after it ("I added both" when the second write failed is false). Where it went
+# matters: "in the file" needs a file write (file_write, abilities/files.py), "on your list" a list, "in memory" remember.
+STRICT = {"file_write", "record"}
+RECORD_TOOLS = ("append_to_file", "save_file", "add_to_list", "take_note", "remember")
+CLAIMS.append(("record", re.compile(
+    r"\b(i'?ve|i have|i)\s+(just\s+|now\s+|already\s+)?(recorded|logged|documented|wrote (it|that|them|those|both) down|"
+    r"written (it|that|them|both) down|jotted (it|that|them|both) down)\b"
+    r"|\b(it'?s|that'?s|they'?re|both are|the \w+ (error|issue|problem|entr(y|ies)) (is|are))\s+(now\s+)?(recorded|logged|"
+    r"documented|written down|in there)\b", re.I)))
+VERIFIED_BY["record"] = set(RECORD_TOOLS)
+# "I can't create or edit files on the PC": false whenever a file-writing tool is there to use (12:10 live test)
+CLAIMS.append(("files_inability", re.compile(
+    r"\bi\s+(?:can'?t|cannot|can not|am not able to|'?m not able to|don'?t have (?:a way|the ability|access))\s+(?:to\s+)?"
+    r"(?:create|edit|write|save|modify|change|add (?:to|anything to)|update|append to)"
+    r"(?:\s*(?:,|or|and|/)\s*(?:create|edit|write|save|modify|change|update|add to|append to))*\s+"
+    r"(?:any\s+|the\s+|your\s+|that\s+)?(?:files?|documents?|it|that file|text files?)\b", re.I)))
+VERIFIED_BY["files_inability"] = set()
+FILE_TOOLS = ("append_to_file", "save_file")
+ALL_OF_THEM = re.compile(r"\b(both|all|everything|them|those|each|every|the entries|the issues|the errors)\b", re.I)
 
 
 def add_claim(kind, pattern, verified_by=()):
@@ -156,6 +176,15 @@ def _asked_permission_instead(sentence, tools_called):
             and bool(PERMISSION_Q.search(sentence)))
 
 
+def _file_tools_available():
+    try:
+        from room_agent.actions import core
+
+        return any(c is not None and c.available() for c in (core.get(n) for n in FILE_TOOLS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _device_available(kind):
     try:
         return any(bool(fn()) for fn in DEVICE_AVAILABLE.get(kind, []))
@@ -172,6 +201,8 @@ class ClaimGuard:
         self.ok_tools = set()
         self.tools_called = set()
         self.failed_actions = set()  # actions that failed this turn and haven't succeeded since
+        self.write_problems = set()  # writing tools (RECORD_TOOLS) that failed or came back unconfirmed at least once this
+                                     # turn, even if another call of the same tool worked (two entries, one written)
         self.held = []
 
     def tool_result(self, name, result):
@@ -181,6 +212,8 @@ class ClaimGuard:
             self.failed_actions.discard(name)
         elif name in ACTION_TOOLS and str(result).startswith("FAILED") and "they said" not in str(result):
             self.failed_actions.add(name)  # (a refusal because they said not to isn't a failure)
+        if name in RECORD_TOOLS and str(result).startswith(("FAILED", "UNKNOWN")) and "they said" not in str(result):
+            self.write_problems.add(name)
 
     def _done_confirmed(self):
         """"Done" / "all set" only when every action tried this turn worked (one failed means it isn't all done)."""
@@ -219,6 +252,10 @@ class ClaimGuard:
             if kind == "timer_limit":
                 out.append(kind)  # no tool result can make a made-up limit true
                 continue
+            if kind == "files_inability":
+                if _file_tools_available():
+                    out.append(kind)  # it can: append_to_file / save_file are right there
+                continue
             if kind == "outcome":
                 if self.failed_actions and not _negated(s, m):
                     out.append(kind)  # something failed and nothing fixed it: "it's running" can't be true
@@ -231,6 +268,8 @@ class ClaimGuard:
                 continue
             if not (VERIFIED_BY.get(kind, set()) & self.ok_tools):
                 out.append(kind)
+            elif kind in STRICT and VERIFIED_BY[kind] & self.write_problems and ALL_OF_THEM.search(s):
+                out.append(kind)  # (one write worked, another failed or can't be confirmed: "added both" isn't true)
         return out
 
     def admit(self, sentence):

@@ -53,12 +53,24 @@ HEDGE = _re.compile(r"\b(later|tomorrow|tonight|soon|after(wards?)?|before|first
                     r"for now|in a while)\b", _re.I)
 
 
+# A question that only complains about being asked ("Why are you asking so many questions? I said yes."): not a question
+# about the action, so it doesn't hide the yes next to it
+COMPLAINT_Q = _re.compile(r"^\W*(?:(?:why|how come)\b[^?]{0,60}\b(?:ask(?:ing)?|questions?|confirm(?:ing)?|again|repeat(?:ing)?)\b|"
+                          r"(?:did ?n'?t|did|do ?n'?t|can'?t) you (?:hear|get|understand)(?: me| that| what i said)?|"
+                          r"how many times\b|what part of\b|are you (?:deaf|serious|listening))[^?]*\?$", _re.I)
+
+
 def said_yes(text, cap=None, what=""):
     """Is their answer a clear yes to the question about `cap` (described as `what`)? Only a short answer counts, and
-    never a question. For an action that IS a stop / cancel, its own verb isn't a no ("Yes, cancel the mission for
-    good."), and saying the action again is a yes ("Cancel the mission."); picking the option the question offered
-    ("for good") is one too."""
+    never a question (except one that only complains about being asked: "Why are you asking? I said yes."). For an
+    action that IS a stop / cancel, its own verb isn't a no ("Yes, cancel the mission for good."), and saying the action
+    again is a yes ("Cancel the mission."); picking the option the question offered ("for good") is one too."""
     t = " ".join(str(text or "").split())
+    if "?" in t:
+        parts = [x.strip() for x in _re.split(r"(?<=[?.!])\s+", t) if x.strip()]
+        if any(x.endswith("?") and not COMPLAINT_Q.match(x) for x in parts):
+            return False  # (a real question: not an answer)
+        t = " ".join(x for x in parts if not x.endswith("?"))
     if not t or "?" in t or len(t.split()) > 12:
         return False
     own = set(_re.findall(r"[a-z]+", (getattr(cap, "name", "") or "").lower())[:1])
@@ -391,7 +403,7 @@ def _execute(name, args):
     p = rt.pending
     awaiting_yes = bool(p is not None and p.get("confirm") and p["tool"] == name)
     if (cap.intent is not None and not awaiting_yes and not cap.intent.search(rt.turn_text or "")
-            and not pending.source_matches(name, cap.intent)):
+            and not pending.source_matches(name, cap.intent) and not yes_to_our_question(cap)):
         # 2b. the user's own words never asked for this (it may come from an email, or a guess): ask first. Checked
         # before anything is collected, so such a call never starts a request to fill in.
         pending.confirming(name, args)
@@ -425,7 +437,8 @@ def _execute(name, args):
     confirmed = _confirmed(name, clean, cap)
     what = cap.describe(clean) if cap.describe else name
     if (cap.intent is not None and not confirmed and not cap.intent.search(rt.turn_text or "")
-            and not pending.source_matches(name, cap.intent)):  # (a request being filled in: its first words count)
+            and not pending.source_matches(name, cap.intent)  # (a request being filled in: its first words count)
+            and not yes_to_our_question(cap)):
         # 4a. the user's own words this turn didn't ask for this (it may come from an email, or a guess): ask first
         pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: they didn't ask for this "
@@ -584,6 +597,20 @@ def _nothing_to_do(cap, args):
         return ""
 
 
+def yes_to_our_question(cap):
+    """They just said a clear yes to the question Jarvis itself asked aloud in its last reply about THIS kind of action
+    ("Want me to add those two to LED_strip_issue.txt?" -> "Yes."): their yes makes that question their own request, so
+    the "their own words" rule is met. Only the words rule: risk-based confirmations (a SENSITIVE action) still need
+    their yes to the exact call, and outside content still can't ask for anything."""
+    from room_agent.truth import PERMISSION_Q
+
+    q = (rt.last_reply or "").strip()
+    if cap is None or cap.intent is None or not q.endswith("?") or not PERMISSION_Q.search(q):
+        return False
+    last_q = _re.split(r"(?<=[.!?])\s+", q)[-1]
+    return bool(cap.intent.search(last_q)) and said_yes(rt.turn_text or "", cap)
+
+
 def _confirmed(name, args=None, cap=None):
     """A yes counts only if: it was asked on an earlier turn, about this exact action, and the user's own words now say
     yes (never because the model thinks it's probably wanted)."""
@@ -620,6 +647,8 @@ def _norm_args(name, args, keep=()):
             v = _coerce(v, props.get(k, {}))
         except (ValueError, TypeError):
             pass
+        if isinstance(v, str):
+            v = " ".join(v.split())  # (a trailing newline or doubled space isn't a different action)
         out[k] = json.dumps(v, sort_keys=True, default=str)
     return out
 

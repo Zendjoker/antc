@@ -118,7 +118,9 @@ tool("text_me", "Text THEIR OWN phone (never anyone else): a note, or 'send that
      intent=_re.compile(r"text|send|sms|message|my phone", _re.I),
      examples=["text me the wifi password reminder", "send that link to my phone"])
 tool("call_me", "Call their phone now (they asked Jarvis to ring them).", NO_ARGS, _call_me, group="phone_requests",
-     claim="phone_text", intent=_re.compile(r"call me|ring me|phone me|give me a call", _re.I))
+     describe=lambda a: "call your phone now",
+     claim="phone_text", intent=_re.compile(r"\b(?:call|ring|phone|buzz) me\b|\bgive me a (?:phone )?(?:call|ring)\b|"
+                                            r"\b(?:call|ring) my (?:phone|cell|mobile)\b|\bphone call\b", _re.I))
 register_group(Group("vips", _re.compile(r"\bvip|always call me|call me (if|when)|emails? from|who do you call", _re.I),
                      lambda: False, "who's worth a call while driving (VIPs)", "add / remove / list, by voice",
                      lambda: True))

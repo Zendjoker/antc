@@ -173,6 +173,7 @@ VERIFICATION = {
     "copy_link": "the clipboard is read back",
     "open_research_source": "the browser's address bar shows the source",
     "save_file": "the file is read back from disk",
+    "append_to_file": "the file is read back: what was there is unchanged and it ends with exactly the added text",
     "save_research_report": "the file is read back from disk",
     "make_folder": "the folder exists afterwards",
     "move_file": "the file is at the new place and gone from the old one",

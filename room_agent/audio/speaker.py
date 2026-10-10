@@ -52,16 +52,22 @@ def say(sentence):
     sentence = re.sub(r"\s*[\u2014\u2013]\s*", ", ", strip_stage_directions(sentence))  # (dashes read badly aloud)
     if not re.search(r"\w", sentence):
         return
+    said = rt.turn.__dict__.setdefault("said", [])  # (what this turn put out, and whether it reached them: turn.py)
     if rt.turn.output:  # (a phone call: the reply goes down the line, not to the room speaker)
         rt.recent_speech.append(sentence)
         rt.spoken_count += 1
         rt.turn.output(sentence)
+        said.append(_Said(sentence, True))
+        return
+    if not rt.tts_enabled:
+        said.append(_Said(sentence, True))  # (text mode: shown on screen)
         return
     if rt.tts_enabled and not (rt.engine and rt.engine.interrupted.is_set()):
         rt.recent_speech.append(sentence)
         rt.turn_speech.append(sentence)
         rt.spoken_count += 1
         item = Spoken(sentence)
+        said.append(item)
         delivery = getattr(rt.turn, "delivery", None)
         item.style = rt.turn_style or (delivery.style if delivery else "")  # (the model's own tag wins for its sentence)
         item.delivery = delivery
@@ -69,7 +75,20 @@ def say(sentence):
         rt.speak_q.put(item)
 
 
+class _Said(str):
+    """A sentence that didn't go through the room speaker (a phone call, text mode): it was delivered when it was sent."""
+
+    def __new__(cls, text, played):
+        obj = super().__new__(cls, text)
+        obj.played = played
+        return obj
+
+
+_now = {"item": None, "audible": False}  # the sentence the speaker is working on, and whether any of it was played
+
+
 def mark_first_audio(out=None):
+    _now["audible"] = True
     timing.mark("tts_first_byte")
     timing.mark("first_audio")
     timing.mark("first_audible", time.time() + (out.queued_seconds() if out is not None else 0.0))  # (heard after what's queued)
@@ -185,6 +204,7 @@ def speaker_worker():
     out = rt.engine
     while True:
         item = rt.speak_q.get()
+        _now.update(item=item, audible=False)
         try:
             if out.interrupted.is_set():
                 continue  # you talked over it: drop the rest of the reply
@@ -215,5 +235,9 @@ def speaker_worker():
         finally:
             if isinstance(item, str) and item is not LOOP:
                 timing.mark("generation_done", overwrite=True)
+                try:  # (heard = some of it played and they didn't talk over it: turn.py checks a yes/no question was)
+                    item.played = bool(_now["audible"]) and not out.interrupted.is_set()
+                except AttributeError:
+                    pass
             speaker_busy.clear()
             rt.speak_q.task_done()

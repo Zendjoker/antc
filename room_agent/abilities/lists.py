@@ -51,9 +51,21 @@ def _grew(args, before, after):
     return len(after["items"]) > len(before["items"]) or "already" in str(after)
 
 
-tool("add_to_list", "Add an item to one of their lists (to-do by default, shopping, or any list they name).",
+FILE_LIKE = re.compile(r"\.(txt|md|csv|json|log|docx?|rtf|pdf)\s*$|\b(file|desktop|documents|folder)\b", re.I)
+
+
+def _add(args):
+    name = str(args.get("list") or "to-do")
+    if FILE_LIKE.search(name):  # ("add it to LED_strip_issue.txt": that's a file on their PC, not one of these lists)
+        return (f"FAILED: nothing was added: '{name}' is a file, not a list (lists live inside Jarvis, a file is on their "
+                "PC). To add to that file use append_to_file; to keep it on a list, name a list like 'to-do'.")
+    return _l().add(args["item"], name)
+
+
+tool("add_to_list", "Add an item to one of their lists (to-do by default, shopping, or any list they name). Lists live "
+     "inside Jarvis: this never writes a file on their PC (that's append_to_file).",
      params({"item": {"type": "string"}, "list": LIST}, ["item"]),
-     lambda a: _l().add(a["item"], a.get("list", "to-do")), group="lists", claim="lists",
+     _add, group="lists", claim="lists",
      examples=["add milk to my shopping list", "put call the bank on my to-do list"],
      reflex=[(r"(?:add|put)\s+(?P<item>.{2,60}?)\s+(?:to|on)\s+(?:my|the)\s+(?P<list>[\w -]{2,25}?)\s+list", {})],
      reflex_say=_said, undo=lambda a, b, af: _l().remove(a["item"], a.get("list", "to-do")), observe=_snap,

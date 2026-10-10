@@ -122,7 +122,8 @@ check("pending action finished once it ran", rt.pending is None)
 res, *_ = say("Send it.", [("gmail_send", {"draft_id": "current"})], "Send it to adam@gmail.com, subject Test?")
 check("sending still asks first (existing permission rule); nothing sent", res[0].startswith("NEEDS_CONFIRMATION") and not sent(), res)
 res, *_ = say("Yes.", [("gmail_send", {"draft_id": "current"})], "Sent.")
-check("'yes' -> sent to the resolved address", res[0].startswith("OK: sent to adam@gmail.com") and len(sent()) == 1, res)
+check("'yes' -> sent to the resolved address (their yes runs exactly that send, in code)",
+      (not res or res[0].startswith("OK: sent to adam@gmail.com")) and len(sent()) == 1, res)
 
 # ---------------------------------------------------------------- 3. corrections and cancelling
 print("Corrections and cancelling:")

@@ -19,6 +19,15 @@ register_group(Group("files", FILE_HINTS, lambda: False, "files on this PC",
                             "a file's full path aloud: say its name and folder."]))
 register_claim("files", r"\b(i (read|opened|found)|i'?ve (read|opened|found))\b.{0,40}\b(file|document|pdf|spreadsheet|"
                         r"presentation|cv|resume)\b")
+# Writing to a file: only after a write tool returned OK this turn and none of them failed after it ("added both to the
+# file" with one of two writes failed is false). A list item, a note or a memory isn't a file: those claims are separate.
+FILE_NOUN = r"(?:[\w.-]+\.(?:txt|md|csv|json)|files?|documents?|desktop)"
+register_claim("file_write", r"\b(?:added|appended|wrote|written|logged|recorded|saved|put|entered|noted|stored|inserted)\b"
+                             r"[^.?!]{0,50}\b(?:to|in|into|on)\s+(?:the\s+|your\s+|that\s+|this\s+)?" + FILE_NOUN + r"\b"
+                             r"|\b(?:the|your|that)\s+" + FILE_NOUN + r"\s+(?:is|has been|was)\s+(?:now\s+)?(?:updated|saved|"
+                             r"written|created)\b"
+                             r"|\b(?:it'?s|they'?re|that'?s|both are|both'?re|everything'?s)\s+(?:now\s+)?(?:in|on)\s+"
+                             r"(?:(?:the|your)\s+)?" + FILE_NOUN + r"\b")
 FILE_INTENT = re.compile(r"file|document|\bdoc\b|pdf|read|summar|open|show|find|where|look|what('s| is| does)|cv|resume|"
                          r"spreadsheet|slides|invoice|contract|this|that", re.I)
 
@@ -147,8 +156,80 @@ tool("save_file", "Save text they asked for as a file (a note, a list, a draft, 
              "folder": {"type": "string", "description": "desktop (default), documents, downloads"},
              "overwrite": {"type": "boolean", "description": "Only after they confirmed replacing an existing file"}},
             ["name", "content"]),
-     _save, group="files", claim="files", intent=SAVE_INTENT, observe=_exists, undo=_undo_save,
+     _save, group="files", claim=["files", "file_write"], intent=SAVE_INTENT, observe=_exists, undo=_undo_save,
      undo_if=lambda b, a: a["exists"] and not b["exists"])
+
+
+APPEND_INTENT = re.compile(r"\b(add|append|write|put|log|note|record|save|jot|update|include|insert|enter|stick|throw|"
+                           r"keep track)\b", re.I)
+
+
+def _invented(content):
+    """Codes and numbers (3+ digits, not a year) in what's about to be written that they never said and no tool returned
+    this turn: an "error code 1127" made up to fill a log entry (12:10 live test) never goes into their file."""
+    from room_agent import runtime as rt
+
+    nums = {n for n in re.findall(r"(?<![\w.])\d{3,}(?!\w)(?!\.\d)", str(content or ""))
+            if not re.fullmatch(r"(19|20)\d\d", n)}
+    if not nums:
+        return []
+    known = [rt.turn_text or ""] + [str(m.get("text", "")) for m in rt.recent[-30:] if m.get("role") == "user"]
+    known += [str(getattr(st, "message", "")) for st in getattr(getattr(rt, "current_plan", None), "steps", []) or []]
+    seen = " ".join(known)
+    return sorted(n for n in nums if not re.search(rf"(?<!\d){n}(?!\d)", seen))
+
+
+def _append(args):
+    made_up = _invented(args.get("content", ""))
+    if made_up:
+        return (f"NEEDS: nothing was written: {', '.join(made_up)} isn't in anything they said or any tool result. Never "
+                "add details nobody gave you (codes, numbers, error messages); write only what they told you, or ask "
+                "them for it.")
+    return _w().append(args.get("name", ""), args.get("content", ""), args.get("folder", "desktop"))
+
+
+def _file_state(args, before=None):
+    """The file as it is now (for undo: its size and a fingerprint of its content)."""
+    import hashlib
+
+    p = _w()._find_existing(args.get("name", ""), args.get("folder", "desktop"))
+    if p is None:
+        return {"exists": False, "path": str(_w().folder(args.get("folder", "desktop")) / _w()._safe_name(args.get("name", ""),
+                                                                                                         ".txt"))}
+    data = p.read_bytes()
+    return {"exists": True, "path": str(p), "size": len(data), "sha": hashlib.sha256(data).hexdigest()}
+
+
+def _undo_append(args, before, after):
+    """Take back exactly what was added: the file goes back to its size before (only if nothing else changed it since);
+    a file this created goes to the Recycle Bin."""
+    import hashlib
+    from pathlib import Path
+
+    p = Path(after["path"])
+    if not before.get("exists"):
+        return _w().recycle(str(p))
+    if not p.is_file():
+        return "FAILED: the file isn't there any more."
+    data = p.read_bytes()
+    if len(data) < before["size"] or hashlib.sha256(data[: before["size"]]).hexdigest() != before["sha"]:
+        return "FAILED: the file changed in the meantime, so I didn't touch it."
+    p.write_bytes(data[: before["size"]])
+    return f"OK: took the added lines back out of {p.name} (checked)." if p.stat().st_size == before["size"] else \
+        "UNKNOWN: couldn't confirm the file is back as it was."
+
+
+tool("append_to_file", "Add text to the END of a text file on their PC (Desktop by default, or Documents / Downloads), "
+     "keeping everything already in it: logging issues, adding entries to a notes or tracking file ('add that to "
+     "LED_strip_issue.txt'). Creates the file if it isn't there. One call per file; put every entry they asked for in "
+     "`content` (one per line). This is the only way to add to a FILE: a to-do item (add_to_list), a note (take_note) "
+     "or a memory (remember) does NOT write any file.",
+     params({"name": {"type": "string", "description": "The file's name as they said it, e.g. 'LED_strip_issue.txt'"},
+             "content": {"type": "string", "description": "Exactly the text to add (each entry on its own line)"},
+             "folder": {"type": "string", "description": "desktop (default), documents, downloads"}}, ["name", "content"]),
+     _append, group="files", claim="file_write", intent=APPEND_INTENT, observe=_file_state, undo=_undo_append,
+     describe=lambda a: f"add that to {a.get('name') or 'the file'} on your {(a.get('folder') or 'desktop').title()}",
+     undo_if=lambda b, a: a.get("exists") and (not b.get("exists") or a.get("size") != b.get("size")))
 
 
 def _report(args):

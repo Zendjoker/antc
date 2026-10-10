@@ -182,6 +182,9 @@ def _register_core_context():
     from room_agent.actions import journal
 
     journal.register()
+    from room_agent.actions import records
+
+    records.register()  # (what was really written where; earlier points the window no longer shows)
     core.register_context(_environment, order=60)
 
 

@@ -77,6 +77,7 @@ conversation_turn = None     # the turn that last used the conversation model (l
 recent = []                 # dialogue saved across restarts: [{"role", "text", "time"}] (conversation/history.py)
 last_reply = ""             # what the agent last said, to know whether it's waiting for an answer
 pending = None              # an unfinished request, or one waiting for a yes (tools/validate.py, actions/executor.py)
+unheard_question = None     # {"tool", "at", "question"}: a yes/no question that expired without ever reaching them
 ringing = None              # the timer or alarm ringing right now (tools/timers.py)
 last_ring = None            # the one that last went off: label, message, kind, time, stopped (tools/timers.py)
 last_active_app = None      # the app this conversation is about ("close it"): name, action, time (tools/apps.py)

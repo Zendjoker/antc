@@ -21,10 +21,46 @@ FOLDERS = {"desktop": "Desktop", "documents": "Documents", "docs": "Documents", 
 WRITE_EXT = {".md", ".txt", ".csv", ".json", ".html"}
 
 
+# Windows known-folder ids: the Desktop / Documents the user actually sees (OneDrive can move them: "C:\\Users\\x\\
+# OneDrive\\Desktop"); a file saved to the plain profile folder would then be invisible to them
+_KNOWN = {"Desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}", "Documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+          "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}", "Pictures": "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
+          "Music": "{4BD8D571-6D19-48D3-BE97-422220080E43}", "Videos": "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}"}
+_known_cache = {}
+
+
+def known_folder(name):
+    """Where Windows really keeps this folder for them (OneDrive-aware), or the profile folder of that name."""
+    if name in _known_cache:
+        return _known_cache[name]
+    path = None
+    if os.name == "nt" and name in _KNOWN:
+        try:
+            import uuid
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                            ("Data4", ctypes.c_ubyte * 8)]
+
+            u = uuid.UUID(_KNOWN[name])
+            g = GUID(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+            out = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
+                path = Path(out.value)
+                ctypes.windll.ole32.CoTaskMemFree(out)
+        except Exception:  # noqa: BLE001 (the plain profile folder below)
+            path = None
+    if path is None or not path.is_dir():
+        path = files.HOME / name
+    _known_cache[name] = path
+    return path
+
+
 def folder(name="desktop"):
     n = str(name or "desktop").lower().strip()
     if n in FOLDERS:
-        return files.HOME / FOLDERS[n]
+        return known_folder(FOLDERS[n])
     p = Path(name)
     if not p.is_absolute():
         p = files.HOME / name
@@ -53,8 +89,9 @@ def write(name, content, where="desktop", overwrite=False):
     if not ok:
         return f"FAILED: not saved: {why}."
     if path.exists() and not overwrite:
-        return (f"NEEDS: {path.name} already exists in {target_dir.name}. Ask whether to replace it (then call again with "
-                "overwrite=true) or use another name.")
+        return (f"NEEDS: {path.name} already exists in {target_dir.name}. Nothing was saved. To ADD to it, call "
+                "append_to_file (it keeps what's there); only if they want it REPLACED, ask, then call again with "
+                "overwrite=true.")
     text = str(content or "")
     if not text.strip():
         return "NEEDS: what to write in it."
@@ -62,6 +99,67 @@ def write(name, content, where="desktop", overwrite=False):
     if not path.is_file() or path.read_text(encoding="utf-8") != text:
         return f"UNKNOWN: not confirmed: {path.name} doesn't read back as written."
     return f"OK: saved {path.name} in your {target_dir.name} folder ({len(text)} characters, checked on disk)."
+
+
+def _find_existing(name, where):
+    """An existing file they named, in that folder: the exact name, or the same name with a text extension they left
+    out ("LED strip issue" -> "LED_strip_issue.txt"). -> Path or None."""
+    target_dir = folder(where)
+    raw = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name or "").strip()).strip(" .")
+    if not raw or not target_dir.is_dir():
+        return None
+    exact = target_dir / raw
+    if exact.is_file():
+        return exact
+    key = re.sub(r"[\s_-]+", "", Path(raw).stem.lower())
+    for p in sorted(target_dir.iterdir()):
+        if p.is_file() and p.suffix.lower() in WRITE_EXT and re.sub(r"[\s_-]+", "", p.stem.lower()) == key:
+            return p
+    return None
+
+
+def append(name, content, where="desktop", create=True):
+    """Add text to the END of a text file (a log, an issues list), keeping everything already in it. -> tool result.
+    Checked on disk: what was there before is unchanged and the file now ends with exactly the new text."""
+    target_dir = folder(where)
+    ok, why = files.allowed(target_dir / "x.txt")
+    if not ok:
+        return f"FAILED: nothing was added: {why}."
+    if not target_dir.is_dir():
+        return f"FAILED: there's no folder {target_dir.name} in your files. Nothing was added."
+    path = _find_existing(name, where) or target_dir / _safe_name(name, ".txt")
+    ok, why = files.allowed(path)
+    if not ok:
+        return f"FAILED: nothing was added: {why}."
+    if path.suffix.lower() not in WRITE_EXT:
+        return f"FAILED: {path.name} isn't a text file I can add to. Nothing was added."
+    text = str(content or "").strip("\n")
+    if not text.strip():
+        return "NEEDS: what to add to it."
+    existed = path.is_file()
+    if not existed and not create:
+        return f"FAILED: there's no {path.name} in your {target_dir.name} folder. Nothing was added."
+    try:
+        before = path.read_text(encoding="utf-8") if existed else ""
+    except (OSError, UnicodeDecodeError) as e:
+        return f"FAILED: couldn't read {path.name} ({e.__class__.__name__}), so nothing was added."
+    sep = "" if not before or before.endswith("\n") else "\n"
+    added = sep + text + "\n"
+    try:
+        with open(path, "a", encoding="utf-8", newline="") as f:
+            f.write(added)
+    except OSError as e:
+        return f"FAILED: couldn't write to {path.name} ({e.strerror or e.__class__.__name__}). Nothing was added."
+    try:
+        after = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        after = None
+    if after != before + added:
+        return (f"UNKNOWN: not confirmed: {path.name} in {target_dir.name} doesn't read back as expected after adding to "
+                "it. Don't say it was added; tell them it couldn't be checked.")
+    lines = len(text.splitlines())
+    return (f"OK: added {lines} line{'s' if lines != 1 else ''} to the end of {path.name} in your {target_dir.name} folder "
+            f"({'it was created' if not existed else 'what was already there is unchanged'}; checked on disk).")
 
 
 def make_folder(name, where="documents"):

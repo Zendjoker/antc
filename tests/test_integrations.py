@@ -219,12 +219,14 @@ res, *_ = say("No, wait.", [("gmail_send", {"draft_id": "current"})], "Okay, not
 check("'no, wait' is not a yes", res[0].startswith("NEEDS_CONFIRMATION") and box.drafts, res[0])
 res, *_ = say("Yes.", [("gmail_send", {"draft_id": "current"})], "Sent.")
 sent = [m for m in box.messages.values() if m["labelIds"] == ["SENT"] and m["id"].startswith("dm")]
-check("'yes' -> sent, verified in Gmail's Sent", res[0].startswith("OK: sent to") and len(sent) == 1 and not box.drafts, res[0])
+check("'yes' -> sent, verified in Gmail's Sent (their yes runs exactly the send they were asked about, in code)",
+      (not res or res[0].startswith("OK: sent to")) and len(sent) == 1 and not box.drafts, res)
 say("Draft a reply to it saying the file is attached.", [("gmail_create_draft", {"reply_to": "last", "body": "File attached."})])
 FG.fail.append((r"/drafts/send", 500))
 say("Send it.", [("gmail_send", {"draft_id": "current"})], "Send it?")
 res, *_ = say("Yes, send it.", [("gmail_send", {"draft_id": "current"})], "Sent it!")
-check("failed send -> human failure, draft kept, 'Sent it!' not spoken", res[0] == "FAILED: I couldn't reach Google just now. Try again in a bit."
+check("failed send -> human failure, draft kept, 'Sent it!' not spoken", (res[0] if res else SPOKEN[0] if SPOKEN else "")
+      in ("FAILED: I couldn't reach Google just now. Try again in a bit.", "That didn't work: I couldn't reach Google just now.")
       and box.drafts and not any("Sent it" in s for s in SPOKEN), (res, SPOKEN))
 box.drafts.clear()
 env.items.pop("draft", None)
@@ -274,8 +276,8 @@ res, *_ = say("Delete the dentist appointment.", [("calendar_find_events", {"que
 check("delete -> asks first, nothing deleted", res[1].startswith("NEEDS_CONFIRMATION") and "event on" in res[1]
       and FG.calendars["adam@gmail.test"]["events"]["ev2"]["status"] == "confirmed", res)
 res, *_ = say("Yes, delete it.", [("calendar_delete_event", {"event_id": "last"})], "Deleted.")
-check("'yes' -> deleted, verified gone", res[0].startswith("OK: deleted") and
-      FG.calendars["adam@gmail.test"]["events"]["ev2"]["status"] == "cancelled", res[0])
+check("'yes' -> deleted, verified gone", (not res or res[0].startswith("OK: deleted")) and
+      FG.calendars["adam@gmail.test"]["events"]["ev2"]["status"] == "cancelled", res)
 
 # ---------------------------------------------------------------- 4. cross-service
 print("Cross-service:")

@@ -1,13 +1,14 @@
 """One user turn: ask the model, speak the reply, then keep or roll back the history."""
 
 import logging
+import re
 import time
 
 from room_agent import runtime as rt
 from room_agent import livelog, trace
 from room_agent import cognition
 from room_agent import social
-from room_agent.actions import pending
+from room_agent.actions import pending, records
 from room_agent.audio.speaker import finish_speaking, say
 from room_agent.cognition import reflex
 from room_agent.speech import timing
@@ -66,6 +67,111 @@ def _answered_in_code(history, mark, text, raw, reply, private, what="PENDING_AC
     return None
 
 
+def _you(text):
+    """A tool's result is written about them ("calling their phone"); said to them it's "your"."""
+    t = re.sub(r"\btheir\b", "your", str(text), flags=re.I)
+    t = re.sub(r"\bthey'?re\b", "you're", t, flags=re.I)
+    t = re.sub(r"\bthem\b", "you", t, flags=re.I)
+    return re.sub(r"\bthey\b", "you", t, flags=re.I)
+
+
+def outcome_line(cap, result):
+    """What to say about an action that ran, built from its result only (never more than it says). None: it still needs
+    something (the model asks)."""
+    msg = str(result.message or "")
+    kind, _, body = msg.partition(":")
+    body = re.sub(r"\s*\([^)]*\)", "", body).strip()
+    body = re.split(r"(?<=[.!?])\s+", body)[0].strip() if body else ""
+    body = _you(body).rstrip(".") + "." if body else ""
+    if kind.startswith("NEEDS"):
+        return None
+    if result.success:
+        if cap is not None and cap.reflex_say:
+            try:
+                line = cap.reflex_say(result)
+                if line:
+                    return line
+            except Exception:  # noqa: BLE001
+                pass
+        if not result.verified:
+            return f"I did it, but I couldn't check that it worked: {body}" if body else "I did it, but I couldn't check it."
+        return f"Done: {body}" if body else "Done."
+    if kind.startswith("UNKNOWN"):
+        return f"I'm not sure that worked: {body}" if body else "I'm not sure that worked."
+    return f"That didn't work: {body}" if body else "That didn't work."
+
+
+def _run_confirmed(history, mark, text, raw, p, private):
+    """Their clear yes to the pending action: run exactly the action they said yes to (the executor checks it all
+    again: their yes, the same arguments, the risk), and say what really happened, from its result."""
+    from room_agent.actions import core
+    from room_agent.actions.executor import Plan
+
+    plan = Plan()
+    rt.current_plan = plan
+    rt.turn.via = "confirmed yes"
+    result = plan.run(p.capability, dict(p.collected))
+    line = outcome_line(core.get(p.capability), result)
+    log.info("their yes ran %s: %s", p.capability, result.message[:120])
+    if line is None:  # (it still needs a detail: the model asks for it, knowing what happened)
+        history[mark]["content"] += (f" (System note from code: they said yes, so {p.capability} was run; it returned: "
+                                     f"{result.message[:300]} Ask for what's missing, in one short question.)")
+        return False
+    _answered_in_code(history, mark, text, raw, line, private, what=f"CONFIRMED {p.capability}")
+    return True
+
+
+def _question_for(p):
+    """The yes/no question for a pending action, from the action itself (when the reply didn't ask it)."""
+    from room_agent.actions import core
+
+    cap = core.get(p.capability)
+    what = ""
+    try:
+        what = cap.describe(p.collected) if cap is not None and cap.describe else ""
+    except Exception:  # noqa: BLE001
+        what = ""
+    if not what and cap is not None:
+        what = re.split(r"[.(:]", cap.description)[0].strip()
+        what = what[:1].lower() + what[1:]
+    return f"Should I {_you(what or p.capability.replace('_', ' '))}?"
+
+
+def _deliver_confirmation(history):
+    """A yes/no question about an action that came up this turn must REACH them: if the reply didn't ask it, ask it now
+    (built from the action itself); then record whether it was heard (played to the end without being cut off, sent
+    down the phone line, or shown in text mode). A question they never heard is never "you didn't confirm" later."""
+    p = pending.current()
+    if p is None or not p.confirm or p.touched_turn != rt.turn_no or rt.turn_interrupted:
+        return
+    from room_agent.actions.executor import NO_WORDS
+
+    said = list(getattr(rt.turn, "said", []) or [])
+    questions = [x for x in said if str(x).rstrip().endswith("?")]
+    kind = getattr(getattr(rt.turn, "policy", None), "kind", "")
+    asked_for = kind != policy.QUESTION and not NO_WORDS.search(rt.turn_text or "")  # (a request, not "what's the weather?")
+    if not questions and asked_for:
+        q = _question_for(p)
+        log.info("the reply didn't ask the yes/no question for %s: asking it in code", p.capability)
+        say(q)
+        finish_speaking()
+        print("Agent:", q, flush=True)
+        last = history[-1] if history else None
+        if last and last["role"] == "assistant" and isinstance(last["content"], str):
+            last["content"] = (last["content"] + " " + q).strip()
+        elif last and last["role"] == "assistant" and isinstance(last["content"], list):
+            last["content"].append({"type": "text", "text": q})
+        else:
+            history.append({"role": "assistant", "content": q})
+        questions = [x for x in getattr(rt.turn, "said", []) if str(x).rstrip().endswith("?")]
+    p.question = str(questions[-1]) if questions else ""
+    if not questions:
+        return
+    p.heard = any(getattr(x, "played", None) is not False for x in questions)  # (no speaker thread at all: shown)
+    if not p.heard:
+        log.warning("the yes/no question for %s didn't reach them (speech failed or was cut off)", p.capability)
+
+
 def take_turn(history, text, raw=None, final=False, output=None):
     """(One turn at a time, from the room or a phone call: see _take_turn.)"""
     with rt.brain:
@@ -104,6 +210,10 @@ def _take_turn(history, text, raw=None, final=False, output=None):
     decision = pending.on_utterance(raw or text)  # (a request being filled in: answers, corrections, "never mind")
     if decision and decision.reply:
         return _answered_in_code(history, mark, text, raw, decision.reply, private)
+    if decision and decision.run is not None:  # (their yes to the question just asked: that exact action, now)
+        if _run_confirmed(history, mark, text, raw, decision.run, private):
+            return None
+        decision = None
     if not decision and info["reflex"]:  # a fully specified simple command: run it, no model call
         line, result = reflex.run(*info["reflex"])
         if line:
@@ -115,10 +225,12 @@ def _take_turn(history, text, raw=None, final=False, output=None):
         history[mark]["content"] += decision.note  # (for this reply only: replaced by the plain text after the turn)
     elif not decision:
         history[mark]["content"] += pending.call_hint(raw or text)  # (a request that collects its own details: call it)
+    history[mark]["content"] += records.dispute_note(raw or text)  # ("I don't see it": checked in code, now)
     t0 = time.time()
     try:
         ask(history)
         finish_speaking()
+        _deliver_confirmation(history)  # (a yes/no question that came up must reach them, heard)
     except Exception:
         del history[mark:]
         cognition.end_turn(None, rt.current_plan)

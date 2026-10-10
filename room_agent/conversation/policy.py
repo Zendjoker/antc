@@ -229,8 +229,10 @@ def context_lines(user_text):
     lines = [p.render()]
     ack = minimal_replies()
     if ack:
-        lines.append(f"- reply_style: they asked you to keep it minimal: after an action say only \"{ack}.\"; never repeat "
-                     "their command back; no offers or follow-up questions. Questions still get their answer, briefly.")
+        lines.append(f"- reply_style: they asked you to keep it minimal: after an action that WORKED (a verified OK) say only "
+                     f"\"{ack}.\"; never repeat their command back; no offers or follow-up questions. A failure, something "
+                     "not done, or a problem they report (\"I don't see it\", \"it didn't work\") always gets a real answer: "
+                     "what happened and what you're doing about it. Questions still get their answer, briefly.")
     worn = _openers()
     if worn:
         lines.append("- vary your wording: recent replies kept starting with " + ", ".join(repr(w) for w in worn[:3])

@@ -60,10 +60,11 @@ HOLD = re.compile(r"\b(?:wait|hold on|hang on|one sec(?:ond)?|a sec(?:ond)?|let 
 
 class Decision:
     """What code decided about an utterance: `reply` = say this, no model call; `note` = let the model answer, with
-    this system note added to the user's message."""
+    this system note added to the user's message; `run` = their clear yes to THIS pending action: run exactly it, now,
+    in code (conversation/turn.py), instead of asking the model to call it again (and maybe asking again)."""
 
-    def __init__(self, reply=None, note=None):
-        self.reply, self.note = reply, note
+    def __init__(self, reply=None, note=None, run=None):
+        self.reply, self.note, self.run = reply, note, run
 
 
 class PendingAction:
@@ -81,6 +82,9 @@ class PendingAction:
         self.created_at = now
         self.touched_turn, self.touched_at = rt.turn_no, now
         self.confirm = confirm      # True: waiting for a yes/no about running it (the executor's rules)
+        self.question = ""          # the yes/no question as it was put to them (conversation/turn.py)
+        self.heard = None           # True: the question reached them (spoken and played, or shown); False: it didn't
+                                    # (speech failed or was cut off); None: not known yet
         self.status = "confirming" if confirm else "collecting"  # collecting | confirming | done | cancelled
         self.asking = self.missing[0] if self.missing else None  # the parameter Jarvis is asking for now
         self.candidate = None       # {"param", "email", "confidence"}: an address read back, waiting for "yes"
@@ -187,6 +191,8 @@ def current():
     if p is not None and isinstance(p, PendingAction) and (p.status in ("done", "cancelled") or p.expired()):
         if p.status not in ("done", "cancelled"):
             log.info("pending action expired: %s", p.capability)
+            if p.confirm and p.heard is False:  # (they never heard the question: never "you didn't confirm")
+                rt.unheard_question = {"tool": p.capability, "at": time.time(), "question": p.question}
         rt.pending = p = None
     return p
 
@@ -367,6 +373,12 @@ def on_utterance(text):
         except Exception:  # noqa: BLE001
             what = ""
         if said_yes(t, cap, what):
+            # their yes to the question Jarvis just put to them: run exactly that action now, in code (never a second
+            # "are you sure?"). Only right after it was asked: a yes two turns later may be about something else.
+            last = rt.last_reply or ""
+            asked_last = (p.question and p.question in last) or (not p.question and last.rstrip().endswith("?"))
+            if p.touched_turn == rt.turn_no - 1 and asked_last:
+                return Decision(run=p)
             return None
         if CANCEL.match(t) or (len(t.split()) <= 6 and "?" not in t and NO_ANSWER.match(t) and not HOLD.search(t)):
             cancel(f"they said {t!r}")
@@ -536,8 +548,17 @@ def _short(v, n=120):
 def context_line():
     p = current()
     if not p:
+        u = getattr(rt, "unheard_question", None)
+        if u and time.time() - u["at"] < 600:
+            return (f"- unheard_question: earlier you meant to ask them before {u['tool']}, but they never heard the "
+                    "question (the speech failed or was cut off). If it comes up, say so plainly; never say they didn't "
+                    "answer or didn't confirm.")
         return None
     if p.confirm:
+        if p.heard is False:
+            return (f"- pending_request: {p.capability} with {p.collected or 'nothing yet'}: you meant to ask them first, but "
+                    "the question did NOT reach them (the speech failed or was cut off). Ask it again now, in one short "
+                    "question; never say they didn't answer or didn't confirm.")
         return (f"- pending_request: {p.capability} with {p.collected or 'nothing yet'}, waiting for a yes/no confirmation. "
                 "If their next message answers it, act on it; if it's about something else, forget this.")
     have = "; ".join(f"{k}={_short(v)}" for k, v in p.collected.items()) or "nothing yet"
