@@ -415,6 +415,21 @@ def test_tray_icon_registers_and_removes():
     tray.stop()
 
 
+def test_sign_in_url_follows_the_selected_front_end(tmp_path):
+    import launcher.supervisor as module
+    original = module.control_token
+    module.control_token = lambda: "s3 cret"
+    try:
+        classic = _supervisor(tmp_path, FakePlatform(), mode="classic")
+        assert classic.sign_in_url() == "http://127.0.0.1:8765/?key=s3%20cret"
+        nxt = _supervisor(tmp_path, FakePlatform(), mode="next")
+        nxt.status["frontend"] = {"state": RUNNING}
+        assert nxt.sign_in_url() == "http://127.0.0.1:3000/signin?key=s3%20cret"
+        module.control_token = lambda: ""
+        assert "key=" not in nxt.sign_in_url()
+    finally:
+        module.control_token = original
+
 def _listener_pids():
     return {port: item.pid for port, item in WindowsPlatform().listeners().items() if port in (8765, 8770, 8771, 3000)}
 

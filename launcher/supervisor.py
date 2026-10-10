@@ -106,6 +106,11 @@ class Supervisor:
             import urllib.parse
 
             return url + "?key=" + urllib.parse.quote(secret)
+        if secret and url == self.urls()["next"]:
+            import urllib.parse
+
+            # the Next.js dev entry point signs in through the same backend link, then lands on the overview
+            return f"http://127.0.0.1:{self._next_port()}/signin?key=" + urllib.parse.quote(secret)
         return url
 
     def active_url(self) -> str:

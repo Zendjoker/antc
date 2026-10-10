@@ -26,8 +26,24 @@ function deny(res, why) {
   res.end(JSON.stringify({ error: `refused: ${why}` }));
 }
 
+// /signin?key=... : the backend's own sign-in link, relayed so the session cookie is set for 127.0.0.1 (cookies ignore
+// ports, so it covers this origin and the backend alike). Only a GET, only the key, nothing is stored or logged.
+function signIn(req, res) {
+  const key = new URL(req.url, "http://127.0.0.1").searchParams.get("key") ?? "";
+  const up = http.request({ hostname: BACKEND.hostname, port: BACKEND.port, path: `/?key=${encodeURIComponent(key)}`, method: "GET", headers: { host: `${BACKEND.hostname}:${BACKEND.port}` } }, (r) => {
+    r.resume();
+    const cookies = r.headers["set-cookie"] ?? [];
+    if (!cookies.length) return deny(res, "sign-in refused");
+    res.writeHead(302, { Location: "/overview/", "Set-Cookie": cookies, "Cache-Control": "no-store" });
+    res.end();
+  });
+  up.on("error", () => { res.writeHead(502); res.end(); });
+  up.end();
+}
+
 const server = http.createServer((req, res) => {
   if (!localHost(req.headers.host)) return deny(res, "not a local request");
+  if (req.method === "GET" && req.url.startsWith("/signin?")) return signIn(req, res);
   const isApi = req.url.startsWith("/api/");
   if (isApi) {
     const origin = req.headers.origin;
