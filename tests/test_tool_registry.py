@@ -32,7 +32,8 @@ for c in caps:
         continue
     for pattern, _ in c.reflex or []:
         sample = re.sub(r"\(\?P<\w+>[^)]*\)", "x", pattern)  # (a rough check: the fixed words of the pattern)
-        words = re.findall(r"[a-z]{3,}", sample.replace("\\s", " "))
+        sample = re.sub(r"\(\?:[^()]*\)\?", "", sample)  # (an optional part like call(?:ing)? isn't a word of its own)
+        words = re.findall(r"[a-z]{2,}", sample.replace("\\s", " "))
         if words and not c.intent.search(" ".join(words)):
             gated_reflex.append((c.name, pattern[:60]))
 t.check("an intent-gated tool's instant commands contain words its gate accepts", not gated_reflex, gated_reflex)
