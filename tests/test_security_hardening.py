@@ -841,4 +841,33 @@ except Exception as e:  # noqa: BLE001
     outcome = e.__class__.__name__
 t.check("only forged callbacks -> nothing connected (times out as canceled)", outcome == "canceled", outcome)
 
+# the supervisor's health probe is a client of the control link too: without the token it gets 403, reads "not running"
+# and restarts a healthy Jarvis every few minutes
+from room_agent import service  # noqa: E402
+
+PROBED = []
+
+
+class _Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _probe(req, timeout=None):
+    PROBED.append(dict(req.header_items()))
+    return _Resp(b'{"health": {"ok": true}}')
+
+
+_real_urlopen = service.urllib.request.urlopen
+service.urllib.request.urlopen = _probe
+try:
+    h = service.health(port=1)
+finally:
+    service.urllib.request.urlopen = _real_urlopen
+t.check("the supervisor's health probe sends the control token (no restart loop)",
+        h == {"ok": True} and PROBED and PROBED[-1].get(localauth.HEADER.capitalize()) == TOKEN, PROBED)
+
 t.done("SECURITY HARDENING TESTS")
