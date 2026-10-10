@@ -191,6 +191,21 @@ check("a level said out loud (settings.json) wins over .env", director.settings(
 voices.save_setting("speech_expressiveness", "loud")
 check("...and a damaged value falls back to natural", director.settings()[0] == "natural")
 voices.save_setting("speech_expressiveness", None)
+# A confirmation or a warning stays calm at every level, even when the model opened the reply with [laughs]
+_style = voices.current.style
+voices.current.style = "normal"
+for _lv in ("steady", "natural"):
+    voices.save_setting("speech_expressiveness", _lv)
+    for _s in ("Want me to send it to Sam now?", "Don't share that code with anyone, it's how they get into your account."):
+        rt.new_turn("ok")
+        rt.turn_style = "laughs"
+        _p = speech.perform(_s)
+        check(f"{_lv}: {_s[:28]!r}... stays calm (no reaction, no playful or excited delivery)",
+              not _p.reaction and not {"excited", "playful", "teasing", "amused", "lightly amused"} & set(_p.direction),
+              (_lv, _p.reaction, _p.direction))
+voices.save_setting("speech_expressiveness", None)
+voices.current.style = _style
+rt.turn_style = None
 check("v4: only stability and similarity go out (no speed, no style); Flash keeps speed",
       el.request_body("x", director.SpeechPerformance("x", pace=1.05), "eleven_v4_turbo", base_rate=1.12,
                       profile={"stability": 0.4, "style": 0.2, "speed": 1.0}).get("voice_settings") == {"stability": 0.4}

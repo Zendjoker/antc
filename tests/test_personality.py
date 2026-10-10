@@ -303,7 +303,7 @@ fresh()
 convo.say("go back to your old personality",  # (a reflex where it can be; otherwise the model's call: same result)
           scripts=[{"tools": [("set_personality", {"preset": "friend"})]}, {"text": "Okay."}])
 t.check("'go back to your old personality' -> the original friend persona, exactly", P.profile().preset == "friend"
-        and persona() == want.replace("{user}", config.USER_NAME).strip())
+        and persona() == want.replace("{user}", config.USER_NAME).replace("{name}", rt.assistant_name).strip())
 results, system, _ = convo.say("yo what's up", reply="Not much, bro. Chilling.")
 t.check("...no personality line, and the original habits only (nothing extra taken out)",
         flavor_line(system) == "" and " ".join(convo.said()) == "Not much, bro. Chilling.", convo.said())

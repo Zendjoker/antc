@@ -289,6 +289,12 @@ def speak(sentences, plan=(), user="What's up?"):
 social.reset()
 speak(["Wait, you actually fixed it?"], user="I finally fixed it!!")
 sent = SENT[0]["body"]["text"] if SENT else ""
+# (the Oct 9 behaviour is the "steady" level; the configured default may be more expressive)
+from room_agent import config as _config  # noqa: E402
+
+_level, _config.SPEECH_EXPRESSIVENESS = _config.SPEECH_EXPRESSIVENESS, "steady"
+speak(["Wait, you actually fixed it?"], user="I finally fixed it!!")
+sent = SENT[0]["body"]["text"] if SENT else ""
 # (Oct 9 live test: their mood used to change the voice. One steady voice now: their excitement shapes no tag, emphasis
 # or pace; only a style they chose does)
 check("ElevenLabs gets the performance script, the speaker gets audio; their mood adds no tag or emphasis",
@@ -300,6 +306,7 @@ voices.current.style = _style
 sent = SENT[0]["body"]["text"] if SENT else ""
 check("...the style they chose is what the voice performs", sent.startswith("[") and "serious" in sent.split("]")[0]
       and "fixed it?" in sent, sent)
+_config.SPEECH_EXPRESSIVENESS = _level
 speak(["Wait, you actually fixed it?"], user="I finally fixed it!!")
 check("...while what was said stays semantic (no tags in what's remembered or shown)",
       list(rt.turn_speech)[-1] == "Wait, you actually fixed it?" and "[" not in " ".join(rt.recent_speech))

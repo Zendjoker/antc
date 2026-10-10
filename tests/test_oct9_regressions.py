@@ -403,6 +403,9 @@ check("a mood they keep expressing still counts", social.state.snapshot()["value
 social.reset()
 
 print("One steady voice; their style wins over any mood:")
+from room_agent import config as _config  # noqa: E402
+_level = _config.SPEECH_EXPRESSIVENESS
+_config.SPEECH_EXPRESSIVENESS = "steady"  # (the Oct 9 behaviour is the "steady" level; the default may differ)
 _tts, _speak_q = rt.tts_enabled, rt.speak_q  # (restored below: nothing plays this queue in a test)
 rt.tts_enabled = True
 _supported = styles.supported
@@ -446,6 +449,7 @@ item = rt.speak_q.get_nowait()
 check("speaker: no mood delivery and no self-picked tag reach the voice; only their style",
       item.delivery is None and item.style == "serious+warm" and item.performance.direction == ["serious", "calm tone", "warmly"],
       (item.delivery, item.style, item.performance.direction))
+_config.SPEECH_EXPRESSIVENESS = _level
 
 print("They don't like how it sounds: back to the verified previous voice, no questions:")
 rt.new_turn("Can you change, please, to normal? Because it sounds so weird.")
