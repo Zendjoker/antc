@@ -61,6 +61,10 @@ HELD = [  # (sentence, tool results this turn, the claim kind that must be caugh
     ("Turned it up.", [("volume_up", "OK: the volume is already at 100%, the maximum.")], "media"),
     ("I don't have anything saved about you yet.", [], "memory_empty"),
     ("I don't know where you live.", [], "no_location"),
+    # 2026-10-09 live bug: home_sensors(device="bed") FAILED (no alias resolved yet), and the model still claimed a
+    # fresh recheck. Without a successful home_sensors call this turn, that claim must be held back.
+    ("I checked again, and nobody's on the bed.", [("home_sensors", "FAILED: no device matches 'bed'.")], "sensor_check"),
+    ("Let me look again... still nothing new.", [], "sensor_check"),
 ]
 SPOKEN = [  # (sentence, tool results this turn): must NOT be held back
     ("The store opened in 1990.", []),
@@ -82,6 +86,8 @@ SPOKEN = [  # (sentence, tool results this turn): must NOT be held back
     ("Timer's set for ten minutes.", [("set_timer", "OK: timer 'timer' is running, 600 seconds.")]),
     ("Done!", [("set_volume", "OK: the volume is now 30%.")]),
     ("Muted.", [("mute", "OK: the sound is muted.")]),
+    ("I checked again: nobody's on the bed right now.",
+     [("home_sensors", "OK: Vibration sensor: last movement 40 min ago.")]),
     ("Sent it!", [("gmail_send", "OK: sent to andrew@client.test.")]),
     ("Saved it.", [("remember", "OK: saved.")]),
     ("Spotify's in front now.", [("open_app", "OK: Spotify was already open; it's now in front.")]),

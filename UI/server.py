@@ -48,6 +48,73 @@ SECTION_RE = re.compile(r"^#\s*-{2,}\s*(.+?)\s*-{2,}\s*$")
 VAR_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+# Shown under a setting when its .env line has no comment of its own.
+HELP = {
+    "MIC_DEVICE": "The microphone Jarvis listens with. \"System default\" follows whatever Windows uses. "
+                  "Switches right away while Jarvis is running.",
+    "SPEAKER_DEVICE": "Where Jarvis talks. \"System default\" follows whatever Windows uses. "
+                      "Switches right away while Jarvis is running.",
+    "WAKE_WORD": "The phrase that wakes Jarvis up. Only ready-made wake words are possible (a new phrase needs a "
+                 "trained model). Takes effect after a restart.",
+    "WAKE_THRESHOLD": "How sure Jarvis must be that it heard the wake word, from 0 to 1. Lower (0.3-0.4) wakes more "
+                      "easily but may trigger by accident; higher (0.6-0.7) means fewer false wake-ups but you may "
+                      "have to repeat yourself. 0.5 is a good start.",
+}
+DEVICE_KEYS = {"MIC_DEVICE": "input", "SPEAKER_DEVICE": "output"}
+NOT_WAKE_WORDS = {"timer", "weather"}  # (openWakeWord ships these too, but they detect commands, not a name)
+
+
+def wake_word_name(value):
+    """"Hey Jarvis" / "hey-jarvis" -> hey_jarvis (the model name); a custom model file is kept as it is."""
+    value = str(value or "").strip()
+    return value if value.lower().endswith((".onnx", ".tflite")) else re.sub(r"[\s-]+", "_", value.lower())
+
+
+def wake_word_options():
+    try:
+        import openwakeword
+
+        names = [m for m in sorted(openwakeword.MODELS) if m not in NOT_WAKE_WORDS]
+    except Exception:
+        names = []
+    opts = [{"value": n, "label": n.replace("_", " ").title()} for n in names]
+    opts += [{"value": p.name, "label": f"{p.stem.replace('_', ' ').title()} (custom model)"}
+             for p in sorted(ROOT.glob("*.onnx"))]
+    return opts
+
+
+def device_options(kind):
+    from room_agent.audio.devices import device_options as listed
+
+    try:
+        found = listed(kind, rescan=True)
+    except Exception as e:
+        print(f"couldn't list audio devices: {e}", file=sys.stderr)
+        found = []
+    return [{"value": "", "label": "System default (follows Windows)"}] + found
+
+
+def dynamic_field(key, value):
+    """Options read from this PC (devices, wake words), and the current value as one of them."""
+    if key in DEVICE_KEYS:
+        opts = device_options(DEVICE_KEYS[key])
+        values = [o["value"] for o in opts]
+        if value and value not in values and not value.isdigit():
+            # a name fragment ("Headphones (FISHER"): show the device it picks; else keep it, marked as missing
+            match = next((v for v in values if v and value.lower() in v.lower()), None)
+            if match:
+                value = match
+            else:
+                opts.append({"value": value, "label": f"{value} (not connected)"})
+        return value, opts
+    if key == "WAKE_WORD":
+        opts = wake_word_options()
+        name = wake_word_name(value)
+        if name and name not in [o["value"] for o in opts]:
+            opts.append({"value": name, "label": f"{name} (not installed)"})
+        return name, opts
+    return value, None
+
 
 def is_secret(key):
     return any(h in key for h in SECRET_HINTS)
@@ -92,14 +159,16 @@ def read_env():
         key, rest = vm.group(1), vm.group(2)
         value, comment = split_value_comment(rest)
         secret = is_secret(key)
+        value, live_options = (value, None) if secret else dynamic_field(key, value)
+        options = live_options if live_options is not None else OPTIONS.get(key)
         sections[-1]["fields"].append({
             "key": key,
             "value": mask(value) if secret else value,
             "secret": secret,
             "has_value": bool(value),
-            "comment": comment.lstrip("# ").strip(),
-            "type": field_type(key, value),
-            "options": OPTIONS.get(key),
+            "comment": comment.lstrip("# ").strip() or HELP.get(key, ""),
+            "type": "select" if live_options is not None else field_type(key, value),
+            "options": options,
         })
     return [s for s in sections if s["fields"]]
 
@@ -156,8 +225,25 @@ def api_post_env():
         changes[key] = str(value).replace("\n", " ").replace("\r", " ").strip()
     if not changes:
         return jsonify(error="no valid settings in request"), 400
+    if "WAKE_WORD" in changes:
+        changes["WAKE_WORD"] = wake_word_name(changes["WAKE_WORD"]) or "hey_jarvis"
     write_env(changes)
-    return jsonify(ok=True, changed=list(changes), restart_required=True)
+    devices = {name: changes[key] for key, name in (("MIC_DEVICE", "mic"), ("SPEAKER_DEVICE", "speaker")) if key in changes}
+    applied, live_error = [], ""
+    if devices:
+        import requests
+
+        try:
+            r = requests.post(f"{JARVIS}/action", json={"do": "audio_devices", **devices}, timeout=20,
+                              headers={"X-Jarvis": "1"}).json()
+            if r.get("ok"):
+                applied = [k for k in ("MIC_DEVICE", "SPEAKER_DEVICE") if k in changes]
+            else:
+                live_error = str(r.get("message") or "")
+        except Exception:
+            pass  # (Jarvis isn't running: the new devices are used when it starts)
+    return jsonify(ok=True, changed=list(changes), applied=applied, live_error=live_error,
+                   restart_required=any(k not in applied for k in changes))
 
 
 JARVIS = f"http://127.0.0.1:{config.CONTROL_PORT}"
@@ -255,6 +341,13 @@ def api_status():
         spend=spend,
         voice=saved,
     )
+
+
+@app.get("/api/voices")
+def api_voices():
+    from room_agent.audio import voices
+
+    return jsonify(voices.dashboard_view(enabled=False))
 
 
 # ---------------------------------------------------------------- Settings -> Connections

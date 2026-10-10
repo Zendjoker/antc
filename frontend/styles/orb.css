@@ -1,0 +1,80 @@
+/* The ZendAgent "liquid core": a glass sphere holding water. Ported from the Classic dashboard (UI/brand.css).
+   Water level and wave speed follow the real assistant state via data-state; no audio amplitude is implied. */
+.zend-orb {
+  --water: var(--zend-primary);
+  --water-deep: var(--zend-cobalt);
+  --water-light: rgba(0, 157, 255, 0.5);
+  --level: 47%;
+  --swell: 9s;
+  --swell-b: 12s;
+  position: relative;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  overflow: hidden;
+  isolation: isolate;
+  background: radial-gradient(circle at 50% 28%, #fff 0%, #f0f7ff 50%, #dcebff 100%);
+  box-shadow: inset 0 0 0 1px rgba(8, 102, 245, 0.16), inset 0 -12px 26px rgba(8, 102, 245, 0.12), 0 20px 44px rgba(8, 102, 245, 0.16);
+}
+.zend-orb::before,
+.zend-orb::after {
+  content: "";
+  position: absolute;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  transition: top 1.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.8s ease;
+}
+.zend-orb::before {
+  top: calc(var(--level) - 4%);
+  border-radius: 43%;
+  background: var(--water-light);
+  animation: zend-swell var(--swell-b) linear infinite;
+}
+.zend-orb::after {
+  top: var(--level);
+  border-radius: 40%;
+  background: linear-gradient(180deg, var(--water) 0%, var(--water-deep) 55%);
+  animation: zend-swell var(--swell) linear infinite reverse;
+}
+.zend-orb > span {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 22%, rgba(255, 255, 255, 0.9) 0 7%, rgba(255, 255, 255, 0) 24%),
+    radial-gradient(circle at 72% 82%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 38%);
+  box-shadow: inset 0 2px 8px rgba(255, 255, 255, 0.85), inset 0 -2px 10px rgba(6, 70, 218, 0.18);
+}
+.zend-orb.sm { width: 38px; height: 38px; box-shadow: inset 0 0 0 1px rgba(8, 102, 245, 0.16); }
+
+@keyframes zend-swell { to { transform: rotate(360deg); } }
+@keyframes zend-ripple { 0% { transform: scale(0.82); opacity: 0.75; } 100% { transform: scale(1.22); opacity: 0; } }
+@keyframes zend-tide { 0%, 100% { top: var(--level); } 50% { top: calc(var(--level) - 7%); } }
+@keyframes zend-tide-b { 0%, 100% { top: calc(var(--level) - 4%); } 50% { top: calc(var(--level) - 10%); } }
+
+.zend-orb[data-state="listening"] { --level: 38%; --swell: 4.2s; --swell-b: 5.6s; }
+.zend-orb[data-state="processing"] { --level: 44%; --swell: 2.2s; --swell-b: 2.8s; --water: #0a5be0; --water-deep: #06318f; --water-light: rgba(6, 70, 218, 0.45); }
+.zend-orb[data-state="speaking"], .zend-orb[data-state="idle_check"], .zend-orb[data-state="call"] { --level: 42%; --swell: 4.8s; --swell-b: 6.4s; }
+.zend-orb[data-state="speaking"]::after, .zend-orb[data-state="idle_check"]::after, .zend-orb[data-state="call"]::after {
+  animation: zend-swell var(--swell) linear infinite reverse, zend-tide 1.6s ease-in-out infinite;
+}
+.zend-orb[data-state="speaking"]::before, .zend-orb[data-state="idle_check"]::before, .zend-orb[data-state="call"]::before {
+  animation: zend-swell var(--swell-b) linear infinite, zend-tide-b 1.6s ease-in-out 0.2s infinite;
+}
+.zend-orb[data-state="quiet"] { --level: 56%; --swell: 16s; --swell-b: 20s; --water: rgba(8, 102, 245, 0.55); --water-deep: rgba(6, 70, 218, 0.6); --water-light: rgba(0, 157, 255, 0.22); }
+.zend-orb[data-state="error"] { --water: #f0436b; --water-deep: #c01048; --water-light: rgba(225, 29, 72, 0.3); }
+.zend-orb[data-state="offline"], .zend-orb[data-state="disconnected"], .zend-orb[data-state="connecting"] {
+  --level: 54%; --water: #b4c0d0; --water-deep: #93a1b5; --water-light: rgba(180, 192, 208, 0.45);
+}
+.zend-orb[data-state="offline"]::before, .zend-orb[data-state="offline"]::after,
+.zend-orb[data-state="disconnected"]::before, .zend-orb[data-state="disconnected"]::after { animation: none; }
+
+.zend-orbit { position: absolute; border-radius: 50%; border: 1.5px solid rgba(8, 102, 245, 0.16); opacity: 0.55; pointer-events: none; }
+.zend-orbit.two { border-color: rgba(0, 157, 255, 0.1); opacity: 0.45; }
+[data-live="true"] .zend-orbit { animation: zend-ripple 2.6s ease-out infinite; }
+[data-live="true"] .zend-orbit.two { animation-delay: 1.3s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .zend-orb::before, .zend-orb::after, .zend-orbit { animation: none !important; }
+}

@@ -350,7 +350,7 @@ def snapshot():
         "timing": dict(_last_timing),
         "spend": {"today": round(budget.total(), 4), "limit": config.DAILY_BUDGET_USD},
         "brain": config.OPENAI_MODEL if config.LLM_DEFAULT == "openai" else config.MODEL,
-        "voice": config.TTS_PROVIDER, "hearing": config.STT_PROVIDER, "wake_word": config.WAKE_WORD,
+        "voice": config.TTS_PROVIDER, "voice_settings": _voice_settings(), "hearing": config.STT_PROVIDER, "wake_word": config.WAKE_WORD,
         "user": config.USER_NAME,
         "connections": {"google": google, "phone": "on" if config.PHONE_MODE else "off"},
         "home": _home(),
@@ -410,10 +410,21 @@ _CAPS = {
 }
 
 
-def _execute(name, args, words):
+def _voice_settings():
+    from room_agent.audio import voices
+
+    return voices.dashboard_view(rt.tts_enabled)
+
+
+def _execute(name, args, words, voice_provider=None):
     from room_agent.actions import executor
 
     with rt.brain:  # one thing at a time, like a spoken turn
+        if voice_provider is not None:
+            from room_agent.audio import voices
+
+            if voices.provider() != voice_provider:
+                return {"ok": False, "message": "The voice provider changed. Refresh and choose a voice again."}
         rt.new_turn(words)
         result = executor.execute(name, args)
     msg = result.message.split(":", 1)[-1].strip()
@@ -423,6 +434,15 @@ def _execute(name, args, words):
 def do(body):
     """One dashboard button. -> {"ok", "message"}."""
     what = str(body.get("do") or "")
+    if what == "set_voice":
+        from room_agent.audio import voices
+
+        pid = body.get("provider")
+        catalogue = {"elevenlabs": voices.ELEVEN_VOICES, "piper": voices.PIPER_VOICES}.get(pid) if isinstance(pid, str) else None
+        name = body.get("name")
+        if not catalogue or not isinstance(name, str) or name not in catalogue:
+            return {"ok": False, "message": "Choose a voice from the available voices."}
+        return _execute("set_voice", {"name": name}, f"change voice to {name}", voice_provider=pid)
     if what in _CAPS:
         name, words = _CAPS[what]
         args = {k: v for k, v in body.items() if k != "do"}
@@ -480,6 +500,19 @@ def do(body):
             return {"ok": True, "message": "Forgotten, along with what it was learned from."}
         m.set_auto(key, bool(body.get("on")))
         return {"ok": True, "message": "Saved."}
+    if what == "audio_devices":  # (the settings page: use another mic / speaker now, no restart)
+        from room_agent.audio import devices
+
+        if rt.engine is None:
+            return {"ok": False, "message": "The audio isn't running."}
+        mic, speaker = body.get("mic"), body.get("speaker")
+        if not all(v is None or isinstance(v, str) for v in (mic, speaker)):
+            return {"ok": False, "message": "Choose a device from the list."}
+        try:
+            devices.switch(rt.engine, mic, speaker)
+        except ValueError as e:
+            return {"ok": False, "message": str(e)}
+        return {"ok": True, "message": "Switched audio devices."}
     if what.startswith(("mission_", "approval_")):
         return _mission_action(what, body)
     if what == "emergency_stop":

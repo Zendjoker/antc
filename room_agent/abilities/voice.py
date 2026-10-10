@@ -45,10 +45,19 @@ tool("set_listening_patience", "Wait longer after they pause before treating the
 tool("set_speaking_rate", "Change how fast you talk and keep it: 'talk slower', 'much slower', 'speed up', or 'normal'.",
      params({"rate": {"type": "string", "enum": list(SPEECH_RATES)}}, ["rate"]), _call("set_speaking_rate", "rate"),
      group="voice", available=tts_on)
+def _style(args):
+    from room_agent.tools import voice
+
+    return voice.set_speaking_style(args["style"], args.get("also"))
+
+
 tool("set_speaking_style", "Change how you sound from now on and keep it: softer, whispering, warmer, more engaged, more "
      "excited, more serious, playful, or back to normal. Use when they say things like 'talk softer', 'be more serious', "
-     "'more energy' or 'talk normal again'.",
-     params({"style": {"type": "string", "enum": list(BASE_STYLES)}}, ["style"]), _call("set_speaking_style", "style"),
+     "'more energy' or 'talk normal again'. A qualified request keeps both parts: 'serious but a little friendly' = "
+     "style serious, also warm. 'previous' = the style before the last change.",
+     params({"style": {"type": "string", "enum": list(BASE_STYLES) + ["previous"]},
+             "also": {"type": "string", "enum": [s for s in BASE_STYLES if s != "normal"],
+                      "description": "a second, lighter quality they asked for, if any"}}, ["style"]), _style,
      group="voice", claim="style", available=tts_on,
      reflex=[(r"(?:talk|speak|sound|be)\s+(?:like\s+)?(?P<style>normal)(?:ly)?(?:\s+again)?", {}),
              (r"(?:talk|speak)\s+(?:like\s+)?(?:a\s+)?(?:regular|normal)(?:\s+person)?", {"style": "normal"}),
@@ -77,3 +86,29 @@ tool("set_pronunciation", "Remember how to SAY a word (a name, project, brand): 
             ["term", "say_as"]), _pron("set_pronunciation"), group="voice", available=tts_on)
 tool("forget_pronunciation", "Go back to saying a word the normal way.", params({"term": {"type": "string"}}, ["term"]),
      _pron("forget_pronunciation"), group="voice", available=tts_on)
+
+
+def _set_name(args):
+    from room_agent.tools import voice
+
+    return voice.set_assistant_name(args["name"])
+
+
+def _set_wake(args):
+    from room_agent.tools import voice
+
+    return voice.set_wake_word(args["model"])
+
+
+tool("set_assistant_name", "Change what you call yourself (used in your own system prompt) when they ask you to go by "
+     "a different name. A real, lasting change, not a one-reply bit. Takes effect from your next reply; kept across "
+     "restarts.", params({"name": {"type": "string", "description": "The new name, e.g. 'Friday'"}}, ["name"]),
+     _set_name, group="voice", claim="name_change")
+tool("set_wake_word", "Change the word that wakes you up, only if they explicitly ask for this - and only among "
+     "ready-made wake-word models (never an arbitrary phrase: a genuinely new one needs training a model first, which "
+     "this can't do by voice). Saved for the next restart, not immediate.",
+     params({"model": {"type": "string", "description": "One of the ready-made wake-word models, e.g. 'alexa', "
+                                                         "'hey_mycroft', 'hey_rhasspy'"}}, ["model"]),
+     _set_wake, group="voice")
+register_claim("name_change", r"\bi'?m (?:now )?(?:called|named)\b|\bgoing by\b.{0,20}\bnow\b|\byou can call me\b.{0,20}"
+                              r"\bnow\b|\bcall me\b.{0,15}\bfrom now on\b", verified_by=["set_assistant_name"])

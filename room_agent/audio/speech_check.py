@@ -107,6 +107,32 @@ def is_short_command(text):
     return 0 < len(words) <= 3 and bool(set(words) & COMMAND_WORDS)
 
 
+# A correction reuses the agent's words ("Actually, move the calls to Thursday" right after it read out a plan with
+# "actually", "calls" and "Thursday"), so plain word overlap looks like echo. An echo only REPLAYS what the agent said:
+# its word sequence, and no content word of its own. So: a negation the agent didn't say, or a redirect lead plus at
+# least one content word the agent didn't say, is you. (Loose overlap with no such lead stays doubtful while it talks:
+# "maybe a timer for ten seconds" may be its own "30-second timer" misheard.)
+CORRECTION_WORDS = {"no", "nope", "nah", "not", "don't", "didn't", "isn't", "wasn't", "wrong", "instead", "meant"}
+_REDIRECT = re.compile(r"^(?:(?:oh|um|uh|hey|jarvis|okay|sorry)\s+)*(?:no|nope|nah|actually|wait|instead|not|i said|i meant|"
+                       r"make it|change|move|switch|swap|put|use|cancel|stop|scratch that|rather|hold on|never mind)\b")
+
+
+def novel_words(words):
+    """Content words in what was heard that the agent didn't just say (recognition variants count as said)."""
+    said = set(agent_said())
+    return [w for w in words if w not in STOP_WORDS and w not in said and not any(_similar(w, x) for x in said)]
+
+
+def is_correction(words):
+    """You correcting or redirecting it, even in its own words: "no, Wednesday", "actually, move the calls to Thursday"."""
+    if own_speech_scores(words)[1] >= 0.5:
+        return False  # its own sentence replayed (with a misheard word), not a correction
+    said = set(agent_said())
+    if any(w in CORRECTION_WORDS and w not in said for w in words):
+        return True
+    return bool(_REDIRECT.match(" ".join(words)) and novel_words(words))
+
+
 def transcript_uncertain(text, conf=None):
     """Recognition passed its thresholds but only just: kept for the conversation, but never learned from or used for
     something that can't be undone. (Whisper's scores aren't calibrated probabilities: this is a band, not a verdict.)"""
@@ -137,6 +163,8 @@ def classify_audio(text, speech_started=None):
         return USER, "short answer (recognition confident)"
     if engine is None:
         return USER, "no live audio"
+    if is_correction(heard):  # (before overlap: "actually, move the calls to Thursday" reuses its words, and is you)
+        return USER, "a correction or redirect, with words the agent didn't say"
     echo_s = engine.delay.delay + 0.15  # how long after its last sound the agent's echo can still arrive
     age = None if speech_started is None else speech_started - rt.tts_end  # < 0: it started while the agent was talking
     if len(heard) <= 5 and not (age is not None and age > echo_s) and not is_short_command(text) and not confident():
@@ -149,7 +177,7 @@ def classify_audio(text, speech_started=None):
             return USER, f"short, started {age * 1000:.0f}ms after the agent stopped"
         if is_short_command(text):
             return USER, "short command over the agent's audio"
-        if set(w for w in heard if w not in STOP_WORDS) & set(agent_said()):
+        if set(w for w in heard if w not in STOP_WORDS) & set(agent_said()) and not novel_words(heard):
             return AGENT_ECHO, "short fragment of what the agent was saying"
         if not confident():
             return NOISE, "short, over the agent's audio, and recognition wasn't sure"

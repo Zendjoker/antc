@@ -254,16 +254,23 @@ try:
     item = rt.speak_q.get_nowait()
 finally:
     rt.speak_q = q
-check("each spoken sentence carries the reply's delivery; the words are unchanged", str(item) == "Yeah, rest up."
-      and item.delivery and item.delivery.pace == 0.95 and item.style == "soft", (item, item.delivery, item.style))
+# (Oct 9 live test: a low mood kept switching the voice to "soft x0.95", over the style they had just asked for. The
+# mood still shapes the WORDS; the voice stays one steady voice unless they choose a style.)
+check("a low mood never changes the voice: no mood delivery, no style, the words unchanged", str(item) == "Yeah, rest up."
+      and item.delivery is None and item.style == "", (item, item.delivery, item.style))
 check("a style tag never changes the text when the voice can't use tags (Piper now)", styles.delivery_text(item) == "Yeah, rest up.")
-orig = styles.supported
-styles.supported = lambda: True
+from room_agent.audio import voices  # noqa: E402
+
+orig, saved = styles.supported, voices.current.style
+styles.supported, voices.current.style = (lambda: True), "soft"  # (a style THEY chose)
+q, rt.speak_q = rt.speak_q, queue.Queue()
 try:
-    check("...and with an ElevenLabs v3/v4 voice the tag is only added to what the voice reads",
-          styles.delivery_text(item) == "[softly, gently] Yeah, rest up." and str(item) == "Yeah, rest up.")
+    speaker.say("Yeah, rest up.")
+    chosen = rt.speak_q.get_nowait()
+    check("...and with an ElevenLabs v3/v4 voice the style they chose is only added to what the voice reads",
+          styles.delivery_text(chosen) == "[softly, gently] Yeah, rest up." and str(chosen) == "Yeah, rest up.")
 finally:
-    styles.supported = orig
+    styles.supported, voices.current.style, rt.speak_q = orig, saved, q
 check("no cartoon voices: pace stays within 5% either way", all(0.95 <= dv.PACE[p] <= 1.05 for p in dv.PACE))
 
 # ---------------------------------------------------------------- 8. through the real conversation turn (scripted model)

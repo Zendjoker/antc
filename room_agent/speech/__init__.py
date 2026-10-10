@@ -21,7 +21,7 @@ TAG = elevenlabs.TAG
 def perform(sentence):
     """The SpeechPerformance for the next sentence of the current reply (called when it's queued)."""
     from room_agent import social
-    from room_agent.audio import styles, voices
+    from room_agent.audio import voices
 
     previous = getattr(rt.turn, "last_performance", None)
     try:
@@ -31,13 +31,34 @@ def perform(sentence):
     except Exception as e:  # (delivery is decoration: a failure here must never cost the sentence)
         log.warning("speech director skipped a sentence: %s", e)
         p = director.SpeechPerformance(sentence)
-    # an explicit style: the model's own [tag] for this reply wins, then the director, then their saved style
-    chosen = rt.turn_style or ("" if p.direction else voices.current.style)
-    if chosen and chosen != "normal" and styles.STYLE_TAGS.get(chosen) and p.purpose not in ("apology", "warning"):
-        p.direction = [w.strip() for w in styles.STYLE_TAGS[chosen].strip("[]").split(",")][:3]
-        p.why.append(f"style '{chosen}'")
-        p.changed = previous is None or previous.direction != p.direction
+    p = steady(p, voices.current.style, previous)
     rt.turn.last_performance = p
+    return p
+
+
+def style_words(style):
+    """'serious' / 'serious+warm' (a qualified request: "serious but a little friendly") -> delivery words, at most 3."""
+    from room_agent.audio import styles
+
+    parts = [s for s in str(style or "").split("+") if styles.STYLE_TAGS.get(s)]
+    words = [[w.strip() for w in styles.STYLE_TAGS[s].strip("[]").split(",") if w.strip()] for s in parts]
+    if len(words) > 1:
+        return (words[0][:2] + words[1][:1])[:3]
+    return words[0][:3] if words else []
+
+
+def steady(p, saved, previous=None):
+    """One consistent voice: no delivery guessed from their mood (pace, energy, warmth, softness) and no tag the model
+    picked for itself; only the style they chose. "normal" is the plain baseline. Kept: a clear, firm warning."""
+    urgent = p.direction[:2] == ["clear", "firm"]
+    p.direction, p.energy, p.pace, p.reaction, p.emphasis = (["clear", "firm"] if urgent else []), "normal", 1.0, "", ""
+    if not urgent:
+        p.pauses = "natural"
+        words = style_words(saved)
+        if words:
+            p.direction = words
+            p.why.append(f"their style '{saved}'")
+    p.changed = previous is None or previous.direction != p.direction
     return p
 
 

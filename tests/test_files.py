@@ -153,4 +153,37 @@ t.check("a script is never opened", not r.success and not opened and "could run 
 r = run("open_file", {"file": "budget"}, "open my budget")
 t.check("a document is handed to its app; not seen opening -> 'not confirmed'", opened and not r.success
         and "not confirmed" in r.message, r.message)
+
+print("Save -> open -> append, on a mocked Desktop (the 2026-10-09 live bug):")
+desktop = home / "Desktop"
+desktop.mkdir()
+opened.clear()
+r = run("save_file", {"name": "LED_strip_issue", "content": "The LED strip flickers at low brightness.",
+                      "folder": "desktop", "append": True}, "save that as issue 1 in my issues file")
+t.check("save_file (append, file doesn't exist yet) creates it as Issue 1 and verifies", r.success and "issue 1" in r.message.lower(), r.message)
+saved_path = desktop / "LED_strip_issue.md"
+t.check("the exact file really exists where save_file said", saved_path.is_file())
+
+# The real bug: Windows Search can report success with ZERO rows for a brand-new file (not "unavailable" - just
+# stale). find() must still fall back to the real walk here, not report "not found".
+files._index_search = lambda q, kind=None, limit=8: []
+r = run("open_file", {"file": "LED_strip_issue"}, "open that")
+t.check("open_file finds it immediately even when the search index is up but hasn't caught the new file yet "
+        "(empty result still falls back to the real walk, not just an unavailable index)",
+        "no file matching" not in r.message, r.message)
+t.check("...and opens the exact same verified path save_file just wrote, not a different resolution",
+        opened and Path(opened[-1]).resolve() == saved_path.resolve(), opened)
+
+files._index_search = lambda q, kind=None, limit=8: None  # back to "index unavailable" for the rest of the file
+r2 = run("save_file", {"name": "LED_strip_issue", "content": "Also: the effect speed control was missing.",
+                       "folder": "desktop", "append": True}, "add that to my issues file")
+text = saved_path.read_text(encoding="utf-8")
+t.check("append adds a second numbered issue without touching the first (one master file, not a second one)",
+        r2.success and "## Issue 2" in text and "flickers" in text and "effect speed" in text, text)
+
+r3 = run("save_file", {"name": "LED_strip_issue", "content": "Also: the effect speed control was missing.",
+                       "folder": "desktop", "append": True}, "add that to my issues file again")
+t.check("appending the exact same text again is recognized as a duplicate and not added twice", r3.success
+        and "nothing added" in r3.message and saved_path.read_text(encoding="utf-8").count("## Issue") == 2, r3.message)
+
 t.done("FILES")

@@ -11,6 +11,8 @@ HALF_LIFE = {"frustration": 300, "annoyed": 300, "low": 900, "positive": 240, "e
              "energy_down": 900, "joking": 120, "serious": 600, "urgent": 180, "brief": 600, "talk": 300, "dismiss": 60,
              "stop": 45}
 KEEP_S = 1800      # evidence older than this is dropped
+TURN_HALF = 1.0    # ...and it also halves with every turn that doesn't renew it: a mood is about the moment it was
+                   # expressed ("I'm just exhausted"), not the next topics (a plan, the gym, dinner)
 TURN_ONLY = ("dismiss", "stop")  # "whatever" / "enough" are about the reply to THAT utterance, never the next ones
 HISTORY = 8        # recent exchanges kept for conversational context
 
@@ -44,8 +46,10 @@ class SocialState:
                          and o.seq >= self.cleared.get(e.dim, 0) and e.at - o.at < HALF_LIFE.get(e.dim, 300)), None)
             if same is None:
                 self.evidence.append(e)
-            elif e.weight > same.weight:
-                same.weight = e.weight  # (stronger now: e.g. it failed again) but still dated from the first time
+            else:
+                same.seq = e.seq  # (seen again this turn: it doesn't fade by turns, only by time)
+                if e.weight > same.weight:
+                    same.weight = e.weight  # (stronger now: e.g. it failed again) but still dated from the first time
         cutoff = time.time() - KEEP_S
         self.evidence = [e for e in self.evidence if e.at >= cutoff]
 
@@ -57,7 +61,7 @@ class SocialState:
         for e in self.evidence:
             if e.dim != dim or e.seq < self.cleared.get(dim, 0):
                 continue
-            w = e.weight * math.pow(0.5, max(0.0, now - e.at) / HALF_LIFE.get(dim, 300))
+            w = e.weight * math.pow(0.5, max(0.0, now - e.at) / HALF_LIFE.get(dim, 300) + (self.seq - e.seq) / TURN_HALF)
             best[e.source] = max(best.get(e.source, 0.0), min(0.95, w))
         miss = 1.0
         for w in best.values():

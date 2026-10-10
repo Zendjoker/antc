@@ -62,9 +62,10 @@ def say(sentence):
         rt.turn_speech.append(sentence)
         rt.spoken_count += 1
         item = Spoken(sentence)
-        delivery = getattr(rt.turn, "delivery", None)
-        item.style = rt.turn_style or (delivery.style if delivery else "")  # (the model's own tag wins for its sentence)
-        item.delivery = delivery
+        # One steady voice: their chosen voice, pace and style (speech.perform), never a mood guess or the model's own
+        # tag ("low mood -> soft x0.95" used to override the style they had just asked for)
+        item.style = "" if voices.current.style == "normal" else voices.current.style
+        item.delivery = None
         item.performance = speech.perform(sentence)  # (HOW to say it; the words stay `sentence`: speech/)
         rt.speak_q.put(item)
 

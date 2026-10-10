@@ -20,6 +20,17 @@ _QUIET_REST = re.compile(
     r"|(?:and|then)\s+wait(?:\s+(?:for|till|until)\s+[^.?!]{0,30})?))*[\s,.!?]*$", re.I)
 
 
+# "stop", "can you stop?", "please stop", "okay, enough", "hold on": said over a reply, it means stop THAT reply
+_STOP = re.compile(r"^\W*(?:(?:ok(?:ay)?|jarvis|hey|wait|no|please|just|(?:can|could|would|will) you)[\s,.!]+)*"
+                   r"(?:stop(?:\s+(?:it|that|talking|there|now|please|jarvis))*|enough|that'?s enough|hold on|shh+|"
+                   r"(?:ok(?:ay)?|alright)\s+stop)(?:[\s,.!]+(?:please|jarvis|now|thanks|thank you))*\W*$", re.I)
+
+
+def is_stop_request(text):
+    """Only "stop" (in some form), nothing else to answer: decided in code."""
+    return bool(_STOP.match(str(text or "").strip()))
+
+
 def is_quiet_command(text):
     """An explicit request to go quiet until the wake word. Decided in code, not by the LLM."""
     m = _QUIET_START.match(text.strip())

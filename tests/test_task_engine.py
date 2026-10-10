@@ -221,6 +221,38 @@ t.check("resuming re-runs only the step that never started (3); the UNKNOWN one 
         WORLD["done"] == [("step", "3")] and states(loaded) == ["COMPLETED", "UNKNOWN", "COMPLETED", "BLOCKED"],
         (WORLD["done"], states(loaded)))
 
+print("Checkpoint save survives a transient Windows file lock (the 2026-10-09 WinError 5):")
+_real_replace, _fails = Path.replace, {"n": 0}
+
+
+def _flaky_replace(self, target):  # fails the first 2 attempts like a transient antivirus/indexer lock, then clears
+    if str(self).endswith(".tmp") and _fails["n"] < 2:
+        _fails["n"] += 1
+        raise PermissionError("[WinError 5] Access is denied (simulated)")
+    return _real_replace(self, target)
+
+
+Path.replace = _flaky_replace
+tasks._save()
+Path.replace = _real_replace
+t.check("a transient replace failure is retried (not given up on after one try) and still saves",
+        _fails["n"] == 2 and config.TASKS_FILE.exists())
+
+prior = config.TASKS_FILE.read_text(encoding="utf-8")
+
+
+def _always_fails(self, target):  # a persistent lock (e.g. the whole retry window stays blocked)
+    if str(self).endswith(".tmp"):
+        raise PermissionError("[WinError 5] Access is denied (simulated, persistent)")
+    return _real_replace(self, target)
+
+
+Path.replace = _always_fails
+tasks._save()  # must not raise, and must not touch tasks.json at all (only the failed .tmp is left behind)
+Path.replace = _real_replace
+t.check("a PERSISTENT replace failure doesn't crash the turn and never leaves tasks.json empty or corrupt",
+        config.TASKS_FILE.read_text(encoding="utf-8") == prior)
+
 print("Independent success checks:")
 task = plan("note with a check", [{"tool": "save_file", "args": {"name": "checked", "content": "milk and eggs"},
                                    "check": {"file_contains": ["Desktop/checked.md", "eggs"]}}], said="save a note called checked")

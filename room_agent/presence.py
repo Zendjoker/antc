@@ -103,6 +103,8 @@ POOLS = {
     ],
     # short acknowledgements when an answer is slow to start
     "ack": ["Mm.", "Hmm.", "Mhm.", "Okay.", "Yeah.", "Right."],
+    # they stopped it mid-reply ("stop", "can you stop?"): it already stopped, this only confirms it heard
+    "stopped": ["Okay.", "Alright.", "Sure."],
     # a tool call (weather, smart home...) needs a moment
     "wait": ["One sec.", "Let me check.", "Hang on.", "Give me a sec.", "Lemme see.", "Checking."],
     # it couldn't confirm that what it was about to say really happened

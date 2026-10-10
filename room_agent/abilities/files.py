@@ -16,7 +16,14 @@ register_group(Group("files", FILE_HINTS, lambda: False, "files on this PC",
                      "Bin", lambda: IS_WINDOWS,
                      rules=["- Files: 'this file' / 'this document' means the one selected in File Explorer or open in "
                             "front; call read_file without a name. Summarize from what read_file returns only. Never say "
-                            "a file's full path aloud: say its name and folder."]))
+                            "a file's full path aloud: say its name and folder.",
+                            "- When they want several related notes/issues kept together ('add this to my issues "
+                            "file', 'note down another one'), save_file with append=true to the SAME file name every "
+                            "time - never create a second similarly-named file for what's really the same running "
+                            "list. Only make a brand-new file when they clearly want a separate one.",
+                            "- Right after save_file succeeds, open_file / read_file with that same name works even if "
+                            "a search would still be catching up: don't ask them to confirm the file exists again, and "
+                            "don't re-run the save."]))
 register_claim("files", r"\b(i (read|opened|found)|i'?ve (read|opened|found))\b.{0,40}\b(file|document|pdf|spreadsheet|"
                         r"presentation|cv|resume)\b")
 FILE_INTENT = re.compile(r"file|document|\bdoc\b|pdf|read|summar|open|show|find|where|look|what('s| is| does)|cv|resume|"
@@ -122,11 +129,12 @@ def _w():
     return filewrite
 
 
-SAVE_INTENT = re.compile(r"save|write|create|make|put|store|export|jot", re.I)
+SAVE_INTENT = re.compile(r"save|write|create|make|put|store|export|jot|append|add (it|this|that|these) to", re.I)
 
 
 def _save(args):
-    return _w().write(args.get("name", ""), args.get("content", ""), args.get("folder", "desktop"), bool(args.get("overwrite")))
+    return _w().write(args.get("name", ""), args.get("content", ""), args.get("folder", "desktop"),
+                      bool(args.get("overwrite")), bool(args.get("append")))
 
 
 def _exists(args, before=None):
@@ -135,17 +143,25 @@ def _exists(args, before=None):
 
 
 def _undo_save(args, before, after):
+    if args.get("append"):
+        return "FAILED: can't undo adding to an existing file (only saving a brand-new file can be put back)."
     if before.get("exists"):
         return "FAILED: that save replaced an existing file, which can't be put back."
     return _w().recycle(after["path"])
 
 
 tool("save_file", "Save text they asked for as a file (a note, a list, a draft, a report) in their Desktop, Documents or "
-     "Downloads: .md by default, or .txt / .csv / .json. Never overwrites an existing file unless they confirmed it.",
+     "Downloads: .md by default, or .txt / .csv / .json. Never overwrites an existing file unless they confirmed it. For "
+     "a running file of several numbered issues/notes in one place ('add this to my issues file', 'put this with the "
+     "others'), use append=true instead of making a new file or overwriting: it adds one new numbered entry and never "
+     "adds the same entry twice word-for-word.",
      params({"name": {"type": "string", "description": "File name (without folders)"},
              "content": {"type": "string"},
              "folder": {"type": "string", "description": "desktop (default), documents, downloads"},
-             "overwrite": {"type": "boolean", "description": "Only after they confirmed replacing an existing file"}},
+             "overwrite": {"type": "boolean", "description": "Only after they confirmed replacing an existing file"},
+             "append": {"type": "boolean", "description": "Add as a new numbered entry to an existing file instead of "
+                                                           "replacing it or refusing; creates the file as entry 1 if it "
+                                                           "doesn't exist yet. Never combine with overwrite=true."}},
             ["name", "content"]),
      _save, group="files", claim="files", intent=SAVE_INTENT, observe=_exists, undo=_undo_save,
      undo_if=lambda b, a: a["exists"] and not b["exists"])

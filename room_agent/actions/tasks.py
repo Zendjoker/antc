@@ -101,17 +101,32 @@ def event(t, what):
 
 
 def _save():
-    """Checkpoint: every task's state, without the full arguments of private steps (atomic write)."""
+    """Checkpoint: every task's state, without the full arguments of private steps (atomic write, with a short
+    bounded retry: Windows can transiently deny the rename right after a write - antivirus or the indexer briefly
+    holding the file - see the 2026-10-09 WinError 5. The write-then-rename order means tasks.json is only ever
+    replaced by a COMPLETE, valid checkpoint; a failed rename leaves the previous good checkpoint in place, never a
+    half-written or missing one)."""
     with _lock:
         items = sorted(_tasks.values(), key=lambda t: t["created"])[-MAX_TASKS:]
         data = [{**t, "steps": [{k: v for k, v in s.items() if k != "args" or not _private(s["tool"])} for s in t["steps"]]}
                 for t in items]
+    tmp = config.TASKS_FILE.with_suffix(".tmp")
     try:
-        tmp = config.TASKS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1, default=str), encoding="utf-8")
-        tmp.replace(config.TASKS_FILE)
     except OSError as e:
         log.warning("tasks: checkpoint not written (%s)", e)
+        return
+    for attempt in range(3):
+        try:
+            tmp.replace(config.TASKS_FILE)
+            return
+        except OSError as e:
+            if attempt == 2:
+                log.warning("tasks: checkpoint written to %s but couldn't replace %s after %d tries (%s); the "
+                           "previous checkpoint is still what Jarvis will load on restart", tmp.name,
+                           config.TASKS_FILE.name, attempt + 1, e)
+                return
+            time.sleep(0.05 * (attempt + 1))
 
 
 def load():
@@ -443,7 +458,7 @@ def resume(t):
         return t
     event(t, "resumed")
     for s in t["steps"]:
-        if s["state"] in ("BLOCKED", "CANCELED"):
+        if s["state"] in ("BLOCKED", "CANCELED") and not s.get("declined"):  # (what they turned down stays down)
             s["state"] = "PENDING"
     return run(t, only_pending=True)
 
@@ -457,6 +472,21 @@ def cancel_task(t):
     t["updated"] = time.time()
     _save()
     return t
+
+
+def decline_waiting(tool):
+    """They turned `tool` down ("no, no draft"): its unfinished steps are cancelled for good, so a later "resume" can't
+    bring it back."""
+    changed = False
+    for t in recent(MAX_TASKS):
+        steps = [s for s in t["steps"] if s["tool"] == tool and s["state"] in ("PENDING", "BLOCKED", "WAITING")]
+        for s in steps:
+            s.update(state="CANCELED", result="turned down by them", declined=True)
+        if steps:
+            t["state"], t["updated"], changed = final_state(t), time.time(), True
+            event(t, f"{tool} turned down by them")
+    if changed:
+        _save()
 
 
 # ---------------------------------------------------------------- ordinary turns get a record too

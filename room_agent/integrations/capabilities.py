@@ -20,6 +20,7 @@ from room_agent.actions.context import env
 from room_agent.actions.core import Capability, Group, Risk, register, register_claim, register_group
 from room_agent.integrations import knowledge, provider
 from room_agent.integrations.base import IntegrationError
+from room_agent.integrations.google.calendar import AmbiguousTime
 from room_agent.integrations.untrusted import RULE as UNTRUSTED_RULE
 from room_agent.integrations.untrusted import wrap
 
@@ -54,10 +55,28 @@ def _ref(kind, value, list_kind=None):
     return v
 
 
+CALENDAR_WRITES = ("calendar_create_event", "calendar_update_event")
+ALL_DAY = re.compile(r"\b(?:all[- ]day|the whole day|full day)\b", re.I)
+MOVE_ASK = re.compile(r"\b(?:move|moving|reschedule|push|shift|bump)\b", re.I)
+NEW_ASK = re.compile(r"\b(?:another|a new|also add|add (?:a|an)|create|new event|second one)\b", re.I)
+
+
+def _ask_when(name, args, e):
+    """A day or time that could mean two things ("next Friday" on a Wednesday): nothing is done and they're asked. A
+    change keeps their request open (nothing missing), so the answer goes to the model with what they already said."""
+    if name in CALENDAR_WRITES:
+        pending.collecting(name, {k: v for k, v in args.items() if k not in ("start", "end")}, [])
+    iso = " or ".join(d.isoformat() for d in e.choices)
+    then = (f"; then call {name} again with the date they choose ({iso}), keeping the time they said" if iso else "")
+    return f"NEEDS: {e}. Nothing was done; {'ask which' if iso else 'ask them'}, never guess{then}."
+
+
 def guarded(fn):
     def run(args):
         try:
             return fn(args)
+        except AmbiguousTime as e:
+            return _ask_when(fn.__name__, args, e)
         except Unclear as e:
             if e.param:  # (e.g. an unknown recipient: the request is kept and only that is asked for)
                 return pending.needs(e.param, str(e))
@@ -123,7 +142,12 @@ register_claim("message", r"\b(i\s+)?(sent|texted|emailed|messaged|called|dialed
                           r"|\bi'?ll (text|call|email|message|dial)\b"
                           r"|^(sent|emailed|replied|forwarded)\b|\b(i'?ve|i have|i)\s+(just\s+)?(sent|emailed|replied|forwarded)\b"
                           r"|\b(it'?s|email'?s|message'?s|reply'?s|that'?s|it has|it was)\s+(been\s+)?(sent|delivered|on its way)\b")
-register_claim("calendar", r"\b(added|scheduled|booked|put)\b.{0,40}\b(calendar|schedule|appointment|meeting)\b")
+# (a plan talked through - "gym Monday and Wednesday" - is not an event: "blocked gym Monday" needs a create that worked)
+register_claim("calendar", r"\b(added|scheduled|booked|put|blocked(?: off)?|locked in|penciled in|set up)\b.{0,40}\b(calendar|"
+                           r"schedule|appointment|meeting|event)\b"
+                           r"|\b(scheduled|blocked(?: off)?|locked in|penciled in)\b.{0,40}\b((?:mon|tues|wednes|thurs|fri|satur|"
+                           r"sun)day|tomorrow|today)\b"
+                           r"|\b(?:it'?s|that'?s|they'?re|those are|all)\s+(?:now\s+)?(?:on|in) your calendar\b")
 
 
 def _can(service, level):
@@ -437,6 +461,19 @@ def calendar_create_event(args):
     svc = _cal()
     tz = svc.tz()
     start = parse_time(args["start"], tz)
+    p = pending.current()
+    focused = env.item("event", max_age=1800)
+    asked = f"{rt.turn_text or ''} {p.source_text if p is not None and p.confirm else ''}"  # (a "yes" to a create)
+    if (focused and MOVE_ASK.search(asked) and not NEW_ASK.search(asked)
+            and (p is None or p.capability != "calendar_create_event" or p.confirm)):
+        # ("move it to Friday" about an event that exists is a change, never a second event)
+        raise ValueError(f"not created: they asked to move an existing event ({focused.get('label') or 'the last one'}). "
+                         "Change it with calendar_update_event (event_id 'last', or find it first); never add a copy")
+    said = f"{rt.turn_text or ''} {p.source_text if p is not None else ''}"
+    if not isinstance(start, datetime.datetime) and not args.get("end") and not ALL_DAY.search(said):
+        # (a day with no time: "put my calls to Thursday" became an all-day event twice in the live test)
+        raise AmbiguousTime(f"'{args['start']}' has a day ({start.strftime('%a %b')} {start.day}) but no time: ask what "
+                            "time, or whether it's all day")
     if args.get("end"):
         end = parse_time(args["end"], tz, base=start if isinstance(start, datetime.datetime) else None)
     elif isinstance(start, datetime.datetime):
@@ -610,6 +647,16 @@ register(Capability("calendar_get_events", "What's on their calendar in a period
                     S({"when": WHEN, "start": TIME, "end": TIME, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
                     calendar_get_events, group="calendar", available=cal_read, changes_state=False,
                     examples=["what do I have tomorrow?", "anything Friday afternoon?"], **COMMON))
+# "Moved your calls to Friday" is only true when an existing event was changed (a new one created elsewhere isn't a move)
+register_claim("calendar_move", r"\b(?:moved|rescheduled|pushed|shifted|bumped)\b.{0,40}\b(?:calendar|meeting|event|"
+                                 r"appointment|tomorrow|today|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b|\brescheduled\b",
+               verified_by={"calendar_update_event"})
+# "Wednesday's wide open" is a fact about their calendar: only said after it was read this turn (not from a plan talked
+# through earlier, and not a guess)
+register_claim("calendar_state", r"\bwide open\b|\bnothing (?:on|in|scheduled|booked)\b.{0,25}\b(?:calendar|schedule|"
+               r"\w+day|today|tomorrow)\b|\b(?:calendar|schedule)(?:'s| is) (?:clear|empty|open|free)\b|\byou(?:'re| are) "
+               r"(?:completely |totally )?(?:free|clear|open) (?:all day|that day|on \w+day|\w+day|today|tomorrow)\b",
+               verified_by={"calendar_get_events", "calendar_find_events"})
 register(Capability("calendar_find_events", "Find events by words (find my meeting with John); next 60 days by default.",
                     S({"query": STR, "when": WHEN, "start": TIME, "end": TIME, "limit": INT}, ["query"]),
                     calendar_find_events, group="calendar", available=cal_read, changes_state=False, **COMMON))

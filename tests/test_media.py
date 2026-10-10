@@ -117,7 +117,14 @@ t = Checker()
 check, FAILS = t.check, t.fails
 
 
+# Playback only changes on an explicit request (executor: Oct 9 15:56); these tests check the mechanics, so each call
+# comes with the words a request would have (the dashboard buttons' own words)
+ASKED = {"play_pause": "pause or play the music", "next_track": "next song", "previous_track": "previous song"}
+
+
 def tool(name, **args):
+    if name in ASKED:
+        rt.turn_text = ASKED[name]
     return run_tool(name, args)
 
 

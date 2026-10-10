@@ -1,6 +1,7 @@
 """The running conversation: restoring it after a restart, keeping it trimmed, and saving each exchange."""
 
 import logging
+import re
 
 from room_agent import runtime as rt
 from room_agent.audio.styles import strip_tags
@@ -10,6 +11,7 @@ from room_agent.text import is_quiet_command, strip_stage_directions, strip_wake
 from room_agent.truth import TIMER_LIMIT
 
 log = logging.getLogger("room-agent")
+_CONTROL_TAG = re.compile(r"\s*<\s*(?:need\s*:\s*\w+|listen|silent)\s*>", re.I)  # signals to code, never words
 
 
 def start_history():
@@ -46,7 +48,8 @@ def reply_text(messages):
         else:
             out += [b.get("text", "") if isinstance(b, dict) else b.text for b in content  # (dict blocks: OpenAI replies)
                     if (b.get("type") if isinstance(b, dict) else getattr(b, "type", "")) == "text"]
-    return " ".join(t.strip() for t in map(strip_tags, out) if t and t.strip())
+    out = [_CONTROL_TAG.sub("", strip_tags(t)) for t in out if t]
+    return " ".join(t.strip() for t in out if t.strip())
 
 
 def remember_turn(user_text, agent_text, private=False):

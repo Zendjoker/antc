@@ -23,7 +23,8 @@ from room_agent.config import (CHECKIN_AFTER_S, CHECKIN_CHANCE, CHECKIN_COOLDOWN
                                SLEEP_AFTER_S, SLEEP_GRACE_S)
 from room_agent.conversation.states import State
 from room_agent.conversation.turn import take_turn
-from room_agent.text import is_let_me_finish, is_quiet_command, join_fragments, looks_unfinished, strip_wake
+from room_agent.text import (is_let_me_finish, is_quiet_command, is_stop_request, join_fragments, looks_unfinished,
+                             strip_wake)
 from room_agent.tools.timers import acknowledge_ring
 
 log = logging.getLogger("room-agent")
@@ -115,6 +116,8 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
             rt.state.go(State.LISTENING)
             if not heard:
                 engine.interrupted.clear()  # (a timer announcement you talked over is over)
+            if rt.last_activity > quiet_since:  # a typed exchange (dashboard) is conversation too: silence restarts
+                quiet_since, checked_in_at = rt.last_activity, None
             now = time.time()
             sleep_at = checked_in_at + SLEEP_AFTER_CHECKIN_S if checked_in_at else quiet_since + SLEEP_AFTER_S
             checkin_at = quiet_since + CHECKIN_AFTER_S
@@ -139,6 +142,8 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
                 rt.explaining = False  # they never started (or never continued)
             if pcm is None and carry:  # they never finished the sentence: answer what was said
                 text, carry, trailed, expired = join_fragments(carry, ""), "", True, True
+                continue
+            if pcm is None and rt.last_activity > quiet_since:  # (they typed while it listened: not silence)
                 continue
             if pcm is None:  # silence until the next event
                 if barged:
@@ -250,6 +255,17 @@ def converse(mic_q, history, text=None, heard=False, barged=False):
             engine.drain_mic()  # committed: talking over the acknowledgement doesn't cancel quiet mode
             engine.interrupted.clear()
             return "quiet"
+        if barged and is_stop_request(said):  # "can you stop?" over a reply: it already stopped. No model call.
+            stop_thinking()
+            rt.turn_start = None
+            history.append({"role": "user", "content": said})
+            heard, barged = speak_phrase("stopped")
+            history.append({"role": "assistant", "content": rt.recent_speech[-1] if rt.recent_speech else "Okay."})
+            rt.last_reply = ""
+            quiet_since, checked_in_at, text = time.time(), None, None
+            trace.note("ACTION", "STOP (in code, no model call)")
+            trace.flush()
+            continue
         if rt.turn_start is None:  # command said together with the wake word: thinking sound if it's slow
             rt.turn_start = time.time()
             filler_if_slow(rt.turn_start)

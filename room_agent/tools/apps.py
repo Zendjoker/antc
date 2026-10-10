@@ -476,7 +476,11 @@ def open_app(app_name):
 
 def focus_entry(entry):
     """Bring the app's window to the front. An app that only lives in the tray is asked to show its window by starting
-    it again (single-instance apps like Spotify and Discord show their window instead of a second copy)."""
+    it again (single-instance apps like Spotify and Discord show their window instead of a second copy). The same
+    trick is tried again if a window WAS found but still wouldn't come to the front: a single-instance app minimized
+    to the tray can leave behind a stale, non-interactive window handle that enumerates as "visible" but never
+    responds to SetForegroundWindow (the exact 2026-10-09 live failure: 'Spotify is running, but its window couldn't
+    be brought to the front', twice in a row, for an app that was never actually missing)."""
     wins = app_windows(entry)
     if not wins and (entry.get("id") or entry.get("link") or entry.get("exe")):
         try:
@@ -484,7 +488,17 @@ def focus_entry(entry):
             wins = _wait_for_window(entry, 6)
         except Exception:
             wins = []
-    return bool(wins) and bring_to_front(wins[0][0])
+    if wins and bring_to_front(wins[0][0]):
+        return True
+    if wins and (entry.get("id") or entry.get("link") or entry.get("exe")):
+        try:
+            _launch(entry)
+            retried = _wait_for_window(entry, 6)
+        except Exception:
+            retried = []
+        if retried:
+            return bring_to_front(retried[0][0])
+    return False
 
 
 def focus_app(app_name):

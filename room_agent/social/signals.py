@@ -39,6 +39,13 @@ def _c(pattern, effects, clears=(), why="", needs_context=False):
     return Cue(re.compile(pattern, re.I), effects, tuple(clears), why or pattern[:30], needs_context)
 
 
+# Doubting their own plan or effort ("this whole business idea is stupid and I'm wasting my time"): about the work, not
+# an insult to themselves or to Jarvis
+DOUBT = re.compile(r"\b(?:this|the|my|our)\s+(?:whole\s+)?(?:\w+\s+){0,2}?(?:idea|plan|business|project|thing|startup|"
+                   r"career|work)\s+(?:is|was|feels|seems)\s+(?:so\s+|kind of\s+|kinda\s+)?(?:stupid|dumb|pointless|"
+                   r"hopeless|a waste|going nowhere|not working|never going to work)\b|\bi'?m (?:just )?(?:wasting my time|"
+                   r"getting nowhere|not cut out for (?:this|it))\b|\bwhat'?s the point\b|\bi (?:should|might as well) "
+                   r"(?:just )?(?:give up|quit)\b|\bnothing i (?:do|try) (?:is )?working\b", re.I)
 PROFANITY = re.compile(r"\b(fuck\w*|shit\w*|damn\w*|hell|crap|bloody|goddamn\w*)\b", re.I)
 
 LANGUAGE = [
@@ -58,6 +65,7 @@ LANGUAGE = [
     _c(r"\b(tired|exhausted|exhausting|drained|wiped( out)?|knackered|sleepy|beat|long day|rough day|hard day|burn(ed|t) out|"
        r"can'?t be bothered|no energy|meh|bummed|down today|feeling down|lonely|sad|miserable)\b",
        {"low": 0.5, "energy_down": 0.5}, clears=("excited", "energy_up"), why="sounds low/tired"),
+    _c(DOUBT.pattern, {"low": 0.45, "serious": 0.2}, clears=("excited", "joking"), why="doubting their own work"),
     # positive / excited
     _c(r"\b(let'?s go+|finally|yay+|woo+|hell yeah|awesome|amazing|incredible|nailed it|so (happy|excited|hyped|pumped)|"
        r"can'?t wait|i (passed|won|did it|made it)|we (won|did it)|best day)\b|\byes{2,}\b|\byes!",

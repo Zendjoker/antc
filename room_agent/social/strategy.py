@@ -146,6 +146,12 @@ def derive(snap, text="", prefs=None, habits=None, situation=None):
         s.response_energy, s.pace = "high", "faster" if v["excited"] >= 0.5 else "normal"
         s.tone = "upbeat" if mode != "joking" else s.tone
         s.why.append("excited")
+    from room_agent.social.signals import DOUBT
+
+    if DOUBT.search(text or ""):
+        s.notes.append("they're doubting the plan or their effort, not putting themselves down: answer about the plan as "
+                       "it really is (honest, concrete, one next step); don't reassure them they aren't stupid")
+        s.why.append("doubting their work")
     if v["serious"] >= 0.45 or mode == "urgent":
         s.humor_level, s.roast_level = "off", "off"
     if not humor_ok:

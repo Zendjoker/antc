@@ -176,8 +176,12 @@ class ClaimGuard:
 
     def tool_result(self, name, result):
         self.tools_called.add(name)
-        if str(result).startswith("OK") and not NO_CHANGE.match(str(result)):
+        if str(result).startswith("OK") and (name not in ACTION_TOOLS or not NO_CHANGE.match(str(result))):
+            # (a read that found nothing - "OK: nothing on their calendar" - is still a verified read)
             self.ok_tools.add(name)
+            outcome = str(result)[3:].strip().split(":")[0].split(" ")[0].lower()
+            if outcome:  # ("play_pause:playing" vs "play_pause:paused": what the action really did backs the claim)
+                self.ok_tools.add(f"{name}:{outcome}")
             self.failed_actions.discard(name)
         elif name in ACTION_TOOLS and str(result).startswith("FAILED") and "they said" not in str(result):
             self.failed_actions.add(name)  # (a refusal because they said not to isn't a failure)

@@ -74,6 +74,33 @@ def allowed(path):
     return True, ""
 
 
+# A small record of files Jarvis itself just verified writing (computer/filewrite.py calls remember_saved() only
+# after write-then-read-back confirms the content is really on disk). This is what lets "open that" work right after
+# "save that" even when Windows Search's index hasn't caught up to a brand-new file yet (it can lag by seconds to
+# minutes) - resolve() checks this BEFORE any search. A cache hit is still re-checked for existence here, and
+# open_with_default() independently re-runs allowed() regardless of how the path was obtained, so this never
+# bypasses path authorization - it only skips an unreliable search step for a path this process already verified.
+_MAX_REMEMBERED = 50
+_recent_saves = {}  # name.lower() -> (absolute path str, when saved)
+
+
+def remember_saved(path):
+    p = Path(path).resolve()
+    _recent_saves[p.name.lower()] = (str(p), time.time())
+    if len(_recent_saves) > _MAX_REMEMBERED:
+        oldest = min(_recent_saves, key=lambda k: _recent_saves[k][1])
+        _recent_saves.pop(oldest, None)
+
+
+def _recent_save_match(said):
+    key = said.strip().lower()
+    hit = _recent_saves.get(key) or _recent_saves.get(Path(key).name.lower())
+    if not hit:
+        return None
+    path, _ = hit
+    return path if os.path.isfile(path) else None  # never trust the cache blindly: it's re-verified on every use
+
+
 def _jarvis_private(p):
     try:
         from room_agent import config
@@ -154,9 +181,11 @@ def _walk_search(query, kind=None, limit=8):
 
 
 def find(query, kind=None, limit=8):
-    """-> [Found] newest first."""
+    """-> [Found] newest first. Falls back to the real folder walk whenever the index comes up empty, not only when
+    it's unavailable: Windows Search can take seconds to minutes to catch a just-created file, and reporting "not
+    found" during that lag would be reporting a search-index gap as if the file itself were missing."""
     hits = _index_search(query, kind, limit)
-    if hits is None:
+    if not hits:
         hits = _walk_search(query, kind, limit)
     return hits
 
@@ -238,6 +267,9 @@ def resolve(said):
             return path, f"open in \"{title[:60]}\""
         return None, ("no file is selected in File Explorer and the window in front doesn't show one. Ask which file (or "
                       "to select it in File Explorer).")
+    exact = _recent_save_match(s)
+    if exact:
+        return exact, "a file Jarvis just saved"
     if os.path.isabs(s) and os.path.isfile(s):
         return s, "the path given"
     hits = find(s, limit=3)

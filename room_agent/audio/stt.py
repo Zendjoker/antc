@@ -13,7 +13,7 @@ from room_agent import config
 from room_agent import runtime as rt
 from room_agent.audio import debug, speaker_id
 from room_agent.audio.sounds import to_wav
-from room_agent.audio.speech_check import STOP_WORDS, is_filler, is_own_speech, norm_words
+from room_agent.audio.speech_check import STOP_WORDS, is_correction, is_filler, is_own_speech, norm_words
 from room_agent.config import DG_KEY, STT_PROVIDER, WHISPER_DEVICE, WHISPER_MODEL
 
 log = logging.getLogger("room-agent")
@@ -133,9 +133,27 @@ def verify_barge(pcm, check_speaker=True):
         return False, f"noise ({text!r})"
     if not [w for w in words if w not in STOP_WORDS]:
         return False, f"noise: nothing to tell it apart yet ({text!r})"  # (checked again with more audio)
-    if is_own_speech(words):
+    if is_own_speech(words) and not is_correction(words):  # ("actually, move the calls..." reuses its words)
         return False, f"likely echo ({text!r})"
     return True, repr(text)
+
+
+STOP_WORDS_SAID = {"stop", "wait", "enough", "hold", "pause", "shh", "quiet"}
+
+
+def verify_stop(pcm):
+    """A short burst over the agent's voice: is it "stop" (or "wait", "enough"...), said by you? (The length rule
+    alone threw these away, Oct 9 15:51.) Not you by voice, or the agent's own word echoing -> no."""
+    state, score = speaker_id.gate.verdict(pcm)
+    if state == "not you":
+        return False, f"not your voice ({score:.2f})"
+    text = whisper_text(pcm)
+    words = norm_words(text)
+    said_by_agent = set(norm_words(" ".join(list(rt.turn_speech)[-3:])))
+    hit = [w for w in words if w in STOP_WORDS_SAID and w not in said_by_agent]
+    if hit and 0 < len(words) <= 5:
+        return True, f"stop command {text!r}"
+    return False, repr(text)
 
 
 def transcribe(pcm):

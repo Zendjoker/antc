@@ -75,5 +75,5 @@ def delivery_text(item):
     if not supported():
         return text
     style = getattr(item, "style", "") or voices.current.style
-    tag = STYLE_TAGS.get(style, "")
+    tag = STYLE_TAGS.get(str(style).split("+")[0], "")  # ("serious+warm": its main style)
     return f"{tag} {text}" if tag else text

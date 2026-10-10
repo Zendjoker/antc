@@ -179,6 +179,9 @@ class AudioEngine:
         self.barge_tries = 2
         # verifier(pcm16k) -> (is_user: bool, detail: str). Set by the app (e.g. a Whisper check).
         self.barge_verifier = None
+        # stop_check(pcm16k) -> (is_stop: bool, detail): the words of a SHORT burst ("stop!"), which the length rule rejects
+        self.barge_stop_check = None
+        self._stop_checking = False
 
         self.mic_q: "queue.Queue[tuple[np.ndarray, float]]" = queue.Queue()
         self.interrupted = threading.Event()  # set when you talk over the agent
@@ -436,6 +439,7 @@ class AudioEngine:
                 candidate = False
             event, ep = tracker.step(frame_no, candidate, self.barge_gap, self.epoch, self.voice_heard_at)
             if candidate:
+                ep["peak"] = max(ep.get("peak", 0.0), voice)
                 if event == "start":
                     log.info("barge-in candidate (voice %.2f, mic %.0f, cleaned %.0f%s)", voice, r, c,
                              f", run so far {ep['frames'] - 1} voice frames" if ep["frames"] > 1 else "")
@@ -443,7 +447,9 @@ class AudioEngine:
                     debug.event("barge_candidate", frame=frame_no, run_start=ep["run"], voice=voice, mic_rms=r, cleaned_rms=c)
                 self.voice_heard_at = time.time()
             elif event == "too_short":  # a gap ended this piece before there was enough voice to judge
-                self._end_episode(ep, f"too short ({ep['frames']} voice frames, {ep['frames'] * 80} ms of voice in this run)")
+                if not self._check_short_stop(ep):  # ("stop" itself is short: its words are checked before rejecting it)
+                    self._end_episode(ep, f"too short ({ep['frames']} voice frames, {ep['frames'] * 80} ms of voice in "
+                                          "this run)")
                 episode = None
                 continue
             episode = tracker.episode
@@ -495,6 +501,40 @@ class AudioEngine:
                 pass  # too little to tell yet: checked again once more of it has been heard
             else:
                 self._end_episode(episode, detail)
+
+    STOP_MIN_FRAMES, STOP_MIN_PEAK = 2, 0.85  # a short piece worth a words check: clearly a voice, not a click
+
+    def _check_short_stop(self, episode):
+        """A clear but short burst of voice over the agent ("stop!", "wait"): rejected as too short before; now its words
+        are checked once (one at a time) and a stop command the agent didn't say interrupts. -> True if checking."""
+        if (self.barge_stop_check is None or self._stop_checking or episode["frames"] < self.STOP_MIN_FRAMES
+                or episode.get("peak", 0.0) < self.STOP_MIN_PEAK):
+            return False
+        with self._q_lock:
+            frames = [f for n, (f, _) in self._history if n >= episode["run"] - 2]
+        if not frames:
+            return False
+        episode["pending"], self._stop_checking = True, True
+        threading.Thread(target=self._verify_stop, args=(episode, np.concatenate(frames)), daemon=True).start()
+        return True
+
+    def _verify_stop(self, episode, audio):
+        try:
+            is_stop, detail = self.barge_stop_check(audio)
+        except Exception as e:
+            is_stop, detail = False, f"check failed: {e}"
+        with self._q_lock:
+            episode["pending"], self._stop_checking = False, False
+            if episode["done"] or self.interrupted.is_set():
+                return
+            if episode["epoch"] != self.epoch or not self.is_playing():
+                episode["done"] = True
+                log.info("barge-in undecided: the agent stopped talking first (%s)", detail)
+                return
+            if is_stop:
+                self._confirm(episode, detail)
+            else:
+                self._end_episode(episode, f"too short ({episode['frames']} voice frames), not a stop command ({detail})")
 
     def _confirm(self, episode, detail):
         with self._q_lock:

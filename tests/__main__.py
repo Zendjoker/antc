@@ -21,16 +21,16 @@ import sys
 import time
 
 CATEGORIES = {
-    "unit": ["test_isolation", "test_cost", "test_intent", "test_turn_intent", "test_model_routing", "test_claims", "test_speech", "test_generalization", "test_reliability",
+    "unit": ["test_isolation", "test_cost", "test_ollama_fallback", "test_identity", "test_intent", "test_turn_intent", "test_model_routing", "test_claims", "test_speech", "test_generalization", "test_reliability",
              "test_conversation_policy", "test_memory_lifecycle", "test_proactive", "test_learning", "test_location",
              "test_cognition"],
     "integration": ["test_actions", "test_apps", "test_media", "test_windows", "test_integrations", "test_phone",
                     "test_pending", "test_social", "test_fixes", "test_live_fixes", "test_reliability_fixes", "test_tasks",
-                    "test_greet", "test_zigbee", "test_smart_home", "test_voice_delivery", "test_turn_taking",
+                    "test_greet", "test_zigbee", "test_room_state", "test_smart_home", "test_voice_delivery", "test_turn_taking",
                     "test_timer_correction", "test_diagnostics", "test_browser", "test_screen", "test_research", "test_service", "test_lists", "test_files", "test_music",
                     "test_texts", "test_pcsettings", "test_safety", "test_eval_scoring", "test_cancellation", "test_google_health",
                     "test_tool_registry", "test_task_engine", "test_benchmark_scoring",
-                    "test_reliability_compare", "test_missions", "test_security", "test_recovery", "test_hardening", "test_intelligence", "test_v2_intelligence", "test_errand", "test_action_safety", "test_memory_context"],
+                    "test_reliability_compare", "test_missions", "test_security", "test_recovery", "test_hardening", "test_intelligence", "test_v2_intelligence", "test_errand", "test_action_safety", "test_memory_context", "test_oct9_regressions"],
     "audio": ["test_listening", "test_speaker", "test_latency"],
     "hardware": ["apps_live", "media_live", "windows_live", "actions_live", ("computer_live", "--act")],
     "live_api": [("test_turn_taking", "--live-api"), "test_ring_ack", "cognition_live", "pending_live"],

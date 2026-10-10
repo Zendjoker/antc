@@ -68,8 +68,10 @@ from room_agent.conversation import corrections  # noqa: E402
 
 mm.propose = {"profile": {}, "remove_fact_ids": [], "add_facts": [{"content": "Wants a dailies list (daily checklist or habits)",
                                                                     "category": "preference", "quote": "dailies list"}]}
-rt.recent[:] = [{"role": "user", "text": "I need a dailies list", "time": "2026-10-07 23:50:00"},
-                {"role": "assistant", "text": "Sure, what should be on your dailies list?", "time": "2026-10-07 23:50:02"}]
+from room_agent.memory import now_stamp  # noqa: E402  (a fixed date ages out of load_recent's 24 h window)
+
+rt.recent[:] = [{"role": "user", "text": "I need a dailies list", "time": now_stamp()},
+                {"role": "assistant", "text": "Sure, what should be on your dailies list?", "time": now_stamp()}]
 w.observe("I need a dailies list", "Sure, what should be on your dailies list?")
 w.flush(5)
 learned_first = "Wants a dailies list (daily checklist or habits)" in facts()

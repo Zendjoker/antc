@@ -1,0 +1,88 @@
+/* Single source of truth for ZendAgent brand and theme tokens. Values mirror the original Classic dashboard (UI/brand.css). */
+:root {
+  color-scheme: light;
+  /* Brand */
+  --zend-primary: #0866f5;
+  --zend-secondary: #009dff;
+  --zend-accent: #00e5f1;
+  --zend-cobalt: #0646da;
+  --zend-dark: #0b1224;
+  --zend-light: #f5faff;
+
+  /* Light theme (Classic) */
+  --background: #f5faff;
+  --foreground: #101828;
+  --card: #ffffff;
+  --card-foreground: #101828;
+  --popover: #ffffff;
+  --popover-foreground: #101828;
+  --primary: #0866f5;
+  --primary-foreground: #ffffff;
+  --secondary: #eaf2ff;
+  --secondary-foreground: #0646da;
+  --muted: #eef3fa;
+  --muted-foreground: #5e6b7e;
+  --accent: #eff5ff;
+  --accent-foreground: #101828;
+  --tint: #eef4ff;
+  --destructive: #d92d20;
+  --success: #079455;
+  --warning: #c01048; /* warnings are rose; the brand uses no yellow */
+  --border: #e3eaf4;
+  --input: #cfdae8;
+  --ring: #0866f5;
+  --chart-1: #0866f5;
+  --chart-2: #009dff;
+  --chart-3: #00e5f1;
+  --chart-4: #0646da;
+  --chart-5: #5e6b7e;
+  --radius: 0.875rem;
+  --zend-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 40, 90, 0.05);
+  --sidebar: #ffffff;
+  --sidebar-foreground: #344054;
+  --sidebar-primary: #0866f5;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eff5ff;
+  --sidebar-accent-foreground: #101828;
+  --sidebar-border: #e3eaf4;
+  --sidebar-ring: #009dff;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0b1224;
+  --foreground: #e8f0fc;
+  --card: #111b33;
+  --card-foreground: #e8f0fc;
+  --popover: #111b33;
+  --popover-foreground: #e8f0fc;
+  --primary: #2f86ff;
+  --primary-foreground: #04102b;
+  --secondary: #172444;
+  --secondary-foreground: #8fc4ff;
+  --muted: #16213d;
+  --muted-foreground: #92a3c0;
+  --accent: #0f2e45;
+  --accent-foreground: #e8f0fc;
+  --tint: #14234a;
+  --destructive: #f2685c;
+  --success: #3ccf9f;
+  --warning: #f2799a;
+  --border: #22304f;
+  --input: #2b3b5e;
+  --ring: #00b8ff;
+  --chart-1: #2f86ff;
+  --chart-2: #009dff;
+  --chart-3: #00e5f1;
+  --chart-4: #6f9bff;
+  --chart-5: #92a3c0;
+  --zend-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.25);
+  --sidebar: #0e172c;
+  --sidebar-foreground: #e8f0fc;
+  --sidebar-primary: #2f86ff;
+  --sidebar-primary-foreground: #04102b;
+  --sidebar-accent: #172444;
+  --sidebar-accent-foreground: #8fc4ff;
+  --sidebar-border: #22304f;
+  --sidebar-ring: #00b8ff;
+}

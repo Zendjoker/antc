@@ -3,7 +3,8 @@ Recycle Bin only). Every change is checked on disk before it's called done.
 
 Rules:
   - only inside your own folders (computer/files.py `allowed`): never system folders, never app data, never secrets files
-  - an existing file is never overwritten unless they confirmed it
+  - an existing file is never overwritten unless they confirmed it (append=True is a separate, explicit third option:
+    adds to the file instead of either refusing or replacing it)
   - delete = Recycle Bin (recoverable), and it always asks first; folders are never deleted here
   - research reports: the sources section is written by code from the pages that were really read
 """
@@ -40,8 +41,41 @@ def _safe_name(name, default_ext=".md"):
     return n
 
 
-def write(name, content, where="desktop", overwrite=False):
-    """-> tool result. Text files only (.md, .txt, .csv, .json, .html)."""
+ISSUE_HEADER = re.compile(r"^##\s*Issue\s+(\d+)\b", re.I | re.M)
+
+
+def _next_issue_number(existing_text):
+    nums = [int(n) for n in ISSUE_HEADER.findall(existing_text)]
+    return (max(nums) + 1) if nums else 1
+
+
+def _normalize(text):
+    return " ".join(str(text or "").split()).strip().lower()
+
+
+def _is_duplicate_entry(existing_text, new_body):
+    """An entry with this exact (whitespace-normalized) body is already in the file - deterministic, not fuzzy: only
+    an exact match after normalizing whitespace counts as a duplicate, so two genuinely different issues are never
+    merged just because they're topically similar. Compares bodies only (strips each entry's own timestamp line first),
+    so the same issue text added hours or days apart is still recognized as a duplicate."""
+    new_norm = _normalize(new_body)
+    if not new_norm:
+        return False
+    parts = ISSUE_HEADER.split(existing_text)
+    blocks = parts[2::2] if len(parts) > 2 else ([existing_text] if existing_text.strip() else [])
+    for block in blocks:
+        halves = block.split("\n\n", 1)  # drop the "- <timestamp>" remainder before the blank line
+        body = halves[1] if len(halves) > 1 else block
+        if _normalize(body) == new_norm:
+            return True
+    return False
+
+
+def write(name, content, where="desktop", overwrite=False, append=False):
+    """-> tool result. Text files only (.md, .txt, .csv, .json, .html).
+    append=True: adds a new numbered '## Issue N' entry to an existing file instead of refusing or replacing it
+    (an exact duplicate of an existing entry's text is not added again); if the file doesn't exist yet, it's created
+    as 'Issue 1' so the first and later calls produce the same one master file."""
     target_dir = folder(where)
     ok, why = files.allowed(target_dir / "x.txt")
     if not ok:
@@ -52,15 +86,32 @@ def write(name, content, where="desktop", overwrite=False):
     ok, why = files.allowed(path)
     if not ok:
         return f"FAILED: not saved: {why}."
-    if path.exists() and not overwrite:
-        return (f"NEEDS: {path.name} already exists in {target_dir.name}. Ask whether to replace it (then call again with "
-                "overwrite=true) or use another name.")
     text = str(content or "")
     if not text.strip():
         return "NEEDS: what to write in it."
+
+    if append:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        if _is_duplicate_entry(existing, text):
+            return f"OK: nothing added: {path.name} already has this exact entry (no duplicate created)."
+        n = _next_issue_number(existing)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        block = f"## Issue {n} - {stamp}\n\n{text.strip()}\n"
+        full = (existing.rstrip("\n") + "\n\n" + block) if existing.strip() else block
+        path.write_text(full, encoding="utf-8")
+        if not path.is_file() or path.read_text(encoding="utf-8") != full:
+            return f"UNKNOWN: not confirmed: {path.name} doesn't read back as written."
+        files.remember_saved(path)
+        return (f"OK: added issue {n} to {path.name} in your {target_dir.name} folder ({len(full)} characters total, "
+                "checked on disk).")
+
+    if path.exists() and not overwrite:
+        return (f"NEEDS: {path.name} already exists in {target_dir.name}. Ask whether to replace it (then call again with "
+                "overwrite=true) or use another name.")
     path.write_text(text, encoding="utf-8")
     if not path.is_file() or path.read_text(encoding="utf-8") != text:
         return f"UNKNOWN: not confirmed: {path.name} doesn't read back as written."
+    files.remember_saved(path)
     return f"OK: saved {path.name} in your {target_dir.name} folder ({len(text)} characters, checked on disk)."
 
 

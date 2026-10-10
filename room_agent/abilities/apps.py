@@ -30,7 +30,9 @@ register_claim("app", r"\b(opened|launched|started|closed|quit|opening|launching
                       r"|^(opened|launched|closed|quit)\b"
                       r"|\b(switched|switching)( you| it)?( over| back)? to\b(?!.{0,30}\b(voices?|mode|style)\b)"
                       r"|\b(it'?s|that'?s) (now )?in front\b"
-                      r"|^(minimized|maximized|restored|moved)\b|\b(i'?ve|i have|i)\s+(just\s+)?(minimized|maximized|restored)\b"
+                      r"|^(minimized|maximized|restored|moved)\b(?!.{0,40}\b(calendar|meeting|event|appointment|tomorrow|"
+                      r"today|(mon|tues|wednes|thurs|fri|satur|sun)day)\b)"  # (a calendar move: the calendar_move claim)
+                      r"|\b(i'?ve|i have|i)\s+(just\s+)?(minimized|maximized|restored)\b"
                       r"|\b(i'?ve|i have|i)\s+(just\s+)?moved (it|that|this|\w+) (to|over)\b"
                       r"|\b(it'?s|that'?s|\w+'s|\w+ is) (now )?(minimized|maximized|full ?screen|on (monitor|screen|display) \w+"
                       r"|on (your|the|my) \w+ (monitor|screen|display))\b")

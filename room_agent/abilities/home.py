@@ -12,7 +12,11 @@ def _status():
 
 register_group(Group("home", title="smart home control (Home Assistant)", summary=lambda: _status()[1],
                      available=lambda: _status()[0], rules=[
-    "- For smart home requests, look up entity ids with home_assistant_states if you don't already know them."]))
+    "- For smart home requests, look up entity ids with home_assistant_states if you don't already know them.",
+    "- Home Assistant is a SEPARATE, optional integration from the directly-connected Zigbee devices (home_sensors, "
+    "set_light): if Home Assistant isn't connected, say specifically that, never 'smart home isn't available' or "
+    "anything implying the Zigbee lights/sensors are also down - check their own tools/status, which don't depend on "
+    "Home Assistant at all."]))
 # ("all set, your meeting is on Friday" is not a device being set on: no "all set", and no "on <a day or date>")
 register_claim("home", r"(?<!\ball )\b(turned|switched|shut|flipped|set)\b.{0,40}\b(on|off)\b(?!\s+(monitor|screen|display|your|"
                        r"my|the|a|this|that|monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|"

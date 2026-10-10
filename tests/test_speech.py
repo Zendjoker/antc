@@ -289,8 +289,18 @@ def speak(sentences, plan=(), user="What's up?"):
 social.reset()
 speak(["Wait, you actually fixed it?"], user="I finally fixed it!!")
 sent = SENT[0]["body"]["text"] if SENT else ""
-check("ElevenLabs gets the performance script, the speaker gets audio", sent.startswith("[") and "fixed it?" in sent
-      and len(rt.engine.got) > 0, sent)
+# (Oct 9 live test: their mood used to change the voice. One steady voice now: their excitement shapes no tag, emphasis
+# or pace; only a style they chose does)
+check("ElevenLabs gets the performance script, the speaker gets audio; their mood adds no tag or emphasis",
+      "[" not in sent and "ACTUALLY" not in sent and "fixed it?" in sent and len(rt.engine.got) > 0, sent)
+_style = voices.current.style
+voices.current.style = "serious"
+speak(["Wait, you actually fixed it?"], user="I finally fixed it!!")
+voices.current.style = _style
+sent = SENT[0]["body"]["text"] if SENT else ""
+check("...the style they chose is what the voice performs", sent.startswith("[") and "serious" in sent.split("]")[0]
+      and "fixed it?" in sent, sent)
+speak(["Wait, you actually fixed it?"], user="I finally fixed it!!")
 check("...while what was said stays semantic (no tags in what's remembered or shown)",
       list(rt.turn_speech)[-1] == "Wait, you actually fixed it?" and "[" not in " ".join(rt.recent_speech))
 check("the API key travels only in the request header, never in a log", SENT[0]["headers"]["xi-api-key"] == "el-test-key-not-real"

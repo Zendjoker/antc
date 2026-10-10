@@ -36,10 +36,23 @@ register_group(Group("zigbee", HINTS, _live, "your Zigbee sensors and lights",
     "uses the only light. A clear request is never answered with a question ('off or dimmed?'): do exactly what they said. "
     "Confirm only what it reports back.",
     "- Only offer what the devices listed here can do: there is no window, blinds, AC, heater, fan or lock control "
-    "unless a device for it is listed. If they ask for one, say plainly it isn't connected."]))
+    "unless a device for it is listed. If they ask for one, say plainly it isn't connected.",
+    "- These Zigbee devices (home_sensors, set_light) connect directly through Zigbee2MQTT, independent of Home "
+    "Assistant: if Home Assistant isn't set up, these still work normally - never say a Zigbee light/sensor is "
+    "unavailable because of Home Assistant.",
+    "- The bed sensor only reports vibration on one object, and the presence sensor only reports whether someone is "
+    "somewhere in the room: NEITHER tells you WHERE in the room they are, and together they still don't prove it. Never "
+    "say or imply 'you're on the bed' / 'you're at your desk' from these alone, even if both changed recently - say "
+    "what the sensors actually show (e.g. 'the bed sensor moved a minute ago, and presence is on') and that it can't "
+    "tell you exactly where someone is. If asked to re-check, a FAILED or UNAVAILABLE result from home_sensors must be "
+    "reported as not having a fresh reading - never as 'I checked again' or any other claim of a successful recheck."]))
 register_claim("light", r"\b(made|set|changed|switched|turned)\b.{0,30}\b(red|orange|yellow|green|teal|cyan|blue|purple|"
                         r"violet|pink|magenta|white|warm|cool|rainbow)\b|\b(dimmed|brightened)\b|\b(led|strip|lights?|lamp)\b"
                         r".{0,20}\b(is|are|'s)\s+(now\s+)?(on|off|red|blue|green|purple|pink|white|dim(med)?)\b")
+register_claim("sensor_check", r"\b(i |just |let me )?(checked|re-?checked|look(ed|ing)?)\b.{0,25}\b(again|once more|a second time)\b"
+                               r"|\bchecked (the )?(sensors?|bed|door|room|presence)\b.{0,10}\bagain\b"
+                               r"|\b(just|i) (checked|looked at|read) (the )?(sensors?|bed|door|presence)\b",
+               verified_by=["home_sensors"])
 
 
 def _installed():
@@ -135,7 +148,8 @@ def _set_light(args):
         return dev
     on = args.get("on")
     payload, problem = h.light_payload(dev, on=on if isinstance(on, bool) else None, brightness=args.get("brightness"),
-                                       color=args.get("color"), white=args.get("white"), effect=args.get("effect"))
+                                       color=args.get("color"), white=args.get("white"), effect=args.get("effect"),
+                                       speed=args.get("speed"))
     if payload is None:
         return f"FAILED: {problem}."
     if args.get("toggle"):
@@ -151,7 +165,8 @@ def _verify(args, before, after):
         return False
     if args.get("on") is False:
         return after["state"] == "OFF"
-    if args.get("on") is True or args.get("brightness") or args.get("color") or args.get("white") or args.get("effect"):
+    if (args.get("on") is True or args.get("brightness") or args.get("color") or args.get("white") or args.get("effect")
+            or args.get("speed") is not None):
         return after["state"] == "ON"
     return True
 
@@ -203,15 +218,20 @@ def _reflex_ok(args):
 
 
 LIGHT = r"(?:the\s+)?(?P<device>led(?:\s+strip)?|strip|lights?|lamp)"
-tool("set_light", "Change a Zigbee light (the LED strip): on/off, brightness, color, white tone or an effect, in one call. "
-     "Leave device out if there's only one light.",
+tool("set_light", "Change a Zigbee light (the LED strip): on/off, brightness, color, white tone, an effect or its speed, "
+     "in one call. Leave device out if there's only one light.",
      params({"device": {"type": "string", "description": "Optional: which light, e.g. 'LED strip'"},
              "on": {"type": "boolean", "description": "true = on, false = off"},
              "toggle": {"type": "boolean", "description": "Flip it (on <-> off)"},
              "brightness": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Percent"},
              "color": {"type": "string", "description": "A color name (red, blue, purple, pink...) or #hex"},
              "white": {"type": "string", "enum": ["warm", "neutral", "cool", "daylight"]},
-             "effect": {"type": "string", "description": "An effect the light has, e.g. 'rainbow'"}}),
+             "effect": {"type": "string", "description": "An effect the light has, e.g. 'rainbow'"},
+             "speed": {"type": "integer", "minimum": 0, "maximum": 100, "description": "How fast an active effect "
+                                                                                       "runs, 0-100%; only meaningful "
+                                                                                       "together with (or right after) "
+                                                                                       "an effect, and only on lights "
+                                                                                       "that report supporting one"}}),
      _set_light, group="zigbee", claim=["home", "light"], event="light.changed", subject=_subject, observe=_observe,
      verify=_verify, undo=_undo, undo_is_symmetric=True,
      examples=["turn on the LED strip", "make the lights blue", "dim the strip to 20%", "warm white"],

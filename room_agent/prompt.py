@@ -66,7 +66,7 @@ def persona():
         text = config.PERSONA_FILE.read_text(encoding="utf-8")
     except OSError:
         text = "You are the voice agent living in {user}'s room, a friend more than an assistant. Talk casually and briefly."
-    return text.replace("{user}", USER_NAME).strip()
+    return text.replace("{user}", USER_NAME).replace("{name}", rt.assistant_name).strip()
 
 
 def fixed_prompt(tool_names=None, tools=None):
@@ -93,6 +93,7 @@ def _session(user_text):
 
 _OFFER = re.compile(r"[^.!?]*\b(want me to|should i|shall i|how about|i can|i could|would you like me to|instead)\b[^.!?]*[.!?]",
                     re.I)
+_IF_YOU_WANT = re.compile(r"\bif you(?:'d like| would like| want)\b", re.I)
 _CANT = re.compile(r"[^.!?]*\b(can'?t|cannot|can not|not able to|no way to|don'?t have (a|any) way|isn'?t possible)\b[^.!?]*[.!?]",
                    re.I)
 
@@ -106,7 +107,8 @@ def _already_said(user_text):
     if not replies or AFFIRM.match(user_text or ""):
         return []
     offers = [x.group(0).strip() for r in replies for x in _OFFER.finditer(r)
-              if x.group(0).rstrip().endswith("?") or "instead" in x.group(0).lower()][-2:]  # ("I can do that" isn't an offer)
+              if x.group(0).rstrip().endswith("?") or "instead" in x.group(0).lower()
+              or _IF_YOU_WANT.search(x.group(0))][-2:]  # ("I can do that" isn't an offer; "if you want, I can..." is)
     cant = [x.group(0).strip() for r in replies for x in _CANT.finditer(r)][-1:]
     out = []
     if cant:
@@ -117,11 +119,37 @@ def _already_said(user_text):
     return out
 
 
+def _cut_off(user_text):
+    """Their reply was stopped partway: the model must know why, or it invents a reason ("to check the tone")."""
+    cut = rt.last_cut
+    if not cut or not 1 <= rt.turn_no - cut[0] <= 2:
+        return []
+    said = f" after {cut[1][-80:]!r}" if cut[1] else " before any words"
+    return [f"- your_last_reply_was_cut_off{said}: it stopped because speech was picked up while you were talking (them "
+            "talking, or a sound in the room), not because you chose to. If they ask why, say exactly that, briefly; "
+            "finish the point only if it still matters."]
+
+
 def _environment(user_text):
     from room_agent.actions.context import env
 
     described = env.describe()
     return [f"- environment (live from code): {described}"] if described else []
+
+
+_DAY_WORDS = re.compile(r"\b(today|tonight|tomorrow|yesterday|week|weekend|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b", re.I)
+
+
+def _days(user_text, now):
+    """The next seven dates by name, when this turn talks about days: models slip on weekday arithmetic ("set it up for
+    tomorrow" on a Friday is Saturday, not the Monday plan just discussed)."""
+    if not _DAY_WORDS.search(f"{user_text or ''} {rt.last_reply or ''}"):
+        return []
+    days = [now + datetime.timedelta(days=i) for i in range(8)]
+    names = ["today", "tomorrow"] + [""] * 6
+    listed = "; ".join(f"{n + ' ' if n else ''}{d.strftime('%a %b')} {d.day}" for n, d in zip(names, days))
+    return [f"- days: {listed}. A weekday named alone means the next one. If the day they name doesn't match what was just "
+            "planned, say its date and ask before adding anything."]
 
 
 def runtime_context(user_text):
@@ -133,6 +161,7 @@ def runtime_context(user_text):
              f"- time: {now.strftime('%A %B %d %Y, %I:%M %p')}",
              f"- assistant_state: {rt.state.state.name.lower()} ({rt.state.state.value})",
              render_registry(capabilities(user_text))]
+    lines += _days(user_text, now)
     lines += core.context_lines(user_text)  # (each area's live facts: memory, timers, the app in conversation, ...)
     from room_agent.actions import pending
 
@@ -170,6 +199,7 @@ def _register_core_context():
 
     core.register_context(_session, order=20)
     core.register_context(_already_said, order=21)
+    core.register_context(_cut_off, order=22)
     from room_agent.conversation import corrections
 
     corrections.register()
@@ -180,6 +210,9 @@ def _register_core_context():
 
     journal.register()
     core.register_context(_environment, order=60)
+    from room_agent.llm.budget import usage_lines
+
+    core.register_context(usage_lines, order=61)
 
 
 _register_core_context()

@@ -20,9 +20,23 @@ def _tz(name):
         return datetime.datetime.now().astimezone().tzinfo
 
 
+class AmbiguousTime(ValueError):
+    """Words that name two different days or times ("this Friday" said on a Friday): asked about, never guessed.
+    `choices`: the dates (or datetimes) it could mean."""
+
+    def __init__(self, message, choices=()):
+        super().__init__(message)
+        self.choices = list(choices)
+
+
+# Relative days, one meaning everywhere (creating, moving and reading events):
+#   today / tonight / this morning|afternoon|evening -> today       tomorrow -> today + 1
+#   "Friday", "this Friday"  -> the next Friday after today ("this Friday" said ON a Friday: today or next week? asked)
+#   "next Friday"            -> the Friday after this week's, asked when this week's is still ahead (Wednesday: the
+#                               9th or the 16th?); unambiguous once this week's has passed or is today
 def _day(word, today):
-    w = word.lower().strip()
-    if w == "today":
+    w = " ".join(word.lower().split())
+    if w in ("today", "tonight"):
         return today
     if w == "tomorrow":
         return today + datetime.timedelta(days=1)
@@ -30,15 +44,29 @@ def _day(word, today):
         return today - datetime.timedelta(days=1)
     for i, name in enumerate(WEEKDAYS):
         if w.endswith(name) or w == name[:3]:
-            ahead = (i - today.weekday()) % 7
-            if w.startswith("next "):
-                ahead = ahead or 7
-            return today + datetime.timedelta(days=ahead)
+            ahead = (i - today.weekday()) % 7  # 0: it's today
+            coming = today + datetime.timedelta(days=ahead or 7)
+            if w.startswith("this ") and ahead == 0:
+                _ask(word, [today, coming])
+            if w.startswith("next ") and i > today.weekday():  # (this week's still ahead: that one, or the week after?)
+                _ask(word, [coming, coming + datetime.timedelta(days=7)])
+            return coming
     return None
 
 
-def _clock(text):
-    """'7pm' / '19:00' / '7:30 am' / '3' (afternoon, as people mean it) -> (hour, minute) or None."""
+def _ask(word, days):
+    said = " or ".join(f"{d.strftime('%a %b')} {d.day}" for d in days)
+    raise AmbiguousTime(f"'{word}' could mean {said}", days)
+
+
+# Part of the day: which day it is ("tonight" = today) and which half of the clock a bare hour is on ("tonight at 8")
+_PART_WORDS = re.compile(r"\b(?:this\s+)?(morning|afternoon|evening|tonight|night)\b")
+_PM_PARTS = {"afternoon", "evening", "tonight", "night"}
+
+
+def _clock(text, part=None):
+    """'7pm' / '19:00' / '7:30 am' / '3' (afternoon, as people mean it) -> (hour, minute) or None. `part`: the part of
+    the day they named ('tonight at 8' is 20:00, 'in the morning at 6' is 06:00)."""
     m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b", text.lower())
     if not m:
         return None
@@ -49,16 +77,19 @@ def _clock(text):
         h += 12
     elif ap == "am" and h == 12:
         h = 0
-    elif not ap and 1 <= h <= 6:
+    elif not ap and part in _PM_PARTS and 1 <= h <= 11:
+        h += 12  # "tonight at 8", "Friday evening at 7"
+    elif not ap and part is None and 1 <= h <= 6:
         h += 12  # "at 3" means the afternoon
     return h, mi
 
 
-def parse_time(text, tz, base=None):
-    """ISO datetime / ISO date / 'tomorrow 3pm' / 'friday at 7' / '3' (on `base`'s day) -> aware datetime, or a date
-    (all day) when no time is given. Raises ValueError."""
+def parse_time(text, tz, base=None, now=None):
+    """ISO datetime / ISO date / 'tomorrow 3pm' / 'friday at 7' / 'tonight at 8' / '3' (on `base`'s day) -> aware
+    datetime, or a date (all day) when no time is given. Raises ValueError (AmbiguousTime when it could mean two
+    days). Relative words are read in the calendar's own time zone (`tz`)."""
     text = str(text or "").strip()
-    now = datetime.datetime.now(tz)
+    now = now or datetime.datetime.now(tz)  # (`now`: fixed by tests; always the calendar's local time)
     try:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
             return datetime.date.fromisoformat(text)
@@ -66,16 +97,24 @@ def parse_time(text, tz, base=None):
         return d.replace(tzinfo=tz) if d.tzinfo is None else d.astimezone(tz)
     except ValueError:
         pass
-    low = text.lower()
+    low = " ".join(text.lower().split())
+    part_m = _PART_WORDS.search(low)
+    part = part_m[1] if part_m else None
+    if part_m:
+        low = low[:part_m.start()] + " " + low[part_m.end():]
     day = None
-    for word in ["today", "tomorrow", "yesterday"] + [f"next {d}" for d in WEEKDAYS] + WEEKDAYS:
+    for word in ["today", "tomorrow", "yesterday"] + [f"{w} {d}" for w in ("next", "this") for d in WEEKDAYS] + WEEKDAYS:
         if re.search(rf"\b{word}\b", low):
             day = _day(word, now.date())
             low = re.sub(rf"\b{word}\b", " ", low)
             break
-    clock = _clock(low)
+    if day is None and part_m and (part == "tonight" or part_m[0].startswith("this ")):
+        day = now.date()  # "tonight", "this evening"
+    clock = _clock(low, part)
     if day is None and clock is None:
         raise ValueError(f"can't read the time '{text}'")
+    if clock is None and part:  # ("tonight" alone: a time is needed, not an all-day event)
+        raise AmbiguousTime(f"'{text}' has no time: ask what time")
     if day is None:
         day = (base or now).date() if isinstance(base or now, datetime.datetime) else base
     if clock is None:
@@ -83,9 +122,9 @@ def parse_time(text, tz, base=None):
     return datetime.datetime.combine(day, datetime.time(*clock), tz)
 
 
-def period(when, tz):
+def period(when, tz, now=None):
     """'today' / 'tomorrow' / 'this week' / 'next week' / 'weekend' / 'friday afternoon' / ISO date -> (start, end)."""
-    now = datetime.datetime.now(tz)
+    now = now or datetime.datetime.now(tz)
     w = str(when or "today").lower().strip()
     part = next((p for p in PARTS if p in w), None)
     w = w.replace(part, "").strip() if part else w

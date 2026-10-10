@@ -18,6 +18,7 @@ the goal honestly. It does NOT plan, execute, verify or check permissions itself
 """
 
 import logging
+import re
 import time
 
 from room_agent import config
@@ -32,6 +33,7 @@ log = logging.getLogger("room-agent")
 _state = {"goal": None, "waiting": [], "recent": [], "store": None, "failures": {}, "turn": None}
 WAITING_ON_USER = ("asked them something", "waiting for their answer or their yes", "waiting for them to finish saying it",
                    "they interrupted")
+_HOW_ABOUT = re.compile(r"^\W*(?:how|what) about\b", re.I)  # ("how about 7?" still answers the question)
 
 
 def store():
@@ -76,7 +78,11 @@ def begin_turn(text):
     level, why = classify(text, reflex_hit=bool(hit))
     # A goal waiting for them (BLOCKED) continues only with an answer-like message; a new self-contained request
     # ("put Spotify on the right monitor and...") starts its own goal.
-    continues = bool(goal and goal.status == BLOCKED and goal.reason in WAITING_ON_USER and level == FAST and not hit)
+    # Only the very next message, and not a question of its own ("Why did you cut off?" after Jarvis asked what tone
+    # they want is a new topic): an old goal must not steer later, unrelated turns.
+    answers = not str(text or "").rstrip().endswith("?") or bool(_HOW_ABOUT.match(text or ""))
+    continues = bool(goal and goal.status == BLOCKED and goal.reason in WAITING_ON_USER and level == FAST and not hit
+                     and answers and getattr(goal, "last_turn", rt.turn_no - 1) == rt.turn_no - 1)
     if continues:
         level, why = DELIBERATE, "continues the goal in progress"
     if constraints and level in (REFLEX, FAST) and goal:
@@ -94,6 +100,7 @@ def begin_turn(text):
             if WAITING_CUES.search(text or ""):
                 goal.trigger = text
         goal.turns += 1
+        goal.last_turn = rt.turn_no
         goal.constraints += [c for c in constraints if all(c.text != k.text for k in goal.constraints)]
         if config.GOAL_UNDERSTANDING:
             from room_agent.cognition import understand

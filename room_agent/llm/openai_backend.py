@@ -132,7 +132,18 @@ def relevant_tools(tools, history):
                             or bool(pending and pending.group == name))
         except Exception:
             wanted[name] = True
-    return [t for t in tools if wanted.get(getattr(core.REGISTRY.get(t["name"]), "group", None), True)]
+    out = [t for t in tools if wanted.get(getattr(core.REGISTRY.get(t["name"]), "group", None), True)]
+    from room_agent.conversation import policy
+
+    if getattr(getattr(rt.turn, "policy", None), "kind", "") == policy.ADVICE:
+        # advice is answered in words: the tools the executor would refuse on this turn (executor._not_asked) aren't
+        # offered, so there's no wasted tool round and second call
+        def refused(t):
+            cap = core.REGISTRY.get(t["name"])
+            return bool(cap and cap.intent is not None and cap.changes_state and not (pending and pending.name == cap.name))
+
+        out = [t for t in out if not refused(t)]
+    return out
 
 
 def openai_tools(tools):

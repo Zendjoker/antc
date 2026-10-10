@@ -31,6 +31,7 @@ def stop_for_interruption(history, spoken):
         print("Agent:", said, "[interrupted]", flush=True)
     log.info("stopped answering: you interrupted")
     rt.turn_interrupted = True
+    rt.last_cut = (rt.turn_no, said)  # (so "why did you cut off?" gets the real reason: prompt._cut_off)
 
 
 def new_guard():

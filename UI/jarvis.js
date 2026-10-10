@@ -3,6 +3,7 @@
 (() => {
   // ---------------------------------------------------------------- icons (Lucide-style, 24px grid, 1.75 stroke)
   const P = {
+    shield: '<path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z"/><path d="m8 12 3 3 5-6"/>',
     home: '<path d="m3 9.5 9-7 9 7V20a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>',
     chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     memory: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/>',
@@ -96,7 +97,7 @@
   // ---------------------------------------------------------------- toasts
   function toast(message, kind = "ok") {
     const t = el("div", `toast ${kind}`);
-    t.append(ico(kind === "err" ? "alert" : "check"), el("span", null, message));
+    t.append(ico(kind === "err" ? "alert" : kind === "pending" ? "clock" : "check"), el("span", null, message));
     $("#toasts").append(t);
     setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 250); }, kind === "err" ? 5000 : 3000);
   }
@@ -108,23 +109,33 @@
     if (!PAGES.includes(page)) page = "home";
     document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === `page-${page}`));
     document.querySelectorAll(".sb-nav a").forEach(a => a.classList.toggle("active", a.dataset.page === page));
+    document.querySelectorAll(".sb-nav a").forEach(a => { if (a.dataset.page === page) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+    $("#current-page").textContent = page === "home" ? "Overview" : cap(page);
+    $(".hero-art").dataset.context = page;
+    document.documentElement.dataset.page = page;
+    if (page !== "home") document.dispatchEvent(new Event("jarvis:leave"));
     $(".main").classList.toggle("chat-mode", page === "chat");
     document.body.classList.remove("nav-open");
-    document.title = page === "home" ? "Jarvis" : `${cap(page)} · Jarvis`;
+    $("#menu-btn").setAttribute("aria-expanded", "false");
+    document.title = page === "home" ? "ZEND" : `${cap(page)} · ZEND`;
     if (page === "memory") loadKnowledge();
     if (page === "connections") loadConnections();
-    if (page === "status") loadStatus();
+    if (page === "status") loadStatus().catch(() => { $("#status-cards").textContent = "Configuration unavailable. Reopen Status to retry."; });
+    if (page === "settings") loadSettings().catch(e => showBanner(e.message + " Reopen Settings to retry.", true));
     if (page === "missions") loadMission();
     if (page === "chat") { scrollFeed(true); setTimeout(() => $("#chat-input").focus(), 50); }
     if (location.hash.slice(1) !== page) history.replaceState(null, "", `#${page}`);
   }
   window.addEventListener("hashchange", () => show(location.hash.slice(1)));
-  $("#menu-btn").addEventListener("click", () => document.body.classList.add("nav-open"));
-  $("#scrim").addEventListener("click", () => document.body.classList.remove("nav-open"));
+  function closeNavigation() { document.body.classList.remove("nav-open"); $("#menu-btn").setAttribute("aria-expanded", "false"); $("#menu-btn").focus(); }
+  $("#menu-btn").addEventListener("click", () => { document.body.classList.add("nav-open"); $("#menu-btn").setAttribute("aria-expanded", "true"); $("#open-palette").focus(); });
+  $("#scrim").addEventListener("click", closeNavigation);
 
   // ---------------------------------------------------------------- live state
   const STATES = {
-    offline: ["Offline", "Not running"],
+    offline: ["Unavailable", "ZEND is not reachable"],
+    disconnected: ["Disconnected", "Dashboard connection lost · reconnecting"],
+    connecting: ["Connecting", "Checking ZEND"],
     starting: ["Starting up", "One moment"],
     wake_word_only: ["Standing by", "Say “Hey Jarvis”"],
     quiet: ["Quiet mode", "Silent until you say “Hey Jarvis”"],
@@ -134,27 +145,47 @@
     idle_check: ["Speaking", "Answering out loud"],
     call: ["On a call", "Talking on your phone"],
   };
-  let live = { online: false }, polledAt = 0, pending = null, volumeDragging = false;
+  let live = { online: false }, polledAt = 0, pending = null, volumeDragging = false, linkState = "connecting";
+  let pollFlight = null, chatError = "", uncertainCommand = "", latestCommandReply = "", latestReplyBaseline = "null", lastSentText = "";
+  const actionFlights = new Map();
 
   async function api(path, body) {
-    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Jarvis": "1" }, body: JSON.stringify(body || {}) });
-    let data = {};
-    try { data = await r.json(); } catch { /* not JSON */ }
-    if (!r.ok && !data.message) data.message = data.error || "Jarvis couldn't do that.";
-    return { ok: r.ok, ...data };
+    try {
+      const { data, status } = await requestJSON(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Jarvis": "1" }, body: JSON.stringify(body || {}) }, path === "/api/command" ? 95000 : 35000);
+      if (data.ok === false || data.error) return { ...data, ok: false, outcome: "failed", message: data.message || data.error || "Request rejected." };
+      const valid = path === "/api/command" ? typeof data.reply === "string" : typeof data.ok === "boolean";
+      if (!valid) return { ok: false, outcome: "unknown", message: "Unexpected response. Outcome unknown; check current state before retrying." };
+      return { ...data, ok: true, outcome: status === 202 ? "accepted" : "completed" };
+    } catch (e) { return { ok: false, outcome: e.unknown === false ? "failed" : "unknown", message: e.unknown === false ? e.message : "Outcome unknown. The connection failed or the response was invalid. Check current state before retrying." }; }
   }
-  async function act(body, quiet) {
-    const r = await api("/api/action", body);
-    if (!quiet || !r.ok) toast(r.message || (r.ok ? "Done" : "That didn't work"), r.ok ? "ok" : "err");
-    poll();
-    return r;
+  function act(body, quiet) {
+    const key = JSON.stringify(body);
+    if (actionFlights.has(key)) return actionFlights.get(key);
+    const operation = (async () => {
+      const r = await api("/api/action", body);
+      coreFeedback(r.outcome);
+      if (!quiet || !r.ok) toast(r.outcome === "accepted" ? "Request accepted; completion is pending." : r.message || (r.ok ? "ZEND confirmed the request." : "Request failed."), r.ok && r.outcome === "completed" ? "ok" : r.ok ? "pending" : "err");
+      await poll(true);
+      return r;
+    })().finally(() => { actionFlights.delete(key); $("#action-status").hidden = actionFlights.size === 0; });
+    actionFlights.set(key, operation);
+    $("#action-status").hidden = false;
+    $("#action-status").textContent = "Sending dashboard request…";
+    return operation;
   }
 
-  async function poll() {
-    try { live = await (await fetch("/api/live", { cache: "no-store" })).json(); }
-    catch { live = { online: false }; }
-    polledAt = Date.now();
-    render();
+  function poll(fresh = false) {
+    // A post-action refresh waits for the older flight, then takes a new snapshot.
+    if (pollFlight) return fresh ? pollFlight.then(() => poll()) : pollFlight;
+    pollFlight = (async () => {
+      try {
+        const { data } = await requestJSON("/api/live", { cache: "no-store" }, 5000);
+        if (typeof data.online !== "boolean" || (data.online && (!data.state || typeof data.state.name !== "string"))) throw new Error("Invalid live snapshot");
+        live = data; linkState = "connected"; polledAt = Date.now();
+      } catch { live = { ...live, online: false }; linkState = "disconnected"; }
+      render();
+    })().finally(() => { pollFlight = null; });
+    return pollFlight;
   }
 
   function render() {
@@ -163,14 +194,16 @@
   }
 
   function stateKey() {
+    if (linkState !== "connected") return linkState;
     if (!live.online) return "offline";
-    if (pending) return "processing";
     if (live.in_call) return "call";
     return (live.state && live.state.name) || "wake_word_only";
   }
   function renderPresence() {
     const key = stateKey();
     const [label, sub] = STATES[key] || [cap(key), ""];
+    renderCore(key);
+    $("#offline-banner .grow").textContent = linkState === "disconnected" ? "Dashboard connection lost. Reconnecting automatically; your drafts are retained." : "ZEND is unavailable. It may be stopped or unreachable.";
     document.querySelectorAll(".orb").forEach(o => { o.dataset.state = key; });
     document.querySelectorAll('[data-bind="state"]').forEach(n => { n.textContent = label; });
     document.querySelectorAll('[data-bind="sub"]').forEach(n => { n.textContent = sub; });
@@ -195,7 +228,27 @@
       b.title = live.undo ? `Undo: ${live.undo}` : "Nothing to undo";
     }
     $("#chat-send").disabled = !live.online || !!pending;
+    $("#stop-btn").disabled = !live.online;
+    document.querySelectorAll(".needs-live").forEach(b => { b.disabled = !live.online || !!pending; });
     document.querySelectorAll("#home-ask .send").forEach(b => { b.disabled = !live.online || !!pending; });
+  }
+
+  function renderCore(key) {
+    const core = $(".hero-art");
+    const executing = live.online && (live.tasks || []).some(t => String(t.state).toUpperCase() === "RUNNING");
+    if (["offline", "disconnected", "connecting"].includes(key)) delete core.dataset.feedback;
+    core.dataset.phase = ["offline", "disconnected", "connecting"].includes(key) ? key : ["speaking", "listening", "processing", "idle_check", "call", "error", "interrupted", "quiet"].includes(key) ? key : executing ? "executing" : key;
+    $("#core-context").textContent = executing ? "TASK RUNNING" : "RUNTIME STATE";
+    if (typeof window !== "undefined") window.JarvisHUD?.update(live, core.dataset.phase);
+  }
+
+  let coreFeedbackTimer;
+  function coreFeedback(outcome) {
+    if (!live.online || !["completed", "failed"].includes(outcome)) return;
+    const core = $(".hero-art");
+    clearTimeout(coreFeedbackTimer);
+    core.dataset.feedback = outcome;
+    coreFeedbackTimer = setTimeout(() => { delete core.dataset.feedback; }, 1600);
   }
 
   // ---------------------------------------------------------------- home
@@ -204,11 +257,84 @@
     const part = h < 5 ? "Good evening" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
     return live.user ? `${part}, ${cap(live.user)}` : part;
   }
+  function consoleReply() {
+    const reply = live.online && (live.conversation || []).filter(m => m.role === "assistant").at(-1);
+    if (!live.online) return "";
+    if (latestCommandReply && JSON.stringify(reply || null) !== latestReplyBaseline) latestCommandReply = "";
+    return chatError || latestCommandReply || (reply ? reply.text : "");
+  }
   function renderHome() {
+    $("#jarvis-reply").textContent = consoleReply();
     $("#greeting").textContent = greeting();
     const d = new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
     $("#home-sub").textContent = [d, live.online && live.location].filter(Boolean).join("  ·  ");
-    renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch(); renderLists(); renderTasks();
+    $("#summary-connections").textContent = live.online ? cap(String(live.connections?.google || "Unknown").replace(/\s*\(.*\)/, "")) : "Unavailable";
+    $("#summary-tasks").textContent = live.online ? (live.tasks || []).filter(t => ["RUNNING", "WAITING", "PENDING", "QUEUED"].includes(String(t.state || "").toUpperCase())).length : "—";
+    $("#summary-timers").textContent = live.online ? (live.timers || []).length : "—";
+    $("#summary-missions").textContent = live.online ? (live.missions || []).length : "—";
+    renderVoice(); renderMedia(); renderTimers(); renderPhone(); renderEnv(); renderDevices(); renderResearch(); renderLists(); renderTasks();
+  }
+
+  // The running agent reports the real provider, including a local voice fallback.
+  let voiceCatalogue = null, voiceBusy = false, voiceSignature = "", voiceDraft = null, voiceTarget = null;
+  function renderVoice() {
+    const data = live.online && live.voice_settings || voiceCatalogue;
+    const select = $("#voice-select"), button = $("#voice-apply");
+    if (!data || !Array.isArray(data.providers)) { button.disabled = true; select.disabled = true; return; }
+    const signature = JSON.stringify([data.provider, data.selected, data.providers]);
+    if (signature !== voiceSignature) {
+      voiceSignature = signature; select.innerHTML = "";
+      for (const provider of data.providers) {
+        const group = el("optgroup"); group.label = provider.name;
+        group.disabled = provider.id !== data.provider;
+        for (const voice of provider.voices) {
+          const option = el("option", null, `${voice.name} — ${voice.description}`);
+          option.value = voice.id; option.dataset.name = voice.name; option.dataset.provider = provider.id;
+          option.selected = voice.id === data.selected && provider.id === data.provider; group.append(option);
+        }
+        select.append(group);
+      }
+      if (![...select.options].some(o => o.value === data.selected)) {
+        const custom = el("option", null, `Current: ${data.name}`); custom.value = data.selected; custom.selected = true; select.prepend(custom);
+      }
+    }
+    const active = live.online && live.voice_settings && data.enabled;
+    if (voiceDraft && voiceDraft.provider === data.provider && [...select.options].some(o => o.value === voiceDraft.id)) select.value = voiceDraft.id;
+    $("#voice-current").textContent = `${active ? "Active" : "Catalogue selection"}: ${data.name}`;
+    $("#voice-provider").textContent = data.provider === "piper" ? "Piper · local" : "ElevenLabs";
+    const ready = live.online && live.voice_settings && data.enabled;
+    $("#voice-note").textContent = !live.online ? "Active voice unavailable. Browse the catalogue; its selection may be stale." : !live.voice_settings ? "Active voice unavailable. Restart ZEND to enable the picker." : !data.enabled ? "Voice output is disabled in this session." : data.fallback ? "Local fallback is active. Saved choice cannot be verified." : "Applies to the next reply. Saved choice cannot be verified. Change providers in Settings.";
+    if (voiceTarget && active && data.provider === voiceTarget.provider && data.selected === voiceTarget.id) {
+      $("#voice-feedback").textContent = `Active voice confirmed: ${data.name}. Persistence is unconfirmed.`;
+      $("#voice-feedback").className = "voice-feedback success";
+      voiceTarget = null; voiceDraft = null;
+    }
+    select.disabled = voiceBusy;
+    button.disabled = !ready || voiceBusy || select.value === data.selected;
+    button.textContent = voiceBusy ? "Switching…" : "Use voice";
+    $("#voice-form").setAttribute("aria-busy", String(voiceBusy));
+  }
+  $("#voice-select").addEventListener("change", () => { const option = $("#voice-select").selectedOptions[0]; voiceDraft = { id: option.value, provider: option.dataset.provider }; $("#voice-feedback").classList.add("hidden"); renderVoice(); });
+  $("#voice-settings-link").addEventListener("click", e => { e.preventDefault(); show("settings"); $("#settings-search").value = "voice"; filterSettings(); });
+  $("#voice-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    if (voiceBusy || $("#voice-apply").disabled) return;
+    const selected = $("#voice-select").selectedOptions[0];
+    voiceTarget = { id: selected.value, provider: selected.dataset.provider };
+    voiceBusy = true; renderVoice();
+    try {
+      const result = await api("/api/action", { do: "set_voice", provider: selected.dataset.provider, name: selected.dataset.name });
+      const feedback = $("#voice-feedback");
+      if (result.outcome === "failed") voiceTarget = null;
+      feedback.textContent = result.ok ? "Request acknowledged. Waiting for the active voice to be confirmed…" : result.message;
+      feedback.className = `voice-feedback ${result.ok ? "pending" : "error"}`;
+      await poll(true);
+      if (voiceTarget && result.ok) feedback.textContent = "Active voice not confirmed yet. Check the active label before retrying.";
+    } finally { voiceBusy = false; renderVoice(); }
+  });
+  async function loadVoiceCatalogue() {
+    try { const { data } = await requestJSON("/api/voices"); if (!Array.isArray(data.providers)) throw new Error(); voiceCatalogue = data; renderVoice(); }
+    catch { $("#voice-note").textContent = "Couldn't load voices. Refresh the page to try again."; $("#voice-provider").textContent = "Unavailable"; }
   }
 
   function renderMedia() {
@@ -218,7 +344,7 @@
       box.dataset.sig = sig;
       box.innerHTML = "";
       if (!np || !np.title) {
-        box.append(emptyState("music", "Nothing playing", live.online ? "Play something in Spotify or any media app" : "Waiting for Jarvis"));
+        box.append(emptyState("music", live.online ? "Nothing playing" : "Media unavailable", live.online ? "Play something in Spotify or any media app" : "Reconnect to see playback state"));
       } else {
         const t = el("div", "track"), cover = el("div", "cover"), txt = el("div", "track-text");
         cover.append(ico("music"));
@@ -258,7 +384,7 @@
     const items = (live.online && live.timers) || [];
     const gone = Math.floor((Date.now() - polledAt) / 1000);
     box.innerHTML = "";
-    if (!items.length) { box.append(emptyState("timer", "No timers", live.online ? "Start one here, or just ask Jarvis" : "Waiting for Jarvis")); return; }
+    if (!items.length) { box.append(emptyState("timer", live.online ? "No timers" : "Timers unavailable", live.online ? "Start one here, or just ask ZEND" : "Reconnect to see timers and alarms")); return; }
     for (const t of items) {
       const left = Math.max(0, t.in_s - gone);
       const it = el("div", "titem"), r = el("div", "titem-row"), txt = el("div", "titem-text");
@@ -297,8 +423,8 @@
   });
   async function startTimer(seconds, label) {
     const r = await act({ do: "timer", seconds, label: (label || "").trim() }, true);
-    if (r.ok) {
-      toast(`Timer started${label ? `: ${label}` : ""}`);
+    if (r.outcome === "completed") {
+      toast(r.message || "ZEND confirmed the timer request.");
       $("#new-timer").classList.add("hidden"); $("#nt-min").value = ""; $("#nt-label").value = "";
     }
   }
@@ -309,27 +435,23 @@
     t.className = `tag push ${p.in_call ? "green" : p.ready ? "green" : p.mode ? "amber" : ""}`;
     t.textContent = !live.online ? "Offline" : p.in_call ? "On a call" : p.ready ? "Ready" : p.mode ? "Needs setup" : "Off";
     const kv = $("#phone-kv"); kv.innerHTML = "";
-    kv.append(row("Your number", p.number || "Not set", "phone"),
-              row("Driving", p.driving ? `Yes${p.driving_source ? ` (${p.driving_source})` : ""}` : "No", "car", p.driving ? "amber" : null),
-              row("Calls you about", "Urgent things only", "bell"));
+    kv.append(row("Your number", live.online ? p.number || "Not set" : "Unavailable", "phone"),
+              row("Driving", !live.online ? "Unavailable" : p.driving ? `Yes${p.driving_source ? ` (${p.driving_source})` : ""}` : "No", "car", p.driving ? "amber" : null),
+              row("Calls you about", live.online ? "Urgent things only" : "Unavailable", "bell"));
     const b = $("#call-btn");
     b.disabled = !p.ready || p.in_call;
-    b.title = p.ready ? "Jarvis calls your phone now" : "Set up the phone line first (see phone.md)";
+    b.title = p.ready ? "ZEND calls your phone now" : "Set up the phone line first (see phone.md)";
   }
   $("#call-btn").addEventListener("click", () => {
-    if (confirm(`Jarvis will call your phone (${(live.phone || {}).number || "your number"}) now. Twilio charges a few cents per call. Continue?`))
+    if (confirm(`ZEND will call your phone (${(live.phone || {}).number || "your number"}) now. Twilio charges a few cents per call. Continue?`))
       act({ do: "call_me" });
   });
 
   function renderEnv() {
     const kv = $("#env-kv"); kv.innerHTML = "";
-    const c = (live.online && live.connections) || {};
-    const g = c.google || "—", gOk = String(g).startsWith("connected");
     kv.append(row("Location", live.online ? live.location || "Unknown" : "—", "pin"),
               row("App in focus", live.online ? live.app || "—" : "—", "window"),
-              row("Browser", live.online && live.browser ? `${live.browser.name} · ${live.browser.site || live.browser.title}` : "—", "window"),
-              row("Google", gOk ? "Connected" : cap(g), "mail", gOk ? "green" : null),
-              row("Brain", live.online ? live.brain : "—", "sparkle"));
+              row("Browser", live.online && live.browser ? `${live.browser.name} · ${live.browser.site || live.browser.title}` : "—", "window"));
   }
 
   // ---- tasks: every request that did something, step by step (from the task records)
@@ -337,33 +459,40 @@
                       INTERRUPTED: "amber", FAILED: "red", CANCELED: "" };
   function renderTasks() {
     const items = (live.online && live.tasks) || [], box = $("#tasks"), tag = $("#tasks-tag");
-    const sig = JSON.stringify(items);
+    const missionBox = $("#overview-missions");
+    missionBox.innerHTML = "";
+    const missions = live.online ? live.missions || [] : [];
+    if (!missions.length) missionBox.append(el("p", "compact-empty", live.online ? "No missions yet." : "Mission state unavailable."));
+    for (const m of missions) { const a = el("a", "mission-preview"); a.href = "#missions"; a.append(el("b", null, m.title), tagLabel(m.state)); missionBox.append(a); }
+    const sig = JSON.stringify([live.online, items]);
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.innerHTML = "";
-    tag.className = "tag push"; tag.textContent = items.length ? `${items.length} recent` : "None yet";
-    if (!items.length) { box.append(emptyState("activity", "No tasks yet", live.online ? "Anything Jarvis does shows up here" : "Waiting for Jarvis")); return; }
+    tag.className = "tag push"; tag.textContent = !live.online ? "Unavailable" : items.length ? `${items.length} recent` : "None yet";
+    if (!items.length) { box.append(emptyState("activity", live.online ? "No tasks yet" : "Tasks unavailable", live.online ? "Anything ZEND does shows up here" : "Reconnect to see current work")); return; }
     for (const t of items) {
       const row = el("div", "task-row");
       const head = el("div", "task-head");
       head.append(el("span", `tag ${TASK_TONE[t.state] || ""}`, t.state.toLowerCase()), el("span", "task-goal", t.goal || "(request)"),
                   el("span", "task-meta", `${t.seconds}s${t.cost_usd ? ` · $${t.cost_usd.toFixed(4)}` : ""}`));
-      const steps = el("div", "task-steps");
+      const detail = el("details", "task-detail"), steps = el("div", "task-steps");
+      detail.append(el("summary", null, `${t.steps.length} step${t.steps.length === 1 ? "" : "s"} · details`), steps);
       t.steps.forEach((s, i) => steps.append(el("span", `step ${TASK_TONE[s.state] || ""}`,
         `${i + 1}. ${s.tool} ${s.state.toLowerCase()}${s.verified ? " ✓" : ""}${s.why ? ` (${s.why})` : ""}`)));
-      row.append(head, steps);
+      row.append(head, detail);
       for (const line of [...(t.notes || []), ...(t.recovered || []).map(x => "recovered: " + x),
                           ...(t.supervisor || []).map(x => "supervisor: " + x)]) row.append(el("div", "task-note", line));
       box.append(row);
     }
   }
+  function tagLabel(state) { return el("span", "tag", String(state || "unknown").replace(/_/g, " ")); }
 
   // ---- missions (from missions.db, through the running Jarvis): progress, leads with evidence, demos, drafts, approvals
   const M_TONE = { running: "blue", completed: "green", finished_with_problems: "amber", paused: "amber", paused_budget: "amber", paused_daily: "amber",
                    interrupted: "amber", cancelled: "", planned: "blue" };
   const S_TONE = { completed: "green", skipped: "", running: "blue", pending: "", failed: "red", blocked: "red", cancelled: "" };
   const W_TONE = { none_found: "amber", social_only: "amber", directory_only: "amber", broken: "red", poor: "amber", ok: "green" };
-  let missionId = "", missionAt = 0, missionSig = "";
+  let missionId = "", missionAt = 0, missionSig = "", missionRequest = 0, missionDrawn = "";
   function renderMissions() {
     const items = (live.online && live.missions) || [], pick = $("#mission-pick"), empty = $("#mission-empty");
     if (!pick) return;
@@ -375,11 +504,12 @@
       if (!items.some(m => m.id === missionId)) missionId = items.length ? items[0].id : "";
       pick.value = missionId;
     }
-    empty.innerHTML = "";
-    $("#mission-body").hidden = !items.length;
+    $("#mission-body").hidden = !items.length || missionDrawn !== missionId;
     pick.hidden = !items.length;
     if (!items.length) {
-      empty.append(emptyState("route", "No missions yet", live.online ? 'Say "find 20 restaurants in San Francisco without a good website and build demos for the best"' : "Waiting for Jarvis"));
+      missionRequest++; missionDrawn = "";
+      empty.innerHTML = "";
+      empty.append(emptyState("route", "No missions yet", live.online ? 'Say "find 20 restaurants in San Francisco without a good website and build demos for the best"' : "Waiting for ZEND"));
       return;
     }
     const cur = items.find(m => m.id === missionId);
@@ -392,25 +522,43 @@
   async function loadMission() {
     if (!missionId) { const items = (live.online && live.missions) || []; missionId = items.length ? items[0].id : ""; }
     if (!missionId) return;
+    const requestedId = missionId, generation = ++missionRequest;
     missionAt = Date.now();
+    $("#mission-body").setAttribute("aria-busy", "true");
+    if (missionDrawn !== requestedId) $("#mission-body").hidden = true;
+    $("#mission-empty").textContent = "Loading mission…";
+    $("#mission-body").querySelectorAll("button").forEach(b => { b.disabled = true; });
     let d;
     try {
-      const r = await fetch(`/api/missions?id=${encodeURIComponent(missionId)}`, { cache: "no-store" });
-      d = await r.json();
-      if (!r.ok || d.error) return;
-    } catch { return; }
+      const result = await requestJSON(`/api/missions?id=${encodeURIComponent(requestedId)}`, { cache: "no-store" });
+      d = result.data;
+      if (!d.mission || d.error || !Array.isArray(d.leads) || !Array.isArray(d.steps) || !Array.isArray(d.outreach) || !Array.isArray(d.events)) throw new Error("Invalid mission response.");
+      if (d.mission.id && d.mission.id !== requestedId) throw new Error("Mission response did not match the selection.");
+    } catch (e) {
+      if (generation === missionRequest && requestedId === missionId) {
+        $("#mission-body").hidden = true; $("#mission-body").setAttribute("aria-busy", "false");
+        const retry = el("button", "btn", "Retry loading mission"); retry.addEventListener("click", loadMission);
+        $("#mission-empty").textContent = e.message; $("#mission-empty").append(retry);
+      }
+      return;
+    }
+    if (generation !== missionRequest || requestedId !== missionId || !live.online) return;
+    missionDrawn = requestedId; $("#mission-empty").textContent = "";
+    $("#mission-body").hidden = false; $("#mission-body").setAttribute("aria-busy", "false");
     drawMission(d);
   }
 
   function mBtn(label, icon, body, cls) {
+    const targetId = missionId;
     const b = el("button", `btn sm ${cls || ""}`);
     b.type = "button";
     if (icon) b.append(ico(icon));
     b.append(document.createTextNode(label));
     b.addEventListener("click", async () => {
+      if (b.disabled || targetId !== missionId || missionDrawn !== targetId) return;
       b.disabled = true;
-      const r = await act({ id: missionId, ...body });
-      if (r && r.url && /^http:\/\/127\.0\.0\.1:\d+\//.test(r.url)) window.open(r.url, "_blank", "noopener");
+      const r = await act({ id: targetId, ...body });
+      if (r.outcome === "completed" && r.url && /^http:\/\/127\.0\.0\.1:\d+\//.test(r.url)) window.open(r.url, "_blank", "noopener");
       b.disabled = false;
       loadMission();
     });
@@ -550,7 +698,7 @@
     // needs your decision (uncertain steps, unknown Gmail drafts, hand-edit conflicts, estimated charges)
     const ACTION_LABEL = { retry: "Retry (may cost again)", accept: "Accept as is", check: "Check Gmail again",
                            mark_created: "It's in Gmail", mark_not_created: "It's not in Gmail",
-                           keep_mine: "Keep my edits", use_jarvis: "Use Jarvis's version" };
+                           keep_mine: "Keep my edits", use_jarvis: "Use ZEND's version" };
     const at = $("#mission-attention");
     at.innerHTML = "";
     const items = d.attention || [];
@@ -621,13 +769,13 @@
   // ---- emergency stop
   $("#stop-btn").addEventListener("click", async () => {
     const r = await act({ do: "emergency_stop" }, true);
-    if (r && r.message) toast(r.message);
+    if (r.ok) toast(r.outcome === "completed" ? r.message || "ZEND confirmed the stop request." : "Stop request accepted; completion is unconfirmed.", r.outcome === "completed" ? "ok" : "pending");
   });
 
   // ---- lists and reminders waiting for a moment
   function renderLists() {
     const d = live.online && live.lists, box = $("#lists"), tag = $("#lists-tag");
-    const sig = JSON.stringify(d || null);
+    const sig = JSON.stringify([live.online, d || null]);
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.innerHTML = "";
@@ -635,9 +783,9 @@
     const moments = (d && d.moments) || [];
     const total = names.reduce((n, k) => n + d.lists[k].length, 0);
     tag.className = `tag push ${total ? "green" : ""}`;
-    tag.textContent = total ? `${total} item${total === 1 ? "" : "s"}` : "Empty";
+    tag.textContent = !live.online ? "Unavailable" : total ? `${total} item${total === 1 ? "" : "s"}` : "Empty";
     if (!names.length && !moments.length) {
-      box.append(emptyState("check", "No lists yet", live.online ? 'Say "add milk to my shopping list"' : "Waiting for Jarvis"));
+      box.append(emptyState("check", live.online ? "No lists yet" : "Lists unavailable", live.online ? 'Say "add milk to my shopping list"' : "Reconnect to see lists and reminders"));
       return;
     }
     for (const k of names) {
@@ -661,13 +809,13 @@
   // ---- research (the last report: sources come from the pages Jarvis really read)
   function renderResearch() {
     const r = live.online && live.research, box = $("#research"), tag = $("#research-tag");
-    const sig = JSON.stringify(r || null);
+    const sig = JSON.stringify([live.online, r || null]);
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.innerHTML = "";
     if (!r) {
-      tag.className = "tag push"; tag.textContent = "None yet";
-      box.append(emptyState("sparkle", "No research yet", live.online ? "Ask Jarvis to research or compare something" : "Waiting for Jarvis"));
+      tag.className = "tag push"; tag.textContent = live.online ? "None yet" : "Unavailable";
+      box.append(emptyState("sparkle", live.online ? "No research yet" : "Research unavailable", live.online ? "Ask ZEND to research or compare something" : "Reconnect to see research"));
       return;
     }
     tag.className = `tag push ${r.status === "done" ? "green" : "amber"}`;
@@ -701,7 +849,7 @@
     box.dataset.sig = sig;
     box.innerHTML = "";
     if (!h.online || !h.devices.length) {
-      box.append(emptyState("home", live.online ? "No devices connected" : "Waiting for Jarvis",
+      box.append(emptyState("home", live.online ? "No devices connected" : "Waiting for ZEND",
         live.online ? "Start Zigbee2MQTT (start.bat) and pair your sensors" : ""));
       return;
     }
@@ -724,7 +872,7 @@
       sub(d.humidity != null ? `${Math.round(d.humidity)}% humidity` : "");
     } else if (d.kind === "vibration") {
       main(d.moved ? ago(d.moved) : "No movement");
-      sub(d.moved ? "last movement" : "since Jarvis started");
+      sub(d.moved ? "last movement" : "since ZEND started");
     } else if (d.kind === "presence") {
       main(d.present ? "Someone's there" : "Empty");
     } else if (d.kind === "light" || d.kind === "switch") {
@@ -734,6 +882,7 @@
       row.append(el("span", "grow", d.on ? "On" : "Off"));
       const sw = el("label", "switch"), cb = el("input");
       cb.type = "checkbox"; cb.checked = !!d.on;
+      cb.setAttribute("aria-label", `${d.name} power`);
       sw.append(cb, el("span", "slider"));
       cb.addEventListener("change", () => act({ do: "light", device: d.name, on: cb.checked }, true));
       row.append(sw);
@@ -742,6 +891,7 @@
       if (d.kind === "light") {
         const c = el("div", "controls"), r = el("input");
         r.type = "range"; r.min = 1; r.max = 100; r.value = d.brightness || 1;
+        r.setAttribute("aria-label", `${d.name} brightness`);
         r.style.setProperty("--v", `${d.brightness || 0}%`);
         r.addEventListener("input", () => { deviceBusy = true; r.style.setProperty("--v", `${r.value}%`); });
         r.addEventListener("change", async () => { await act({ do: "light", device: d.name, brightness: +r.value }, true); deviceBusy = false; });
@@ -779,7 +929,21 @@
     c.addEventListener("click", () => send(text, true));
     $("#home-suggest").append(c);
   }
-  $("#home-ask").addEventListener("submit", e => { e.preventDefault(); const v = $("#home-input").value; $("#home-input").value = ""; send(v, true); });
+  $("#home-ask").addEventListener("submit", e => { e.preventDefault(); const source = $("#home-input"); send(source.value, true, source); });
+  // Shortcuts prepare a request so the client can make it their own before sending.
+  document.querySelectorAll("[data-draft]").forEach(b => b.addEventListener("click", () => {
+    show("chat"); input.value = b.dataset.draft; input.dispatchEvent(new Event("input")); input.focus();
+  }));
+  $(".skip-link").addEventListener("click", e => { e.preventDefault(); show("home"); $("#home-input").focus(); });
+  const CARD_GROUPS = { devices: "room", media: "room", timers: "room", "phone-kv": "room", "env-kv": "room", "activity-home": "all", tasks: "productivity", lists: "productivity", research: "productivity" };
+  for (const [id, group] of Object.entries(CARD_GROUPS)) $("#" + id).closest(".card").dataset.group = group;
+  function filterDashboard(filter) {
+    document.querySelectorAll("[data-dashboard-filter]").forEach(b => { const active = b.dataset.dashboardFilter === filter; b.classList.toggle("active", active); b.setAttribute("aria-pressed", String(active)); });
+    document.querySelectorAll("#dashboard-grid > .card").forEach(c => c.hidden = filter !== "all" && c.dataset.group !== filter);
+    $("#dashboard-caption").textContent = { all: "Everything you need, together.", room: "Your home, media, and everyday controls.", productivity: "Your tasks, lists, and latest research." }[filter];
+  }
+  document.querySelectorAll("[data-dashboard-filter]").forEach(b => b.addEventListener("click", () => filterDashboard(b.dataset.dashboardFilter)));
+  document.querySelectorAll("[data-dashboard-jump]").forEach(b => b.addEventListener("click", () => { $("#jarvis-workspace").open = true; filterDashboard(b.dataset.dashboardJump); $(".dashboard-heading").scrollIntoView({ behavior: "smooth", block: "start" }); }));
   for (const id of ["#undo-btn", "#undo-btn-2"]) $(id).addEventListener("click", () => act({ do: "undo" }));
   $("#ring-stop").addEventListener("click", () => act({ do: "stop_ringing" }, true));
   $("#quiet-toggle").addEventListener("change", e => act({ do: "quiet", on: e.target.checked }));
@@ -793,15 +957,15 @@
   let feedSig = "";
   function renderFeed() {
     const conv = live.online ? live.conversation || [] : [];
-    const sig = JSON.stringify(conv) + (pending ? `|${pending}` : "") + live.online;
+    const sig = JSON.stringify(conv) + (pending ? `|${pending}` : "") + live.online + chatError + `|${latestCommandReply}`;
     if (sig === feedSig) return;
     const atBottom = isAtBottom();
     feedSig = sig;
     const feed = $("#feed");
     feed.innerHTML = "";
-    if (!conv.length && !pending) {
+    if (!conv.length && !pending && !chatError && !latestCommandReply) {
       const w = el("div", "welcome"), orb = el("div", "orb lg"); orb.dataset.state = stateKey(); orb.append(el("span"));
-      w.append(orb, el("h2", null, live.online ? "How can I help?" : "Jarvis is offline"),
+      w.append(orb, el("h2", null, live.online ? "How can I help?" : "ZEND is offline"),
                el("p", null, live.online ? "Ask anything, or try one of these." : "Start it with python main.py, then come back here."));
       const s = el("div", "starters");
       for (const [icon, title, sub] of STARTERS) {
@@ -827,14 +991,22 @@
       if (!conv.length || conv[conv.length - 1].text !== pending) feed.append(message("user", pending));
       const t = message("assistant", ""), dots = el("span", "dots"); dots.append(el("i"), el("i"), el("i"));
       t.querySelector(".body").replaceWith(dots); feed.append(t);
+    } else if (latestCommandReply) {
+      // A reply just completed but the backend's own conversation history (live.conversation) hasn't caught up to
+      // it yet on this poll: show the exchange from the command response itself rather than letting the feed fall
+      // back to the empty state and the confirmed reply silently vanish (the 2026-10-09 "replies don't appear" bug).
+      // consoleReply() already clears latestCommandReply once live.conversation genuinely includes a newer reply.
+      if (!conv.length || conv[conv.length - 1].text !== lastSentText) feed.append(message("user", lastSentText));
+      feed.append(message("assistant", latestCommandReply));
     }
+    if (chatError) feed.append(message("assistant", chatError, "", true));
     if (atBottom) scrollFeed();
   }
   function message(role, text, time, error) {
     if (role === "user") { const m = el("div", "msg user", text); if (time) m.title = time; return m; }
     const m = el("div", `msg assistant${error ? " error" : ""}`), mark = el("div", "mark"), col = el("div"), meta = el("div", "meta");
     mark.append(el("i"), el("i"), el("i"));
-    meta.append(el("b", null, "Jarvis"));
+    meta.append(el("b", null, "ZEND"));
     if (time) meta.append(el("span", null, time));
     col.append(meta, el("div", "body", text));
     m.append(mark, col);
@@ -843,17 +1015,31 @@
   const isAtBottom = () => { const s = $("#chat-scroll"); return s.scrollHeight - s.scrollTop - s.clientHeight < 80; };
   function scrollFeed(instant) { const s = $("#chat-scroll"); s.scrollTo({ top: s.scrollHeight, behavior: instant ? "auto" : "smooth" }); }
 
-  async function send(text, goToChat) {
-    text = (text || "").trim();
-    if (!text || pending) return;
-    if (!live.online) { toast("Jarvis isn't running. Start it with: python main.py", "err"); return; }
-    if (goToChat) show("chat");
-    pending = text;
+  async function send(text, goToChat, source) {
+    const draft = text || "";
+    text = draft.trim();
+    if (!text) return;
+    if (pending) { toast("A request is already pending. Your draft is retained.", "pending"); return; }
+    if (!live.online) { toast("ZEND is unavailable. Your draft is retained; send it after reconnecting.", "err"); return; }
+    if (uncertainCommand === text && !confirm("The previous request may already have run. Send it again anyway?")) return;
+    if (goToChat && !document.documentElement?.classList.contains("jarvis-full")) show("chat");
+    const replyBaseline = JSON.stringify((live.conversation || []).filter(m => m.role === "assistant").at(-1) || null);
+    pending = text; chatError = ""; lastSentText = text;
     render(); scrollFeed();
     const r = await api("/api/command", { text });
+    if (r.outcome === "completed") {
+      uncertainCommand = "";
+      latestCommandReply = r.reply;
+      latestReplyBaseline = replyBaseline;
+      if (source && source.value === draft) { source.value = ""; source.dispatchEvent(new Event("input")); }
+    } else {
+      if (!source && !input.value) { input.value = draft; grow(); }
+      if (r.outcome === "unknown" || r.outcome === "accepted") uncertainCommand = text;
+      chatError = r.outcome === "accepted" ? "Request accepted, completion unconfirmed. Your draft is retained. Check the conversation before resending." : `${r.message} Your draft is retained.`;
+      toast(chatError, "err");
+    }
     pending = null; feedSig = "";
-    await poll();
-    if (!r.ok) { $("#feed").append(message("assistant", r.message || "Something went wrong.", "", true)); scrollFeed(); }
+    render(); await poll(true); scrollFeed();
   }
   const input = $("#chat-input");
   const grow = () => { input.style.height = "auto"; input.style.height = `${Math.min(180, input.scrollHeight)}px`; };
@@ -861,7 +1047,7 @@
   input.addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#chat-form").requestSubmit(); }
   });
-  $("#chat-form").addEventListener("submit", e => { e.preventDefault(); const v = input.value; input.value = ""; grow(); send(v); });
+  $("#chat-form").addEventListener("submit", e => { e.preventDefault(); send(input.value, false, input); });
 
   // ---------------------------------------------------------------- activity
   const KIND_ICON = { app: "window", window: "window", volume: "volume", media: "music", timer: "timer", mail: "mail",
@@ -878,7 +1064,7 @@
       box.classList.toggle("cols", id === "#activity-home" && items.length > 3);
       if (!items.length) {
         box.classList.remove("cols");
-        box.append(emptyState("activity", "Nothing yet", "Things Jarvis does for you show up here"));
+        box.append(emptyState("activity", live.online ? "Nothing yet" : "Activity unavailable", live.online ? "Things ZEND does for you show up here" : "Reconnect to see recent activity"));
         continue;
       }
       for (const a of items.slice(0, n)) {
@@ -904,7 +1090,7 @@
     box.dataset.sig = sig; box.innerHTML = "";
     const parts = [["hearing", "Understanding you"], ["first_words", "Thinking"], ["tools", "Taking action"], ["first_sound", "Until it spoke"]]
       .filter(([k]) => t[k] != null);
-    if (!parts.length) { box.append(emptyState("clock", "No timings yet", "Talk to Jarvis and they'll show up here")); return; }
+    if (!parts.length) { box.append(emptyState("clock", "No timings yet", "Talk to ZEND and they'll show up here")); return; }
     for (const [k, label2] of parts) {
       const bar = el("div", "bar"), lbl = el("div", "lbl"), track = el("div", "bar-track"), fill = el("div", `fill${t[k] > 2.5 ? " slow" : ""}`);
       lbl.append(el("span", null, label2), el("span", null, `${t[k].toFixed(2)}s`));
@@ -917,7 +1103,7 @@
     const pill = $("#phone-pill");
     pill.className = `pill ${p.ready ? "connected" : p.mode ? "expired" : ""}`;
     pill.textContent = !live.online ? "Unknown" : p.ready ? "Ready" : p.mode ? "Needs setup" : "Off";
-    $("#phone-detail").textContent = !live.online ? "Start Jarvis to see the phone line." : p.ready
+    $("#phone-detail").textContent = !live.online ? "Start ZEND to see the phone line." : p.ready
       ? `Calls go to ${p.number}. ${p.driving ? "You're driving right now." : ""}`
       : "Turn on PHONE_MODE in Settings and follow phone.md to set it up.";
   }
@@ -926,26 +1112,26 @@
   async function loadKnowledge() {
     let k;
     try {
-      const r = await fetch("/api/knowledge", { cache: "no-store" });
-      k = await r.json();
-      if (!r.ok) throw new Error(k.error);
+      const { data } = await requestJSON("/api/knowledge", { cache: "no-store" });
+      k = data;
+      if (!["profile", "preferences", "facts", "summaries"].every(key => Array.isArray(k[key]))) throw new Error("Invalid memory response");
     } catch {
       for (const id of ["#mem-profile", "#mem-prefs", "#mem-facts", "#mem-summaries"]) {
-        $(id).innerHTML = ""; $(id).append(emptyState("power", "Jarvis is offline", "Start it to see what it remembers"));
+        $(id).innerHTML = ""; $(id).append(emptyState("power", "Memory unavailable", "Reconnect and refresh to try again"));
       }
-      return;
+      return false;
     }
     const prof = $("#mem-profile"); prof.innerHTML = "";
-    if (!k.profile.length) prof.append(emptyState("user", "Nothing yet", "Tell Jarvis your name, where you live, what you do"));
+    if (!k.profile.length) prof.append(emptyState("user", "Nothing yet", "Tell ZEND your name, where you live, what you do"));
     for (const p of k.profile) prof.append(row(p.label, p.value));
 
     const prefs = $("#mem-prefs"); prefs.innerHTML = "";
     $("#pref-count").textContent = k.preferences.length || "";
-    if (!k.preferences.length) prefs.append(emptyState("bulb", "No preferences yet", "Say “always…”, or correct Jarvis and it learns"));
+    if (!k.preferences.length) prefs.append(emptyState("bulb", "No preferences yet", "Say “always…”, or correct ZEND and it learns"));
     for (const p of k.preferences) {
       const it = el("div", "item"), main = el("div", "item-main"), meta = el("div", "item-meta");
       main.append(el("div", "item-text", cap(p.text)));
-      if (p.source === "explicit") meta.append(tag("You told Jarvis", "blue"));
+      if (p.source === "explicit") meta.append(tag("You told ZEND", "blue"));
       else {
         const c = el("span", "conf"), m = el("span", "meter"), f = el("i");
         f.style.width = `${Math.round(p.confidence * 100)}%`; m.append(f);
@@ -981,7 +1167,7 @@
       const q = $("#fact-filter").value.trim().toLowerCase();
       facts.innerHTML = "";
       const list = k.facts.filter(f => !q || f.text.toLowerCase().includes(q));
-      if (!list.length) facts.append(emptyState("memory", q ? "No matches" : "Nothing remembered yet", q ? "" : "Jarvis remembers useful things you mention"));
+      if (!list.length) facts.append(emptyState("memory", q ? "No matches" : "Nothing remembered yet", q ? "" : "ZEND remembers useful things you mention"));
       for (const f of list.slice(0, 200)) {
         const it = el("div", "item"), main = el("div", "item-main"), meta = el("div", "item-meta");
         main.append(el("div", "item-text", f.text));
@@ -993,7 +1179,7 @@
         del.addEventListener("click", async () => {
           if (!confirm(`Forget this?\n\n${f.text}`)) return;
           const r = await act({ do: "forget_fact", id: f.id });
-          if (r.ok) { k.facts = k.facts.filter(x => x.id !== f.id); $("#fact-count").textContent = k.facts.length || ""; drawFacts(); }
+          if (r.outcome === "completed") { k.facts = k.facts.filter(x => x.id !== f.id); $("#fact-count").textContent = k.facts.length || ""; drawFacts(); }
         });
         actions.append(del); it.append(main, actions); facts.append(it);
       }
@@ -1008,14 +1194,20 @@
       d.append(el("div", "when", String(s.date || "").slice(0, 16).replace("T", " ")), el("div", null, s.summary));
       sums.append(d);
     }
+    return true;
   }
-  $("#mem-refresh").addEventListener("click", () => { loadKnowledge(); toast("Memory refreshed"); });
+  $("#mem-refresh").addEventListener("click", async () => {
+    const button = $("#mem-refresh"); if (button.disabled) return;
+    button.disabled = true;
+    try { const confirmed = await loadKnowledge(); toast(confirmed ? "Memory refreshed" : "Memory could not be refreshed.", confirmed ? "ok" : "err"); }
+    finally { button.disabled = false; }
+  });
 
   // ---------------------------------------------------------------- command menu
   const pal = $("#palette"), pin = $("#palette-input"), plist = $("#palette-list");
   let pitems = [], psel = 0;
-  const NAV = [["home", "Home", "home"], ["chat", "Chat", "chat"], ["memory", "Memory", "memory"], ["activity", "Activity", "activity"],
-               ["status", "Status", "cpu"], ["connections", "Connections", "plug"], ["settings", "Settings", "settings"]];
+  const NAV = [["home", "Overview", "home"], ["chat", "Chat", "chat"], ["memory", "Memory", "memory"], ["activity", "Activity", "activity"],
+               ["missions", "Missions", "route"], ["status", "Status", "cpu"], ["connections", "Connections", "plug"], ["settings", "Settings", "settings"]];
   function commands() {
     const muted = live.volume && live.volume.muted, playing = live.now_playing && live.now_playing.playing;
     const quiet = stateKey() === "quiet";
@@ -1026,17 +1218,17 @@
       { group: "Actions", icon: muted ? "volume" : "mute", label: muted ? "Unmute" : "Mute", run: () => act({ do: muted ? "unmute" : "mute" }, true), live: 1, keys: "volume sound audio silence" },
       { group: "Actions", icon: "bulb", label: "Turn the LED strip on", run: () => act({ do: "light", on: true }, true), live: 1, keys: "light lamp led strip on", off: !hasLight() },
       { group: "Actions", icon: "bulb", label: "Turn the LED strip off", run: () => act({ do: "light", on: false }, true), live: 1, keys: "light lamp led strip off", off: !hasLight() },
-      { group: "Ask Jarvis", icon: "door", label: "Is the door open?", run: () => send("Is the door open?", true), live: 1, keys: "door sensor" },
-      { group: "Ask Jarvis", icon: "thermo", label: "What's the temperature in here?", run: () => send("What's the temperature in here?", true), live: 1, keys: "temperature humidity" },
+      { group: "Ask ZEND", icon: "door", label: "Is the door open?", run: () => send("Is the door open?", true), live: 1, keys: "door sensor" },
+      { group: "Ask ZEND", icon: "thermo", label: "What's the temperature in here?", run: () => send("What's the temperature in here?", true), live: 1, keys: "temperature humidity" },
       { group: "Actions", icon: "timer", label: "Start a 5 minute timer", run: () => startTimer(300, ""), live: 1, keys: "alarm countdown" },
       { group: "Actions", icon: "timer", label: "Start a 25 minute focus timer", run: () => startTimer(1500, "focus"), live: 1, keys: "pomodoro work alarm" },
       { group: "Actions", icon: "undo", label: live.undo ? `Undo: ${live.undo}` : "Undo last change", run: () => act({ do: "undo" }), live: 1, off: !live.undo, keys: "revert back" },
       { group: "Actions", icon: "moon", label: quiet ? "Turn off quiet mode" : "Turn on quiet mode", run: () => act({ do: "quiet", on: !quiet }), live: 1, keys: "silent sleep do not disturb dnd" },
       { group: "Actions", icon: "phone", label: "Call my phone", run: () => $("#call-btn").click(), live: 1, off: !(live.phone && live.phone.ready), keys: "ring twilio" },
-      { group: "Ask Jarvis", icon: "sun", label: "Brief me", run: () => send("Brief me", true), live: 1 },
-      { group: "Ask Jarvis", icon: "calendar", label: "What's on my calendar today?", run: () => send("What's on my calendar today?", true), live: 1 },
-      { group: "Ask Jarvis", icon: "mail", label: "Any important emails?", run: () => send("Any important emails?", true), live: 1 },
-      { group: "Ask Jarvis", icon: "pin", label: "Where am I?", run: () => send("Where am I?", true), live: 1 },
+      { group: "Ask ZEND", icon: "sun", label: "Brief me", run: () => send("Brief me", true), live: 1 },
+      { group: "Ask ZEND", icon: "calendar", label: "What's on my calendar today?", run: () => send("What's on my calendar today?", true), live: 1 },
+      { group: "Ask ZEND", icon: "mail", label: "Any important emails?", run: () => send("Any important emails?", true), live: 1 },
+      { group: "Ask ZEND", icon: "pin", label: "Where am I?", run: () => send("Where am I?", true), live: 1 },
       ...NAV.map(([page, label, icon]) => ({ group: "Go to", icon, label, run: () => show(page), hint: "Page" })),
     ].filter(c => !c.off && (!c.live || live.online));
   }
@@ -1044,10 +1236,10 @@
   function drawPalette() {
     const q = pin.value.trim().toLowerCase();
     pitems = commands().filter(c => !q || `${c.label} ${c.keys || ""} ${c.group}`.toLowerCase().includes(q));
-    if (q && live.online) pitems.unshift({ group: "Ask Jarvis", icon: "sparkle", label: `Ask Jarvis: “${pin.value.trim()}”`, run: () => send(pin.value.trim(), true), hint: "Enter" });
+    if (q && live.online) pitems.unshift({ group: "Ask ZEND", icon: "sparkle", label: `Ask ZEND: “${pin.value.trim()}”`, run: () => send(pin.value.trim(), true), hint: "Enter" });
     psel = Math.min(psel, Math.max(0, pitems.length - 1));
     plist.innerHTML = "";
-    if (!pitems.length) { plist.append(el("div", "p-none", live.online ? "No matches" : "Jarvis is offline. Start it with python main.py")); return; }
+    if (!pitems.length) { plist.append(el("div", "p-none", live.online ? "No matches" : "ZEND is offline. Start it with python main.py")); return; }
     let group = "";
     pitems.forEach((c, i) => {
       if (c.group !== group) { group = c.group; plist.append(el("div", "p-group", group)); }
@@ -1061,10 +1253,12 @@
   }
   function mark() { plist.querySelectorAll(".p-item").forEach((n, i) => n.classList.toggle("sel", i === psel)); const s = plist.querySelector(".sel"); if (s) s.scrollIntoView({ block: "nearest" }); }
   function runItem(i) { const c = pitems[i]; if (!c) return; closePalette(); c.run(); }
-  function openPalette() { pal.classList.remove("hidden"); pin.value = ""; psel = 0; drawPalette(); setTimeout(() => pin.focus(), 10); }
-  function closePalette() { pal.classList.add("hidden"); }
+  let paletteReturnFocus;
+  function openPalette() { paletteReturnFocus = document.activeElement; pal.classList.remove("hidden"); pin.value = ""; psel = 0; drawPalette(); setTimeout(() => pin.focus(), 10); }
+  function closePalette() { pal.classList.add("hidden"); if (paletteReturnFocus) paletteReturnFocus.focus(); }
   pin.addEventListener("input", () => { psel = 0; drawPalette(); });
   pin.addEventListener("keydown", e => {
+    if (e.key === "Tab") { e.preventDefault(); pin.focus(); }
     if (e.key === "ArrowDown") { e.preventDefault(); psel = Math.min(pitems.length - 1, psel + 1); mark(); }
     else if (e.key === "ArrowUp") { e.preventDefault(); psel = Math.max(0, psel - 1); mark(); }
     else if (e.key === "Enter") { e.preventDefault(); runItem(psel); }
@@ -1076,11 +1270,13 @@
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("hidden") ? openPalette() : closePalette(); }
     else if (e.key === "Escape" && !pal.classList.contains("hidden")) closePalette();
+    else if (e.key === "Escape" && document.body.classList.contains("nav-open")) closeNavigation();
     else if (e.key === "/" && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); openPalette(); }
   });
 
   // ---------------------------------------------------------------- start
   show(location.hash.slice(1) || "home");
+  loadVoiceCatalogue();
   poll();
   setInterval(poll, 1000);
   setInterval(() => { if ($("#page-memory").classList.contains("active") && live.online && document.visibilityState === "visible") loadKnowledge(); }, 30000);

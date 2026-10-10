@@ -10,6 +10,8 @@ DROP = re.compile(
     r"(?:just |please |feel free to )?let me know if (?:you need|there'?s) anything(?: else)?[^.?!]*|"
     r"feel free to (?:ask|reach out)[^.?!]*|i'?m (?:always )?here (?:to help|if you need (?:me|anything))[^.?!]*|"
     r"(?:i )?hope (?:this|that) helps[^.?!]*|happy to help[^.?!]*|"
+    r"how(?:'s| is| does| do) (?:that|this|it|my voice|i) sound(?: now| better)?|(?:does|do) (?:that|this|it|i) sound "
+    r"better(?: now)?|(?:is )?(?:that|this) better(?: now)?|better now|"  # (after a change: they'll say if it isn't)
     r"i (?:completely |totally )?understand how (?:frustrating|difficult|hard|annoying|upsetting) (?:that|this|it) "
     r"(?:must be|is|can be)[^.?!]*|i hear (?:that )?you'?re feeling [^.?!]*|it sounds like you'?re feeling [^.?!]*)"
     r"\s*[.!?]*\s*$", re.I)

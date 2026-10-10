@@ -45,3 +45,6 @@ event_reminders.json
 eval/
 tasks.json
 google_auth.env
+errands.json
+missions.db.owner
+actions_journal.json.bak-*

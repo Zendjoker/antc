@@ -56,6 +56,46 @@ CANCELLED = ["Okay, cancelled.", "Sure, forget it.", "Okay, dropped it.", "No pr
 NO_ANSWER = re.compile(r"^\W*(?:(?:oh|um+|uh+|well|jarvis)[\s,.!]+)*(?:no|nope|nah|don'?t|do not|not (?:now|yet)|"
                        r"no thanks?|never ?mind|leave it|forget it)\b", re.I)
 HOLD = re.compile(r"\b(?:wait|hold on|hang on|one sec(?:ond)?|a sec(?:ond)?|let me think)\b", re.I)  # (not a no: later)
+# "Okay, forget about it. I have $500 and..." / "Never mind, what's the weather": dropped, and the rest still answered
+LEAD_CANCEL = re.compile(r"^\W*(?:(?:no|nah|nope|okay|ok|actually|so|oh)[\s,.!]+)*(?:never ?mind|forget (?:it|that|about "
+                         r"(?:it|that))|scratch that|cancel (?:that|it)|drop it)\b[\s,.!;:-]+\S", re.I)
+# What a tool makes, in the words people use for it: "no draft", "I don't want an email", "don't put it on the calendar"
+_NOUNS = {"draft": "drafts?|e-?mails?|mails?|messages?", "gmail": "e-?mails?|mails?", "event": "events?|calendar|meetings?|"
+          "appointments?|invites?|blocks?", "calendar": "calendar", "timer": "timers?", "alarm": "alarms?",
+          "reminder": "reminders?", "research": "research|search(?:es)?|look ?ups?", "call": "calls?", "text": "texts?",
+          "demos": "demos?|sites?|websites?", "mission": "missions?", "note": "notes?", "file": "files?", "list": "lists?"}
+_REJECT_LEAD = (r"\b(?:no|not (?:an?|the|any)|without (?:an?|the|any)?|(?:i )?don'?t (?:want|need)(?: (?:an?|the|any))?|"
+                r"don'?t (?:make|write|create|draft|send|do|set up|schedule|book|put (?:it|that|this) (?:on|in)(?: the| my| an?)?|"
+                r"bother with)(?: (?:it|that|this|an?|the|any))?)\s+")
+
+
+def _thing(name):
+    words = [w for w in name.lower().split("_") if w in _NOUNS]
+    return "|".join(_NOUNS[w] for w in words)
+
+
+def names_thing(name, text):
+    """Do these words name what `name` makes ("the draft", "an email")?"""
+    nouns = _thing(name)
+    return bool(nouns and re.search(rf"\b(?:{nouns})\b", text or "", re.I))
+
+
+def rejects(name, text):
+    """An explicit no to what `name` makes: "No, no draft.", "I don't want an email", "don't put it on the calendar"."""
+    nouns = _thing(name)
+    return bool(nouns and re.search(rf"{_REJECT_LEAD}(?:{nouns})\b", text or "", re.I))
+
+
+def decline(name, text):
+    """They turned the request down: drop it, and remember that for a few turns (executor._not_asked)."""
+    cancel(f"they said {text!r}")
+    rt.declined[name] = (rt.turn_no, text.strip())
+    try:
+        from room_agent.actions import tasks
+
+        tasks.decline_waiting(name)
+    except Exception as e:  # noqa: BLE001 (the request itself is already dropped)
+        log.warning("task record not updated after a no: %s", e)
 
 
 class Decision:
@@ -357,6 +397,11 @@ def on_utterance(text):
     if not p:
         return None
     t = text.strip()
+    if rejects(p.capability, t) or LEAD_CANCEL.match(t):  # "No, no draft. Just tell me...": dropped, the rest answered
+        decline(p.capability, t)
+        return Decision(note=f" (System note from code: they turned down the pending {p.capability.replace('_', ' ')}: "
+                             "it's dropped, nothing was saved or sent. Don't bring it up or offer it again; just answer "
+                             "what they say now.)")
     if p.confirm:  # a yes/no about running it: the executor's confirmation rules take a yes ("Cancel the mission." to
         from room_agent.actions import core  # "cancel it for good?" is one, not a "never mind")
         from room_agent.actions.executor import said_yes
@@ -369,11 +414,11 @@ def on_utterance(text):
         if said_yes(t, cap, what):
             return None
         if CANCEL.match(t) or (len(t.split()) <= 6 and "?" not in t and NO_ANSWER.match(t) and not HOLD.search(t)):
-            cancel(f"they said {t!r}")
+            decline(p.capability, t)
             return Decision(reply="Okay, I won't.")  # (never "cancelled": nothing was done)
         return None
     if CANCEL.match(t):
-        cancel(f"they said {t!r}")
+        decline(p.capability, t)
         return Decision(reply=random.choice(CANCELLED))
     if p.candidate:
         return _answer_to_candidate(p, t)

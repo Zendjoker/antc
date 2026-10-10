@@ -72,7 +72,7 @@ The script installs dependencies, checks your keys, and installs a systemd servi
 
 ## Settings (.env)
 Every setting is explained in `.env.example`. These are the ones you'll touch:
-- `MIC_DEVICE` / `SPEAKER_DEVICE`: part of the device name, e.g. `Jabra`. Leave blank to use the system default.
+- `MIC_DEVICE` / `SPEAKER_DEVICE`: part of the device name, e.g. `Jabra`. Leave blank to use the system default. Or pick them from a list in the dashboard's settings: while Jarvis is running, the switch happens right away.
 - `STT_PROVIDER=whisper`: local, free, private speech-to-text. Run `pip install -r requirements/local.txt` first. Use `tiny.en` on a Pi and `base.en` or `small.en` on a mini PC.
 - `WEATHER_LOCATION`: your city.
 - `HA_URL` / `HA_TOKEN`: Home Assistant. To get a token: your HA profile → Security → Long-lived access tokens.

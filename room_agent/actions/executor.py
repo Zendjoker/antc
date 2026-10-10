@@ -315,6 +315,9 @@ def _execute(name, args):
         return _finish(name, _result(name, args, nothing))
     p = rt.pending
     awaiting_yes = bool(p is not None and p.get("confirm") and p["tool"] == name)
+    unasked = _not_asked(cap, awaiting_yes)
+    if unasked:  # 2b'. advice ("what should I tell them?") or something they just turned down: words, not this tool
+        return _finish("REFUSED", _result(name, args, unasked))
     if (cap.intent is not None and not awaiting_yes and not cap.intent.search(rt.turn_text or "")
             and not pending.source_matches(name, cap.intent)):
         # 2b. the user's own words never asked for this (it may come from an email, or a guess): ask first. Checked
@@ -357,7 +360,9 @@ def _execute(name, args):
                                                        f"in their own words ({what}). Ask them first, in one short "
                                                        "question; only if they say yes, call it again."))
     if (getattr(rt.turn, "uncertain", False) and not confirmed and cap.changes_state
-            and (cap.risk != core.Risk.SAFE or cap.undo is None)):  # 4c. misheard? never something that can't be undone
+            and (cap.risk != core.Risk.SAFE or cap.undo is None or cap.group in ACCOUNT_GROUPS)):
+        # 4c. misheard? never something that can't be undone, nor a write to their accounts ("put the dream hour on
+        # Thursday" became a real all-day event): it's read back first
         pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: speech recognition wasn't "
                                                        f"sure it heard them right ({what}). Say what you heard in a few "
@@ -475,6 +480,43 @@ def _execute(name, args):
 
 TAB_ASK = _re.compile(r"\btabs?\b", _re.I)
 WHOLE_APP = r"\b(?:close|quit|exit|kill|shut(?:\s+down)?)\s+(?:the\s+|all\s+of\s+)?(?:whole\s+|entire\s+)?(?:{})\b(?!\s+tabs?\b)"
+
+
+ACCOUNT_GROUPS = {"calendar", "gmail", "missions", "phone_requests"}  # their accounts and the outside world
+PLAYBACK_TOOLS = {"play_pause", "next_track", "previous_track", "play_music"}  # only on an explicit request (policy)
+DECLINED_TURNS = 6  # how long "no, no draft" keeps that tool from being called again without a plain ask
+
+
+def _not_asked(cap, awaiting_yes):
+    """A call their words this turn didn't ask for, decided before anything is collected: web research for something
+    to write, advice ("what should I tell them?" matches an email tool's "tell them"), or a tool they just turned down.
+    -> FAILED text, or None."""
+    from room_agent.conversation import policy
+
+    t = rt.turn_text or ""
+    if cap.group == "research" and not cap.changes_state and policy.writing_task(t):
+        return ("FAILED: not run: they asked you to write something, not to look anything up. Write it yourself now, "
+                "from what you know; don't mention research.")
+    if awaiting_yes or not cap.changes_state:
+        return None
+    if cap.name in PLAYBACK_TOOLS and not policy.asks_to_change_playback(t, rt.last_reply):
+        # (checked on every call: each round of the model loop, retries, a pending request, after an interruption)
+        return ("FAILED: not done: they didn't ask to change playback (a question, a what-if, a 'don't', or unclear). "
+                "Nothing was changed. Answer what they said; if a change might help, ask in a few words.")
+    filling = pending.current() is not None and pending.current().capability == cap.name  # (its text being asked for)
+    if cap.intent is not None and not filling and policy.asks_advice(t):  # (intent-gated: email, calendar, calls...)
+        return ("FAILED: not done: they asked what to say or do (advice), not for "
+                f"{cap.name.replace('_', ' ')}. Answer in your own words, right here; don't offer to draft, send, save or "
+                "schedule it.")
+    said = rt.declined.get(cap.name)
+    if said and rt.turn_no - said[0] <= DECLINED_TURNS:
+        asked = cap.intent.search(t) if cap.intent is not None else pending.names_thing(cap.name, t)
+        if filling or (asked and not pending.rejects(cap.name, t)):
+            rt.declined.pop(cap.name, None)  # a new request of their own supersedes the earlier no (its answers too)
+        else:
+            return (f"FAILED: not done: they turned this down a moment ago (\"{said[1][:80]}\"). Don't call it or offer "
+                    "it again unless they plainly ask for it; answer in words.")
+    return None
 
 
 def _wider_than_asked(cap, args):

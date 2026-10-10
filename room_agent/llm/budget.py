@@ -7,6 +7,7 @@ models for the rest of the day. Prices are per 1M tokens: (input, cached input, 
 import datetime
 import json
 import logging
+import re
 import threading
 
 from room_agent.config import DAILY_BUDGET_USD, SPEND_FILE
@@ -42,6 +43,7 @@ class Budget:
         self.turn = {}  # this turn's spend per model, for the per-turn log line
         self.turn_tokens = {"calls": 0, "input": 0, "cached": 0, "output": 0}
         self.warned_on = ""  # the day the "budget reached" line was said (said once a day)
+        self.last_turn = None  # the previous turn's calls, tokens and cost
         self.data = self._load()
 
     def _load(self):
@@ -95,6 +97,8 @@ class Budget:
         return self.limit > 0 and self.total() >= self.limit
 
     def start_turn(self):
+        if self.turn_tokens["calls"]:  # (kept so "how many tokens was that?" is answered from real numbers)
+            self.last_turn = {"usd": sum(self.turn.values()), "models": list(self.turn), **self.turn_tokens}
         self.turn = {}
         self.turn_tokens = {"calls": 0, "input": 0, "cached": 0, "output": 0}
 
@@ -108,6 +112,29 @@ class Budget:
         return (f"turn cost: {spent:.2f}c ({', '.join(self.turn)}), today: {self.total() * 100:.1f}c ({by}) | turn metrics: "
                 f"{kind or 'turn'}, {t['calls']} model call{'s' if t['calls'] != 1 else ''}, {t['input']} in "
                 f"({t['cached']} cached), {t['output']} out" + (f", {seconds:.1f}s" if seconds is not None else ""))
+
+
+USAGE_WORDS = re.compile(r"\b(tokens?|how much (?:did|does|have) (?:that|this|it|you) cost|(?:have|did) (?:i|you|we) spen[dt]|spent so far|"
+                         r"spending|usage|"
+                         r"api (?:cost|bill)|cost (?:me|so far|today)|(?:daily|api|ai|spending|your) budget)\b", re.I)
+
+
+def usage_lines(user_text):
+    """Real usage numbers, only when they ask about tokens or cost: never estimated by the model."""
+    if not USAGE_WORDS.search(user_text or ""):
+        return []
+    today = budget.today()
+    by = ", ".join(f"{k} ${v:.4f}" for k, v in sorted(today.items())) or "nothing yet"
+    lines = [f"- usage (measured by code): today ${budget.total():.4f} over {budget.data.get('calls', 0)} model calls "
+             f"({by}); daily limit ${budget.limit:.2f}."]
+    t = budget.last_turn
+    if t:
+        lines.append(f"- usage_last_turn: {t['calls']} model call(s) on {', '.join(t['models'])}: {t['input']} tokens in "
+                     f"({t['cached']} of them cached), {t['output']} out, ${t['usd']:.4f}.")
+    lines.append("- usage_not_tracked: totals before today, per-conversation totals, cache writes on their own, and any "
+                 "usage outside Jarvis (e.g. the tools used to build it). Give only the numbers above; if what they ask "
+                 "isn't among them, say it isn't tracked. Never estimate token counts.")
+    return lines
 
 
 budget = Budget()

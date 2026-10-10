@@ -147,6 +147,21 @@ check("Open Chrome ('Chrome' -> Google Chrome)", r.startswith("OK: Google Chrome
 tool("open_app", app_name="Spotify")
 r = tool("focus_app", app_name="Chrome")
 check("Focus Chrome -> in front", r == "OK: Google Chrome is in front now." and FRONT["name"] == "Google Chrome", r)
+calls = {"n": 0}
+real_front = apps.bring_to_front
+
+
+def flaky_front(hwnd):
+    calls["n"] += 1
+    return real_front(hwnd) if calls["n"] > 1 else False  # 1st try: window found, but Windows won't foreground it
+
+
+apps.bring_to_front = flaky_front
+r = tool("focus_app", app_name="Spotify")
+apps.bring_to_front = real_front
+check("a window that's found but won't come to front is retried (asked to show itself again), not given up on at "
+      "once - the exact 2026-10-09 live failure (Spotify running, found, but never focused)",
+      r == "OK: Spotify is in front now." and calls["n"] == 2, (r, calls["n"]))
 r = tool("open_app", app_name="Discord")
 check("Open Discord", r.startswith("OK: Discord is open"), r)
 r = tool("close_app", app_name="it", confidence=0.9)

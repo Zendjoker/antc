@@ -13,10 +13,10 @@ from room_agent.audio.fillers import stop_thinking
 from room_agent.audio import speaker_id
 from room_agent.audio.mic import record_utterance, wait_for_wake
 from room_agent.audio.speaker import beep
-from room_agent.audio.stt import load_whisper, transcribe, verify_barge
+from room_agent.audio.stt import load_whisper, transcribe, verify_barge, verify_stop
 from room_agent.audio.tts import clip, el, load_piper, record_in_background
 from room_agent.config import (BARGE_VERIFY, EL_KEY, LLM_PROVIDER, MODEL, SR, STT_PROVIDER, TTS_PROVIDER, WAKE_ACK_DELAY,
-                               WAKE_SOUND_ON, WAKE_WORD)
+                               WAKE_SOUND_ON)
 from room_agent.conversation.history import start_history
 from room_agent.conversation import greet
 from room_agent.conversation.session import converse, speak_line, speak_phrase
@@ -58,13 +58,16 @@ def voice_loop():
     from openwakeword.model import Model
 
     engine, phrases, state, writer = rt.engine, rt.phrases, rt.state, rt.writer
-    # WAKE_WORD is a built-in name or a path to your own trained .onnx file; either way this fetches the feature models
-    openwakeword.utils.download_models(model_names=[WAKE_WORD])
-    oww = Model(wakeword_models=[WAKE_WORD], inference_framework="onnx")
+    # rt.wake_word: a built-in openWakeWord model name, defaulting to config.WAKE_WORD but overridable via
+    # set_wake_word (tools/voice.py) and persisted in settings.json - loaded here once, at startup, so a saved
+    # change takes effect on the NEXT start, not the current one.
+    openwakeword.utils.download_models(model_names=[rt.wake_word])
+    oww = Model(wakeword_models=[rt.wake_word], inference_framework="onnx")
     if STT_PROVIDER == "whisper":
         load_whisper()
         if BARGE_VERIFY:
             engine.barge_verifier = verify_barge
+            engine.barge_stop_check = verify_stop  # (a short, clear "stop!" over a reply)
     if speaker_id.gate.active():
         speaker_id.gate.score(np.zeros(SR, dtype=np.int16))  # warm up the model
         engine.set_sensitive(True, config.SPEAKER_BARGE_VAD, config.SPEAKER_BARGE_RMS, config.SPEAKER_BARGE_GAP)
@@ -89,7 +92,7 @@ def voice_loop():
     unsummarized = None  # a conversation that ended in quiet mode: summarized after the next wake
     while True:
         # Asleep (or in quiet mode): only the wake word detector runs. No speech recognition, no model calls.
-        log.info("Listening for '%s'%s...", WAKE_WORD, " (quiet mode)" if state.quiet else "")
+        log.info("Listening for '%s'%s...", rt.wake_word, " (quiet mode)" if state.quiet else "")
         heard_wake = wait_for_wake(mic_q, oww)
         greeting = greet.take() if heard_wake is None else ""
         if heard_wake is None and not greeting:

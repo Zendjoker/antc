@@ -14,6 +14,7 @@ UserModel (learning/), which this only reads.
 """
 
 import logging
+import re
 import time
 
 from room_agent import runtime as rt
@@ -103,9 +104,21 @@ def after_turn(reply, plan=None, interrupted=False):
                       name_used=habits.uses_name(reply, USER_NAME))
 
 
+# Offering to put something in a tool ("Want me to drop 'eat' on your calendar?") when they were only chatting
+_TOOL_OFFER = re.compile(r"^\W*(?:(?:do you |would you )?want me to|should i|shall i|would you like me to|i can (?:drop|add|put|"
+                         r"set|schedule|block|pencil|create|make|save))\b.*\b(?:calendar|timer|reminder|alarm|note|list|"
+                         r"draft|e-?mail)\b", re.I)
+
+
 def scrub(sentence):
     recent = state.history[-3:-1]  # (the replies before this one)
-    return habits.scrub(sentence, USER_NAME, name_recently=any(h.get("name_used") for h in recent))
+    s = habits.scrub(sentence, USER_NAME, name_recently=any(h.get("name_used") for h in recent))
+    from room_agent.conversation import policy
+
+    kind = getattr(getattr(rt.turn, "policy", None), "kind", "")
+    if s and kind in (policy.CASUAL, policy.EMOTIONAL) and _TOOL_OFFER.search(s):
+        return ""  # ("I'm going to the gym tomorrow" is chat: no calendar offer; they ask when they want one)
+    return s
 
 
 def over_cap(said):

@@ -92,6 +92,22 @@ def table():
     return PIPER_VOICES if provider() == "piper" else ELEVEN_VOICES
 
 
+def dashboard_view(enabled=True):
+    """Public voice catalogue and actual selection, without credentials."""
+    active = provider()
+    return {
+        "provider": active, "enabled": bool(enabled), "fallback": current.fallback,
+        "selected": current.piper if active == "piper" else current.eleven,
+        "name": label(),
+        "providers": [
+            {"id": pid, "name": name, "voices": [
+                {"id": vid, "name": key, "description": description}
+                for key, (vid, description) in catalogue.items()]}
+            for pid, name, catalogue in (("elevenlabs", "ElevenLabs", ELEVEN_VOICES),
+                                          ("piper", "Piper · free local voices", PIPER_VOICES))],
+    }
+
+
 def label():
     if provider() == "piper":
         name = next((k for k, (v, _) in PIPER_VOICES.items() if v == current.piper), current.piper)

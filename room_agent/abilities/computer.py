@@ -82,6 +82,10 @@ register_claim("screen", r"\b(i can see (on )?your screen|looking at your screen
                          r"your screen (shows|says))\b")
 register_claim("research", r"\baccording to (the |my |these )?(sources|research|results)\b|\bthe sources (say|show|agree)\b|"
                            r"\bi (researched|compared the sources)\b")
+# A precise statistic or a numbered citation ("67% of people prefer ordering direct [7]") needs a source read this turn
+register_claim("statistic", r"\b\d{1,3}(?:\.\d+)?\s?(?:%|percent)\s+of\s+(?:\w+\s+){0,2}?(?:people|customers|restaurants|users|"
+                            r"businesses|consumers|diners|owners|americans|shoppers|buyers|adults)\b|\[\d{1,2}\]",
+               verified_by={"research_web", "web_search"})
 
 
 # ---------------------------------------------------------------- helpers

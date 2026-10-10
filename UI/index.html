@@ -3,20 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jarvis</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2318181b'/%3E%3Crect x='9' y='12' width='3' height='8' rx='1.5' fill='white'/%3E%3Crect x='14.5' y='8' width='3' height='16' rx='1.5' fill='white'/%3E%3Crect x='20' y='11' width='3' height='10' rx='1.5' fill='white'/%3E%3C/svg%3E">
+<title>ZEND</title>
+<script src="appearance.js"></script>
+<link rel="icon" type="image/png" href="brand/zend-favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="workspace.css">
+<link rel="stylesheet" href="brand.css">
+<link rel="stylesheet" href="hud.css">
+<link rel="stylesheet" href="presence.css">
+<link rel="stylesheet" href="cinematic.css?v=4">
 </head>
 <body class="offline">
+<a class="skip-link" href="#home-input">Skip to assistant</a>
 <div class="app">
   <!-- ============ sidebar ============ -->
   <aside class="sidebar" id="sidebar">
     <div class="sb-head">
       <div class="mark"><i></i><i></i><i></i></div>
       <div class="sb-id">
-        <div class="sb-title">Jarvis</div>
+        <div class="sb-title">ZEND</div>
         <div class="sb-sub" id="sb-user">Personal assistant</div>
       </div>
     </div>
@@ -25,13 +32,14 @@
       <span data-icon="search"></span><span class="grow">Search or ask</span><kbd>Ctrl K</kbd>
     </button>
 
-    <nav class="sb-nav">
-      <a href="#home" data-page="home"><span data-icon="home"></span>Home</a>
+    <nav class="sb-nav" aria-label="Main navigation">
+      <div class="sb-label">WORKSPACE</div>
+      <a href="#home" data-page="home"><span data-icon="home"></span>Overview</a>
       <a href="#chat" data-page="chat"><span data-icon="chat"></span>Chat</a>
       <a href="#memory" data-page="memory"><span data-icon="memory"></span>Memory</a>
       <a href="#activity" data-page="activity"><span data-icon="activity"></span>Activity</a>
       <a href="#missions" data-page="missions"><span data-icon="route"></span>Missions</a>
-      <div class="sb-label">System</div>
+      <div class="sb-label">MANAGE</div>
       <a href="#status" data-page="status"><span data-icon="cpu"></span>Status</a>
       <a href="#connections" data-page="connections"><span data-icon="plug"></span>Connections</a>
       <a href="#settings" data-page="settings"><span data-icon="settings"></span>Settings</a>
@@ -39,7 +47,7 @@
 
     <div class="sb-foot">
       <div class="presence">
-        <div class="orb sm" data-state="offline"><span></span></div>
+        <span class="presence-dot" aria-hidden="true"></span>
         <div class="presence-text">
           <div class="presence-state" data-bind="state">Offline</div>
           <div class="presence-sub" data-bind="sub">Not running</div>
@@ -59,54 +67,117 @@
 
   <!-- ============ main ============ -->
   <div class="main">
+    <div class="workspace-bar">
+      <div class="workspace-path"><span class="workspace-dot"></span>Personal workspace<span class="path-divider">/</span><b id="current-page">Overview</b></div>
+      <div class="workspace-tools"><span class="local-label"><span data-icon="shield"></span>Runs on your PC</span><button class="btn sm appearance-shortcut" id="appearance-shortcut" type="button" aria-label="Switch appearance">HUD</button><button class="icon-btn" type="button" data-palette aria-label="Open command menu"><span data-icon="search"></span></button></div>
+    </div>
     <div class="mobile-bar">
-      <button class="icon-btn" id="menu-btn" type="button" aria-label="Menu"><span data-icon="menu"></span></button>
-      <div class="mark sm"><i></i><i></i><i></i></div><b>Jarvis</b>
+      <button class="icon-btn" id="menu-btn" type="button" aria-label="Menu" aria-controls="sidebar" aria-expanded="false"><span data-icon="menu"></span></button>
+      <div class="mark sm"><i></i><i></i><i></i></div><b>ZEND</b>
       <button class="icon-btn push" type="button" data-palette aria-label="Search"><span data-icon="search"></span></button>
     </div>
 
+    <div class="alert" id="action-status" role="status" aria-live="polite" hidden></div>
     <div class="alert ringing hidden" id="ring-banner">
       <span data-icon="bell"></span><span class="grow" id="ring-text">Timer is ringing</span>
       <button class="btn sm dark" id="ring-stop" type="button">Stop</button>
     </div>
     <div class="alert offline-alert" id="offline-banner">
       <span data-icon="power"></span>
-      <span class="grow">Jarvis isn't running. Start it from the project folder with <code>python main.py</code></span>
-      <button class="btn sm" type="button" id="copy-start"><span data-icon="copy"></span>Copy</button>
+      <span class="grow"><b>Your assistant is offline.</b> Start ZEND to reconnect your workspace.</span>
+      <button class="btn sm" type="button" id="copy-start" title="Copy the command to start ZEND"><span data-icon="copy"></span>Copy start command</button>
     </div>
 
     <!-- Home -->
     <section class="page" id="page-home">
       <header class="page-head">
         <div>
+          <div class="eyebrow">ZEND / CONTROL CENTER</div>
           <h1 id="greeting">Hello</h1>
           <p class="sub" id="home-sub"></p>
         </div>
         <div class="head-actions">
-          <button class="btn" type="button" id="undo-btn" disabled title="Undo the last change Jarvis made"><span data-icon="undo"></span>Undo</button>
-          <button class="btn danger" type="button" id="stop-btn" title="Stop everything Jarvis is doing (also Ctrl+Alt+J or 'stop everything')"><span data-icon="x"></span>Stop</button>
+          <button class="btn" type="button" id="undo-btn" disabled title="Undo the last change ZEND made"><span data-icon="undo"></span>Undo</button>
+          <button class="btn danger" type="button" id="stop-btn" disabled title="Stop everything ZEND is doing (also Ctrl+Alt+J or 'stop everything')"><span data-icon="x"></span>Stop all</button>
         </div>
       </header>
 
-      <div class="hero">
-        <div class="orb lg" data-state="offline"><span></span></div>
+      <div class="hero assistant-console">
         <div class="hero-main">
-          <div class="hero-state"><b data-bind="state">Offline</b><span data-bind="sub"></span></div>
+          <div class="hero-eyebrow"><span class="hero-status-dot"></span>ZEND ASSISTANT</div>
+          <h2 class="sr-only">ZEND assistant</h2>
+          <div class="hero-state" role="status" aria-live="polite"><b data-bind="state">Connecting</b><span data-bind="sub">Checking ZEND</span></div>
           <form class="ask" id="home-ask" autocomplete="off">
-            <input id="home-input" placeholder="Ask Jarvis anything" maxlength="500">
-            <button type="submit" class="send" aria-label="Send"><span data-icon="arrowUp"></span></button>
+            <input id="home-input" aria-label="Ask ZEND" placeholder="What can I take care of for you?" maxlength="500">
+            <button type="submit" class="send" disabled aria-label="Send"><span data-icon="arrowUp"></span></button>
           </form>
-          <div class="suggest" id="home-suggest"></div>
+          <p class="jarvis-reply" id="jarvis-reply" aria-label="Latest ZEND reply"></p>
+          <details class="console-voice"><summary>Voice &amp; sound</summary>
+            <div class="voice-meta"><span data-icon="mic"></span><b id="voice-current">Loading voices…</b><span class="tag" id="voice-provider">Loading</span><a href="#settings" class="link push" id="voice-settings-link">Settings</a></div>
+            <form id="voice-form" class="voice-form"><label class="sr-only" for="voice-select">ZEND voice</label><select id="voice-select" disabled><option>Loading voices…</option></select><button type="submit" class="btn dark" id="voice-apply" disabled>Use voice</button></form>
+            <p id="voice-note">Loading available voices…</p>
+            <p class="voice-feedback hidden" id="voice-feedback" role="status" aria-live="polite"></p>
+          </details>
+          <details class="capability-menu"><summary>Ask about your calendar, email, weather, or memory</summary><div class="suggest" id="home-suggest"></div></details>
+        </div>
+        <div class="hero-art">
+          <button class="core-expand" id="jarvis-expand" type="button" aria-label="Enter full ZEND mode" aria-pressed="false"><span>Enter full ZEND</span></button>
+          <svg class="core-hud" viewBox="0 0 300 300" fill="none" aria-hidden="true">
+            <circle class="core-ticks" cx="150" cy="150" r="139" stroke="currentColor" stroke-width="5" stroke-dasharray="1 14"/>
+            <circle class="core-orbit core-orbit-a" cx="150" cy="150" r="126" stroke="currentColor" stroke-width="2" stroke-dasharray="88 22 2 32 88 22 2 140"/>
+            <circle class="core-orbit core-orbit-b" cx="150" cy="150" r="106" stroke="currentColor" stroke-width="1" stroke-dasharray="220 90 20 120"/>
+            <circle class="core-inner" cx="150" cy="150" r="84" stroke="currentColor" stroke-width="1"/>
+            <path class="core-crosshair" d="M150 3v12m0 270v12M3 150h12m270 0h12" stroke="currentColor"/>
+          </svg>
+          <div class="orbit orbit-one" aria-hidden="true"></div><div class="orbit orbit-two" aria-hidden="true"></div><div class="orb lg" data-state="offline" aria-hidden="true"><span></span></div><div class="orbit-label" aria-hidden="true">VOICE / INTELLIGENCE / ACTION</div>
+          <div class="core-context" id="core-context"></div>
         </div>
       </div>
 
-      <div class="grid">
-        <div class="card span3">
-          <div class="card-head"><span data-icon="home"></span><h3>Your home</h3><span class="tag push" id="home-tag">Offline</span></div>
-          <div class="devices" id="devices"></div>
+      <div class="jarvis-tools"><button class="btn" type="button" data-palette>Controls</button><a class="btn" href="#chat">Conversation</a><a class="btn" href="#settings">Settings</a><button class="btn" id="jarvis-exit" type="button" hidden>Exit full mode <kbd>Esc</kbd></button></div>
+      <details class="jarvis-workspace" id="jarvis-workspace" open><summary>Open workspace</summary>
+      <div class="day-snapshot" aria-label="Workspace summary">
+        <a href="#connections" class="snapshot-item"><span class="snapshot-icon" data-icon="plug"></span><div><span>Google connection</span><b id="summary-connections">Unavailable</b></div><span class="snapshot-arrow">↗</span></a>
+        <button type="button" class="snapshot-item" data-dashboard-jump="productivity"><span class="snapshot-icon" data-icon="check"></span><div><span>Active tasks</span><b id="summary-tasks">—</b></div><span class="snapshot-arrow">↗</span></button>
+        <button type="button" class="snapshot-item" data-dashboard-jump="room"><span class="snapshot-icon" data-icon="timer"></span><div><span>Timers & alarms</span><b id="summary-timers">—</b></div><span class="snapshot-arrow">↗</span></button>
+        <a href="#missions" class="snapshot-item"><span class="snapshot-icon" data-icon="route"></span><div><span>Missions</span><b id="summary-missions">—</b></div><span class="snapshot-arrow">↗</span></a>
+      </div>
+
+      <div class="quick-actions" role="group" aria-label="Prepare a request">
+        <button type="button" class="quick-action" data-draft="Give me my daily briefing"><span class="quick-icon peach" data-icon="sun"></span><b>Start my day</b><span>Weather, plans, and priorities</span><span class="quick-arrow" aria-hidden="true">↗</span></button>
+        <button type="button" class="quick-action" data-draft="Help me plan a focused work session"><span class="quick-icon lavender" data-icon="timer"></span><b>Plan my focus</b><span>Prepare a work session</span><span class="quick-arrow" aria-hidden="true">↗</span></button>
+        <button type="button" class="quick-action" data-draft="Add to my list: "><span class="quick-icon mint" data-icon="check"></span><b>Clear my head</b><span>Capture a list item</span><span class="quick-arrow" aria-hidden="true">↗</span></button>
+        <button type="button" class="quick-action" data-draft="Research "><span class="quick-icon sky" data-icon="sparkle"></span><b>Explore an idea</b><span>Go deeper with research</span><span class="quick-arrow" aria-hidden="true">↗</span></button>
+      </div>
+
+      <div class="section-heading dashboard-heading"><div><h2>Your workspace</h2><p id="dashboard-caption" class="sr-only" role="status">Everything you need, together.</p></div><div class="dashboard-filters" role="group" aria-label="Filter workspace"><button type="button" data-dashboard-filter="all" aria-pressed="true" class="active">All</button><button type="button" data-dashboard-filter="room" aria-pressed="false">My room</button><button type="button" data-dashboard-filter="productivity" aria-pressed="false">Productivity</button></div></div>
+      <div class="grid" id="dashboard-grid">
+        <div class="card work-card">
+          <div class="card-head"><span data-icon="activity"></span><h3>Current work</h3><span class="tag push" id="tasks-tag">Unavailable</span></div>
+          <div id="tasks"></div>
+          <div class="work-missions"><div class="panel-head"><h3>Missions</h3><a class="link push" href="#missions">Open missions ↗</a></div><div id="overview-missions"></div></div>
         </div>
 
-        <div class="card">
+        <div class="card timers-card">
+          <div class="card-head"><span data-icon="timer"></span><h3>Timers & alarms</h3>
+            <button class="btn sm ghost push" type="button" id="new-timer-btn"><span data-icon="plus"></span>New</button></div>
+          <form class="new-timer hidden" id="new-timer" autocomplete="off">
+            <div class="presets" id="timer-presets"></div>
+            <div class="nt-row">
+              <input id="nt-min" type="number" min="1" max="1440" placeholder="Minutes" aria-label="Timer minutes">
+              <input id="nt-label" type="text" maxlength="40" placeholder="Label (optional)" aria-label="Timer label">
+              <button class="btn sm dark" type="submit">Start</button>
+            </div>
+          </form>
+          <div id="timers"></div>
+        </div>
+
+        <div class="card lists-card">
+          <div class="card-head"><span data-icon="check"></span><h3>Lists &amp; reminders</h3><span class="tag push" id="lists-tag">Unavailable</span></div>
+          <div id="lists" class="lists-grid"></div>
+        </div>
+
+        <div class="card media-card">
           <div class="card-head"><span data-icon="music"></span><h3>Now playing</h3></div>
           <div id="media"></div>
           <div class="volume" id="volume">
@@ -116,52 +187,30 @@
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-head"><span data-icon="timer"></span><h3>Timers & alarms</h3>
-            <button class="btn sm ghost push" type="button" id="new-timer-btn"><span data-icon="plus"></span>New</button></div>
-          <form class="new-timer hidden" id="new-timer" autocomplete="off">
-            <div class="presets" id="timer-presets"></div>
-            <div class="nt-row">
-              <input id="nt-min" type="number" min="1" max="1440" placeholder="Minutes">
-              <input id="nt-label" type="text" maxlength="40" placeholder="Label (optional)">
-              <button class="btn sm dark" type="submit">Start</button>
-            </div>
-          </form>
-          <div id="timers"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><span data-icon="phone"></span><h3>Phone</h3><span class="tag push" id="phone-tag">Off</span></div>
-          <div class="kv" id="phone-kv"></div>
-          <button class="btn wide" type="button" id="call-btn" disabled><span data-icon="phone"></span>Call my phone</button>
-        </div>
-
-        <div class="card span2">
+        <div class="card activity-card">
           <div class="card-head"><span data-icon="activity"></span><h3>Recent activity</h3>
             <a class="link push" href="#activity">View all</a></div>
           <div class="timeline" id="activity-home"></div>
         </div>
 
-        <div class="card span3">
-          <div class="card-head"><span data-icon="activity"></span><h3>Tasks</h3><span class="tag push" id="tasks-tag">None yet</span></div>
-          <div id="tasks"></div>
-        </div>
-
-        <div class="card span3">
-          <div class="card-head"><span data-icon="check"></span><h3>Lists</h3><span class="tag push" id="lists-tag">Empty</span></div>
-          <div id="lists" class="lists-grid"></div>
-        </div>
-
-        <div class="card span3">
-          <div class="card-head"><span data-icon="sparkle"></span><h3>Research</h3><span class="tag push" id="research-tag">None yet</span></div>
-          <div id="research"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head"><span data-icon="pin"></span><h3>Around you</h3></div>
+        <div class="card room-card">
+          <div class="card-head"><span data-icon="home"></span><h3>Room &amp; context</h3><span class="tag push" id="home-tag">Unavailable</span></div>
+          <div class="devices" id="devices"></div>
           <div class="kv" id="env-kv"></div>
         </div>
+
+        <details class="card research-card">
+          <summary class="card-head"><span data-icon="sparkle"></span><h3>Research</h3><span class="tag push" id="research-tag">Unavailable</span></summary>
+          <div id="research"></div>
+        </details>
+
+        <details class="card phone-card">
+          <summary class="card-head"><span data-icon="phone"></span><h3>Phone</h3><span class="tag push" id="phone-tag">Unavailable</span></summary>
+          <div class="kv" id="phone-kv"></div>
+          <button class="btn wide" type="button" id="call-btn" disabled><span data-icon="phone"></span>Call my phone</button>
+        </details>
       </div>
+      </details>
     </section>
 
     <!-- Chat -->
@@ -170,10 +219,10 @@
       <div class="chat-dock">
         <div class="chat-col">
           <form class="composer" id="chat-form" autocomplete="off">
-            <textarea id="chat-input" rows="1" placeholder="Message Jarvis" maxlength="500"></textarea>
+            <textarea id="chat-input" rows="1" placeholder="Message ZEND" aria-label="Message ZEND" maxlength="500"></textarea>
             <button type="submit" class="send" id="chat-send" aria-label="Send"><span data-icon="arrowUp"></span></button>
           </form>
-          <div class="composer-note">Jarvis also answers out loud in your room. <kbd>Enter</kbd> to send, <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line.</div>
+          <div class="composer-note">ZEND also answers out loud in your room. <kbd>Enter</kbd> to send, <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line.</div>
         </div>
       </div>
     </section>
@@ -181,7 +230,7 @@
     <!-- Memory -->
     <section class="page" id="page-memory">
       <header class="page-head">
-        <div><h1>Memory</h1><p class="sub">What Jarvis knows about you. It's stored only on this PC, and you can remove anything.</p></div>
+        <div><h1>Memory</h1><p class="sub">What ZEND knows about you. It's stored only on this PC, and you can remove anything.</p></div>
         <div class="head-actions"><button class="btn" type="button" id="mem-refresh"><span data-icon="refresh"></span>Refresh</button></div>
       </header>
       <div class="mem-layout">
@@ -198,11 +247,11 @@
         <div class="stack">
           <section class="panel">
             <div class="panel-head"><h2>Preferences</h2><span class="count" id="pref-count"></span></div>
-            <p class="desc">Learned from what you tell Jarvis ("always put Spotify on my left monitor") and from your corrections over time.</p>
+            <p class="desc">Learned from what you tell ZEND ("always put Spotify on my left monitor") and from your corrections over time.</p>
             <div id="mem-prefs"></div>
           </section>
           <section class="panel">
-            <div class="panel-head"><h2>Things Jarvis remembers</h2><span class="count" id="fact-count"></span></div>
+            <div class="panel-head"><h2>Things ZEND remembers</h2><span class="count" id="fact-count"></span></div>
             <div class="filter"><span data-icon="search"></span><input id="fact-filter" placeholder="Filter"></div>
             <div id="mem-facts"></div>
           </section>
@@ -213,7 +262,7 @@
     <!-- Activity -->
     <section class="page" id="page-activity">
       <header class="page-head">
-        <div><h1>Activity</h1><p class="sub">What Jarvis has done since it started. Email and calendar details are never shown here.</p></div>
+        <div><h1>Activity</h1><p class="sub">What ZEND has done since it started. Email and calendar details are never shown here.</p></div>
         <div class="head-actions"><button class="btn" type="button" id="undo-btn-2" disabled><span data-icon="undo"></span>Undo last change</button></div>
       </header>
       <section class="panel"><div class="timeline lg" id="activity-full"></div></section>
@@ -222,7 +271,7 @@
     <!-- Missions -->
     <section class="page" id="page-missions">
       <header class="page-head">
-        <div><h1>Missions</h1><p class="sub">Long jobs Jarvis runs in the background: finding businesses, checking their websites, building demo sites and outreach drafts. Nothing is sent or published without your approval.</p></div>
+        <div><h1>Missions</h1><p class="sub">Long jobs ZEND runs in the background: finding businesses, checking their websites, building demo sites and outreach drafts. Nothing is sent or published without your approval.</p></div>
         <div class="head-actions"><select class="mission-pick" id="mission-pick" aria-label="Mission"></select></div>
       </header>
       <div id="mission-empty"></div>
@@ -246,15 +295,15 @@
 
     <!-- Status -->
     <section class="page" id="page-status">
-      <header class="page-head"><div><h1>Status</h1><p class="sub">How Jarvis is set up and how fast it's answering.</p></div></header>
-      <div id="status-cards" class="cards"></div>
+      <header class="page-head"><div><h1>Status</h1><p class="sub">Health, setup and response speed of your assistant.</p></div></header>
+      <div id="status-cards" class="status-board"></div>
       <div class="two-col">
         <section class="panel">
           <div class="panel-head"><h2>Right now</h2></div>
           <div class="kv lg" id="sys-kv"></div>
         </section>
         <section class="panel">
-          <div class="panel-head"><h2>Last response</h2></div>
+          <div class="panel-head"><h2>Response speed</h2></div>
           <div id="timing"></div>
         </section>
       </div>
@@ -263,14 +312,14 @@
     <!-- Connections -->
     <section class="page" id="page-connections">
       <header class="page-head"><div><h1>Connections</h1>
-        <p class="sub">Accounts and services Jarvis can use. You sign in on the provider's own page: Jarvis never sees your
+        <p class="sub">Accounts and services ZEND can use. You sign in on the provider's own page: ZEND never sees your
           password, and its access keys are kept in Windows Credential Manager.</p></div></header>
       <div id="conn-banner" class="banner hidden"></div>
       <div id="providers"></div>
       <div class="provider" id="phone-provider">
         <div class="provider-head">
           <div class="logo"><span data-icon="phone"></span></div>
-          <div class="name">Phone line<div class="meta">Twilio. Jarvis can call you while you drive, and you can call it.</div></div>
+          <div class="name">Phone line<div class="meta">Twilio. ZEND can call you while you drive, and you can call it.</div></div>
           <span class="pill" id="phone-pill">Off</span>
         </div>
         <div class="meta" id="phone-detail"></div>
@@ -279,8 +328,15 @@
 
     <!-- Settings -->
     <section class="page" id="page-settings">
-      <header class="page-head"><div><h1>Settings</h1><p class="sub">Saved to <code>.env</code>. Restart Jarvis after saving for changes to take effect.</p></div></header>
+      <header class="page-head"><div><h1>Settings</h1><p class="sub">Saved to <code>.env</code>. Restart ZEND after saving for changes to take effect.</p></div></header>
+      <section class="panel appearance-panel" aria-labelledby="appearance-title">
+        <div class="panel-head"><h2 id="appearance-title">Appearance</h2><span class="tag plain push">This browser</span></div>
+        <div class="appearance-field"><label for="appearance-mode">Visual mode</label><select id="appearance-mode"><option value="classic">Classic</option><option value="hud">ZEND HUD</option></select></div>
+        <p id="appearance-status" class="desc" role="status" aria-live="polite"></p>
+      </section>
       <div id="banner" class="banner hidden"></div>
+      <div class="settings-search filter"><span data-icon="search"></span><input id="settings-search" aria-label="Search settings" placeholder="Find a setting, like voice or microphone"></div>
+      <p id="settings-no-results" class="hidden sub" role="status">No settings found. Try another search.</p>
       <div id="settings-sections"></div>
       <div class="save-bar">
         <span id="save-hint">No changes</span>
@@ -292,16 +348,19 @@
 
 <!-- command menu -->
 <div class="palette hidden" id="palette">
-  <div class="palette-box" role="dialog" aria-label="Command menu">
+  <div class="palette-box" role="dialog" aria-modal="true" aria-label="Command menu">
     <div class="palette-input"><span data-icon="search"></span>
-      <input id="palette-input" placeholder="Ask Jarvis, or search actions and pages" autocomplete="off"><kbd>Esc</kbd></div>
+      <input id="palette-input" placeholder="Ask ZEND, or search actions and pages" autocomplete="off"><kbd>Esc</kbd></div>
     <div class="palette-list" id="palette-list"></div>
     <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> to move</span><span><kbd>Enter</kbd> to run</span></div>
   </div>
 </div>
-<div class="toasts" id="toasts"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 <script src="jarvis.js"></script>
+<script src="presence.js"></script>
+<script src="hud-static.js?v=4"></script>
+<script src="cinematic.js?v=4"></script>
 </body>
 </html>

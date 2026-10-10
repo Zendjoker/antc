@@ -8,9 +8,10 @@ import threading
 import numpy as np
 
 tmp = pathlib.Path(tempfile.mkdtemp())
-os.environ.update(REMINDERS_FILE=str(tmp / "rem.json"), MEMORY_DB=str(tmp / "mem.db"), SETTINGS_FILE=str(tmp / "set.json"),
-                  PYTHONIOENCODING="utf-8")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from tests.harness import setup_env  # noqa: E402  (every file Jarvis writes goes to a temp folder; fake API keys)
+
+setup_env(REMINDERS_FILE=str(tmp / "rem.json"), MEMORY_DB=str(tmp / "mem.db"), SETTINGS_FILE=str(tmp / "set.json"))
 
 from room_agent import config  # noqa: E402
 from room_agent import runtime as rt  # noqa: E402

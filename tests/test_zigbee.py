@@ -25,7 +25,10 @@ LIGHT_EXPOSES = [{"type": "light", "features": [
     {"name": "state", "property": "state"}, {"name": "brightness", "property": "brightness", "value_max": 254},
     {"name": "color_temp", "property": "color_temp", "value_min": 153, "value_max": 370},
     {"name": "color_xy", "property": "color", "type": "composite"}]},
-    {"name": "effect", "property": "effect", "values": ["breathing", "rainbow1", "rainbow2", "chasing"]}]
+    {"name": "effect", "property": "effect", "values": ["breathing", "rainbow1", "rainbow2", "chasing"]},
+    # real exposes for the Aqara LED Strip T1 (lumi.light.acn132), confirmed from zigbee-herdsman-converters
+    # dist/lib/lumi.js (lumiRGBEffectSpeed): numeric, 0-100%, 0 when no effect is active.
+    {"name": "effect_speed", "property": "effect_speed", "value_min": 0, "value_max": 100}]
 DEVICES = [
     {"type": "Coordinator", "friendly_name": "Coordinator", "ieee_address": "0x0"},
     {"friendly_name": "Door sensor", "ieee_address": "0x1", "power_source": "Battery",
@@ -125,8 +128,22 @@ r = executor.execute("set_light", {"white": "warm"})
 t.check("warm white -> the light's own warm end", r.success and fake.sent[-1][1]["color_temp"] == 337, fake.sent[-1])
 r = executor.execute("set_light", {"effect": "rainbow"})
 t.check("effects matched by name", r.success and fake.sent[-1][1]["effect"] == "rainbow1", fake.sent[-1])
+r = executor.execute("set_light", {"effect": "sparkle-tornado"})
+t.check("unsupported effect name: rejected before anything is sent, lists real ones", not r.success
+        and "sparkle-tornado" in r.message and "breathing" in r.message and fake.sent[-1][1]["effect"] == "rainbow1",
+        (r.message, fake.sent[-1]))
+r = executor.execute("set_light", {"speed": 75})
+t.check("effect speed: the real exposed key (effect_speed), value passed through within range",
+        r.success and fake.sent[-1][1]["effect_speed"] == 75, fake.sent[-1])
+r = executor.execute("set_light", {"speed": 150})
+t.check("effect speed: out-of-range is refused before anything is sent (same schema-validated behavior as "
+        "brightness/other bounded params), not silently clamped or invented", not r.success
+        and fake.sent[-1][1]["effect_speed"] == 75, (r.message, fake.sent[-1]))
+payload, why = hub.light_payload({"name": "Plain light", "light": {"max": 254}}, speed=50)
+t.check("a light that doesn't report supporting effect_speed: speed is refused, nothing invented", payload is None
+        and "effect speed" in why, why)
 r = executor.execute("set_light", {"color": "plaid"})
-t.check("unknown color: refused, nothing sent", not r.success and "plaid" in r.message and fake.sent[-1][1].get("effect") == "rainbow1")
+t.check("unknown color: refused, nothing sent", not r.success and "plaid" in r.message and fake.sent[-1][1].get("effect_speed") == 75)
 rt.new_turn("lights off")
 executor.execute("set_light", {"on": False})
 before_undo = hub.state["LED strip"]["state"]

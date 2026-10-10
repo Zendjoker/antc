@@ -69,7 +69,11 @@ def _answered_in_code(history, mark, text, raw, reply, private, what="PENDING_AC
 def take_turn(history, text, raw=None, final=False, output=None):
     """(One turn at a time, from the room or a phone call: see _take_turn.)"""
     with rt.brain:
-        return _take_turn(history, text, raw, final, output)
+        rt.last_activity = time.time()  # (a typed exchange is activity too: the voice loop mustn't fall asleep during it)
+        try:
+            return _take_turn(history, text, raw, final, output)
+        finally:
+            rt.last_activity = time.time()
 
 
 def _take_turn(history, text, raw=None, final=False, output=None):
@@ -115,6 +119,9 @@ def _take_turn(history, text, raw=None, final=False, output=None):
         history[mark]["content"] += decision.note  # (for this reply only: replaced by the plain text after the turn)
     elif not decision:
         history[mark]["content"] += pending.call_hint(raw or text)  # (a request that collects its own details: call it)
+    from room_agent.tools import voice
+
+    history[mark]["content"] += voice.handle_complaint(raw or text)  # ("it sounds weird": the previous voice, in code)
     t0 = time.time()
     try:
         ask(history)

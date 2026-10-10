@@ -77,6 +77,10 @@ conversation_turn = None     # the turn that last used the conversation model (l
 recent = []                 # dialogue saved across restarts: [{"role", "text", "time"}] (conversation/history.py)
 last_reply = ""             # what the agent last said, to know whether it's waiting for an answer
 pending = None              # an unfinished request, or one waiting for a yes (tools/validate.py, actions/executor.py)
+declined = {}               # tool -> (turn_no, their words): a request they turned down ("no, no draft") (actions/pending.py)
+voice_change = None         # (turn_no, "style" | "voice", what it was before): the last voice change (tools/voice.py)
+last_cut = None             # (turn_no, what was spoken): a reply stopped because speech was heard (llm/guard.py)
+last_activity = 0.0         # when a turn (spoken or TYPED) last started or ended: the voice loop's silence counts from it
 ringing = None              # the timer or alarm ringing right now (tools/timers.py)
 last_ring = None            # the one that last went off: label, message, kind, time, stopped (tools/timers.py)
 last_active_app = None      # the app this conversation is about ("close it"): name, action, time (tools/apps.py)
@@ -95,6 +99,12 @@ stt_raw = ""                # everything recognition produced for it, kept or dr
 stt_uncertain = False       # recognition only just passed: no memory, nothing irreversible (audio/speech_check.py)
 patience = float(voices.saved("patience", 1.0))  # x SILENCE_S before it treats you as finished (tools/voice.py)
 speech_rate = float(voices.saved("speech_rate", 1.0))  # their speaking pace, both voices (tools/voice.py)
+assistant_name = str(voices.saved("assistant_name", config.ASSISTANT_NAME))  # what it calls itself (tools/voice.py);
+# takes effect on the next reply, no restart needed
+wake_word = (str(voices.saved("wake_word")) if voices.saved("wake_word")
+             and voices.saved("wake_word_env", config.WAKE_WORD) == config.WAKE_WORD else config.WAKE_WORD)
+# which openWakeWord model it listens for: one saved by voice (tools/voice.py) unless WAKE_WORD in .env changed since
+# (the dashboard's setting); only takes effect on the NEXT start - loops.py loads the detector once at startup
 
 # ---------------------------------------------------------------- SERVICES
 state = StateMachine()

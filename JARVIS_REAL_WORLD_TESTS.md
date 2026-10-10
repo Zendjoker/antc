@@ -3,7 +3,7 @@
 Twenty supervised desktop tasks with the **real** Jarvis: your voice, your room, your browser.
 
 - **These are the only completion numbers that count.** Automated mock tests do not count as task completions.
-- **Results: none yet.** The current code has never run live (see JARVIS_TECHNICAL_AUDIT.md, section 0).
+- **Results: none yet (as of the 2026-10-08 audit).** See `docs/archive/2026-10/JARVIS_TECHNICAL_AUDIT.md`, section 0, for that snapshot; re-verify against the current build before relying on it.
 
 ## How to run
 

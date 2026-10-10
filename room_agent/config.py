@@ -1,6 +1,7 @@
 """Every setting, read once from .env (or the environment). Nothing in here changes while the agent runs."""
 
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -87,9 +88,15 @@ FOLLOW_DEFAULT_DEVICE = os.getenv("FOLLOW_DEFAULT_DEVICE", "1") == "1"  # blank 
 AEC = os.getenv("ECHO_CANCELLATION", "1") == "1"  # subtract the agent's own voice from the mic
 NOISE_SUPPRESSION = os.getenv("NOISE_SUPPRESSION", "1") == "1"
 
+# ---------- identity ----------
+ASSISTANT_NAME = (os.getenv("ASSISTANT_NAME", "Jarvis").strip() or "Jarvis")  # what it calls itself; set_assistant_name
+# can change this live (tools/voice.py). Changing WAKE_WORD below is a separate, restart-required step (see loops.py).
+
 # ---------- wake word and speech detection ----------
-WAKE_WORD = os.getenv("WAKE_WORD", "hey_jarvis")
-WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.5"))
+WAKE_WORD = os.getenv("WAKE_WORD", "hey_jarvis").strip() or "hey_jarvis"
+if not WAKE_WORD.lower().endswith((".onnx", ".tflite")):  # "Hey Jarvis" / "hey-jarvis" -> the model name hey_jarvis
+    WAKE_WORD = re.sub(r"[\s-]+", "_", WAKE_WORD.lower())
+WAKE_THRESHOLD = float(os.getenv("WAKE_THRESHOLD", "0.5"))  # how sure (0-1) it must be it heard the wake word
 WAKE_SOUND = os.getenv("WAKE_SOUND", "assets/sounds/wake.mp3")  # played when it wakes up; blank = short beep
 WAKE_SOUND_ON = os.getenv("WAKE_SOUND_ON", "startup").lower()  # startup | wake (before "yeah?") | off
 SPEECH_RMS = float(os.getenv("SPEECH_RMS", "500"))  # tune with calibrate.py output

@@ -190,6 +190,8 @@ class Hub:
                         light["mireds"] = (f.get("value_min", 153), f.get("value_max", 500))
                     if f.get("property") == "effect":
                         light["effects"] = f.get("values", [])
+                    if f.get("property") == "effect_speed":  # Aqara LED Strip T1 (lumi.light.acn132): 0-100%, numeric
+                        light["effect_speed"] = (f.get("value_min", 0), f.get("value_max", 100))
                     if f.get("property") == "brightness":
                         light["max"] = f.get("value_max", 254)
                     if f.get("property") == "color_xy" or f.get("name") == "color_xy":
@@ -299,7 +301,7 @@ class Hub:
             return dict(self.state.get(name, {})) if ok else None
 
     # ---------------------------------------------------------------- reading
-    def light_payload(self, dev, on=None, brightness=None, color=None, white=None, effect=None):
+    def light_payload(self, dev, on=None, brightness=None, color=None, white=None, effect=None, speed=None):
         """What they asked for -> a Zigbee2MQTT command for this light (None + a reason if it can't)."""
         p = {}
         if on is not None:
@@ -329,6 +331,17 @@ class Hub:
             if not hit:
                 return None, f"{dev['name']} has no '{effect}' effect" + (f" (it has: {', '.join(effects[:8])})" if effects else "")
             p["effect"] = hit
+            p.setdefault("state", "ON")
+        if speed is not None:
+            # effect_speed (Aqara LED Strip T1): the device itself reports 0 when no effect is active, so this only
+            # makes sense together with (or right after) setting an effect - not invented, not a separate "mode".
+            # The tool schema's minimum/maximum already refuses an out-of-range value before this code runs
+            # (tools/validate.py); the clamp below is just a defensive second line, never the normal path.
+            rng = dev["light"].get("effect_speed")
+            if rng is None:
+                return None, f"{dev['name']} doesn't support an adjustable effect speed"
+            lo, hi = rng
+            p["effect_speed"] = max(lo, min(hi, round(float(speed))))
             p.setdefault("state", "ON")
         return (p, "") if p else (None, "nothing to change was asked for")
 

@@ -22,9 +22,80 @@ from dataclasses import dataclass, field
 
 from room_agent import runtime as rt
 
-COMMAND, QUESTION, CASUAL, EMOTIONAL, CORRECTION, CLARIFICATION, CONTINUATION, ENDING = (
+COMMAND, QUESTION, CASUAL, EMOTIONAL, CORRECTION, CLARIFICATION, CONTINUATION, ENDING, ADVICE = (
     "direct command", "question", "casual conversation", "emotional expression", "correction", "clarification",
-    "task continuation", "conversation ending")
+    "task continuation", "conversation ending", "advice")
+
+# Asking what to say or do ("What should I tell them?", "Should I build a site or run ads?"): an answer in words, never
+# an action. "tell them" alone is also an email tool's trigger word, so this is checked before any tool may run.
+_ADVICE = re.compile(
+    r"\b(?:what|how)\s+(?:should|do|would|could|can|shall)\s+(?:i|we)\s+(?:\w+\s+){0,2}?"
+    r"(?:tell|say|write|reply|respond|answer|pitch|text|message|word|explain|handle|do)\b"
+    r"|\bwhat\s+(?:would|should)\s+you\s+(?:say|tell|write|do)\b"
+    r"|^\W*(?:(?:so|and|but|okay|ok|honestly)[\s,]+)*should\s+(?:i|we)\b.*\bor\b"
+    r"|\b(?:any|your|give me (?:some|your)?)\s*(?:advice|opinion|take|thoughts)\b", re.I)
+# ...unless they also asked for it to be put somewhere: "what should I tell them? draft it to Sam"
+_ADVICE_ACTION = re.compile(r"(?<!\bno )(?<!n't )(?<!\bnot )\b(?:draft|send|e-?mail (?:it|that|this|him|her|them)|put (?:it|that) in|save (?:it|that)|"
+                            r"text (?:it|that) to|write (?:it|that) (?:up|down|to))\b", re.I)
+
+
+# Something to write ("write me a two-sentence outreach pitch"): written from what the model knows, not researched first,
+# unless their words ask for outside information.
+_WRITING = re.compile(r"^\W*(?:(?:hey|so|okay|ok|jarvis|can you|could you|would you|please|just|now)[\s,]+)*(?:write|draft|"
+                      r"compose|come up with|give me|make)\b.{0,50}?\b(?:lines?|pitch(?:es)?|messages?|texts?|e-?mails?|"
+                      r"scripts?|captions?|bio|intro|opener|posts?|paragraphs?|sentences?|tagline|slogan|outreach|dm)\b", re.I)
+_LOOK_UP = re.compile(r"\b(?:research|look (?:up|into)|find out|search|sources?|statistics|stats|data|numbers|latest|current|"
+                      r"compare|facts?|cite|according to)\b", re.I)
+
+
+def writing_task(text):
+    """A request to write something that doesn't ask for anything to be looked up."""
+    t = str(text or "")
+    return bool(_WRITING.search(t)) and not _LOOK_UP.search(t)
+
+
+# Playback changes (play / pause / skip) need an affirmative, explicit request in their own words: "Play Spotify", "Pause
+# the song", "Resume playback", "Can you play some music?", "Is it playing? If not, play it.", or a yes to Jarvis's own
+# offer to. Never a question about it ("Is Spotify playing?", "Did you pause my music?", "Why did you turn the music on?"),
+# a hypothetical ("If I asked you to play music, what would happen?") or a negation ("Don't play anything.", "Don't change
+# anything"). Ambiguity never authorizes it (Oct 9 15:56: asked whether music was playing, it read "paused" and pressed play).
+_PLAYBACK_VERB = (r"(?:play|pause|resume|unpause|skip|listen to|hear|stop (?:the |my )?(?:music|song|track|playback|video|it)|"
+                  r"stop playing|"
+                  r"keep playing|put on|turn (?:the |my )?(?:music|song) (?:back )?(?:on|off)|next (?:song|track)|"
+                  r"previous (?:song|track)|go back a (?:song|track)|(?:go to|play) the (?:next|previous|last) (?:one|song|track))")
+_LEAD = r"^\W*(?:(?:ok(?:ay)?|hey|jarvis|please|just|now|and|then|so|alright|yeah|yes|actually|go ahead and)[\s,.!]+)*"
+_PLAYBACK_ASK = re.compile(
+    _LEAD + r"(?:(?:can|could|would|will) you\s+(?:please\s+|just\s+)?|i (?:want|need|'?d like) (?:you to |to )?|"
+    r"let'?s |time to )?" + _PLAYBACK_VERB + r"\b", re.I)
+_HYPOTHETICAL = re.compile(r"\b(?:if i (?:asked|told|said|wanted)|what would happen|what if|suppose|imagine|hypothetically|"
+                           r"would you ever|could you ever|in theory)\b", re.I)
+_NEGATED = re.compile(r"\b(?:don'?t|do not|never|no need to|not now|without)\b", re.I)
+_OFFERED_PLAYBACK = re.compile(r"\b(?:play|resume|pause|skip|put (?:it|something|some music) on|start (?:it|the music))\b",
+                               re.I)
+
+
+def asks_to_change_playback(text, last_reply=""):
+    """Did they affirmatively ask to change playback, in their own words (or say yes to Jarvis offering to)?"""
+    from room_agent.actions.executor import AFFIRM
+
+    t = str(text or "").strip()
+    if AFFIRM.match(t) and not _NEGATED.search(t) and str(last_reply or "").rstrip().endswith("?") \
+            and _OFFERED_PLAYBACK.search(last_reply or ""):
+        return True  # ("Want me to play it?" -> "Yes")
+    for sentence in re.split(r"(?<=[.?!])\s+", t):
+        if _HYPOTHETICAL.search(sentence):
+            continue
+        for clause in re.split(r"[,;]\s*|\s+(?:and|then|but)\s+", sentence):
+            c = re.sub(r"^\W*if (?:not|it'?s not|it isn'?t|nothing'?s playing)\W*", "", clause, flags=re.I)  # ("If not, play it.")
+            if _PLAYBACK_ASK.search(c) and not _NEGATED.search(c):
+                return True
+    return False
+
+
+def asks_advice(text):
+    """They want advice or the words themselves, not an action done for them."""
+    t = str(text or "")
+    return bool(_ADVICE.search(t)) and not _ADVICE_ACTION.search(t)
 
 _WH = re.compile(r"^\W*(?:(?:hey|so|and|but|ok(?:ay)?|jarvis)[\s,]+)*(what|what's|whats|who|who's|where|where's|when|why|how|"
                  r"which|whose|is|are|am|was|were|do|does|did|have|has|had|will|would|should|could|can|may|might|shall)\b", re.I)
@@ -83,6 +154,8 @@ class TurnPolicy:
                           + ": just do it; don't re-confirm details you already have.",
             ENDING: "they're wrapping up: a short, natural goodbye; no question, no offer.",
             CORRECTION: "a correction (see the correction line): acknowledge in a few words and move on.",
+            ADVICE: "they want your advice or the actual words to use: give it right here, concrete and honest. No tool "
+                    "to draft, send, save or schedule it, and don't ask who it's for.",
         }[self.kind]
         return f"- turn_type: {self.kind}. {guide}"
 
@@ -113,6 +186,9 @@ def classify(text, info=None):
         return p
     if _ENDING.match(t):
         p.kind, p.why = ENDING, ["a sign-off"]
+        return p
+    if asks_advice(t):
+        p.kind, p.why = ADVICE, ["asks what to say or do"]
         return p
     asked = (rt.last_reply or "").rstrip().endswith("?")
     if (asked or rt.pending is not None) and not _WH.match(t) and len(words) <= 8:

@@ -18,8 +18,8 @@ from room_agent import runtime as rt
 from room_agent import trace
 from room_agent.audio.speaker import finish_speaking, say
 from room_agent.config import (BUDGET_FALLBACK, LEVEL_DEEP, LLM_COMPLEX_TOPICS, LLM_COMPLEX_WORDS, LLM_DEFAULT,
-                               LLM_PROVIDER, LLM_SMART, LLM_SMART_TRIGGERS, MODEL, OLLAMA_MODEL_DEEP, OLLAMA_URL, OPENAI_KEY,
-                               OPENAI_CONVERSATION_MODEL, OPENAI_CONVERSATION_REASONING, OPENAI_MODEL)
+                               LLM_PROVIDER, LLM_SMART, LLM_SMART_TRIGGERS, MODEL, OLLAMA_MODEL, OLLAMA_MODEL_DEEP, OLLAMA_URL,
+                               OPENAI_KEY, OPENAI_CONVERSATION_MODEL, OPENAI_CONVERSATION_REASONING, OPENAI_MODEL)
 from room_agent.llm.budget import budget
 from room_agent.llm.claude import ask_claude
 from room_agent.llm.ollama import ask_ollama
@@ -71,6 +71,8 @@ def conversational(text):
     intent = getattr(rt.turn, "intent", None)
     if not t or kind == policy.ENDING:
         return ""
+    if kind == policy.ADVICE:  # (judgment in words: "what should I tell them?", "site or ads?")
+        return "advice"
     if kind in (policy.CLARIFICATION, policy.CONTINUATION):
         # (an answer to what Jarvis just asked in a conversation stays in it; an answer to a task's question - a pending
         # request - stays cheap like the task)
@@ -151,10 +153,18 @@ def ask(history):
         return ask_claude(history)
 
 
-def _ollama_up():
+def _ollama_up(model=None):
+    """The Ollama server being reachable is not enough: a server that's up but missing the configured model answers
+    with a 404 (see the 2026-10-09 live failure: server was up, 'qwen3:14b' had never been pulled). Check both."""
+    wanted = model or OLLAMA_MODEL
     try:
-        return requests.get(f"{OLLAMA_URL}/api/tags", timeout=2).ok
-    except requests.RequestException:
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+        if not r.ok:
+            return False
+        names = {m.get("name", "") for m in r.json().get("models", [])}
+        # Ollama tags are "name:tag" (e.g. "qwen3:14b"); match the exact tag, or the bare name with any tag.
+        return wanted in names or any(n.split(":")[0] == wanted.split(":")[0] for n in names)
+    except (requests.RequestException, ValueError, AttributeError):
         return False
 
 
@@ -187,7 +197,16 @@ def over_budget(history):
         return
     temp = _plain(history)
     n = len(temp)
-    ask_ollama(temp)
+    try:
+        ask_ollama(temp)
+    except Exception as e:  # noqa: BLE001
+        # The up-front check in _ollama_up() passed, but the call itself still failed (model unloaded, server
+        # restarted mid-session, etc.): say so honestly rather than crashing after already claiming "switching".
+        log.warning("Ollama fallback failed after passing the availability check (%s: %s)", e.__class__.__name__,
+                   str(e)[:160])
+        say("Sorry, my local backup model just failed too, so I can't answer that until tomorrow's budget resets.")
+        finish_speaking()
+        return
     for m in temp[n:]:  # keep what the local model said, as plain text, in the real history
         if m["role"] == "assistant" and isinstance(m.get("content"), str) and m["content"].strip():
             history.append({"role": "assistant", "content": m["content"]})

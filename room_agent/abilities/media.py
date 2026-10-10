@@ -80,6 +80,12 @@ def _call(fn_name, convert=None):
 
 
 common = dict(group="media", claim="media", available=lambda: IS_WINDOWS)
+# "Playing now" is only true after something started playback: reading what's on ("paused") never backs it (Oct 9 15:56:
+# "Not playing, it's paused. Playing now - Premier Gaou")
+register_claim("media_started", r"^\W*(?:playing now|now playing|playing again)\b|\b(?:started playing|resumed playing|"
+                                r"(?:i'?ve|i have|i) (?:just )?(?:started|put on|hit play))\b",
+               verified_by={"play_pause:playing", "play_music"})  # (a pause or a read never backs it; "X is playing
+#                                                                     now", reported from a fresh read, isn't this claim)
 def _say_level(result):
     """Spoken after a reflex volume change: the level actually read back."""
     level = (result.state_after or {}).get("volume")
