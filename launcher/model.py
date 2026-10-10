@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 STOPPED = "stopped"
 STARTING = "starting"
 RUNNING = "running"
@@ -26,7 +28,7 @@ _REFUSED_IMAGES = ("python.exe", "pythonw.exe", "node.exe", "claude.exe", "curso
 
 def start_order(mode: str) -> list[str]:
     names = ["backend", "dashboard"]
-    if mode == "next":
+    if mode in ("next", "production"):
         names.append("frontend")
     return names
 
@@ -46,16 +48,31 @@ def close_action(close_to_tray: bool, stop_on_exit: bool) -> str:
 
 
 def taskkill_args(pid: int, *, force: bool) -> list[str]:
-    """Tree-kill one confirmed pid. Refuses an image-wide kill."""
+    """Kill one confirmed pid. No tree flag and no image name, so a tunnel child is not swept up."""
     pid = int(pid)
     if pid <= 0:
         raise ValueError("pid must be a real process id")
-    args = ["taskkill", "/PID", str(pid), "/T"]
+    args = ["taskkill", "/PID", str(pid)]
     if force:
         args.append("/F")
-    if "/IM" in args or any(image in args for image in _REFUSED_IMAGES):
+    if "/IM" in args or "/T" in args or any(image in args for image in _REFUSED_IMAGES):
         raise RuntimeError("refusing an image-wide kill")
     return args
+
+
+def is_tunnel(command: str, exe: str = "") -> bool:
+    folded = f"{command}\n{exe}".lower()
+    return "cloudflared" in folded or "trycloudflare" in folded
+
+
+def kill_plan(pids: list[int], commands: dict[int, str], *, force: bool) -> list[list[str]]:
+    """One taskkill per verified pid, skipping Cloudflare tunnels."""
+    planned = []
+    for pid in pids:
+        if is_tunnel(commands.get(int(pid), "")):
+            continue
+        planned.append(taskkill_args(int(pid), force=force))
+    return planned
 
 
 def command_matches(command: str, script: str) -> bool:
@@ -84,7 +101,25 @@ def looks_like_ours(command: str, root: str, role: str, cwd: str = "") -> bool:
     if role == "frontend":
         front = root_f + "\\frontend"
         in_front = front in folded or cwd_f == front or cwd_f.startswith(front + "\\")
-        return in_front and (_has_script(folded, "frontend\\scripts\\dev.mjs") or _has_script(folded, "scripts\\dev.mjs"))
+        dev = in_front and (_has_script(folded, "frontend\\scripts\\dev.mjs") or _has_script(folded, "scripts\\dev.mjs"))
+        production = in_tree and ("launcher.staticfront" in folded or _has_script(folded, "launcher\\staticfront.py"))
+        return dev or production
+    return False
+
+
+def identity_ok(command: str, exe: str, root: str, role: str, cwd: str = "") -> bool:
+    """Executable name plus the project command. An empty exe is tolerated for command-only checks."""
+    if is_tunnel(command, exe):
+        return False
+    if not looks_like_ours(command, root, role, cwd):
+        return False
+    name = Path(exe).name.lower() if exe else ""
+    if not name:
+        return True
+    if role in ("backend", "dashboard"):
+        return name in ("python.exe", "pythonw.exe")
+    if role == "frontend":
+        return name in ("node.exe", "node", "python.exe", "pythonw.exe")
     return False
 
 
@@ -104,11 +139,14 @@ def _has_script(folded: str, script: str) -> bool:
 
 
 def may_stop(record: dict, live_command: str | None, live_created: int | None, live_pid: int | None,
-             launcher_pid: int) -> tuple[bool, str]:
-    """Stop only a process this launcher started, still the same process, still the same script."""
+             launcher_pid: int, live_exe: str = "", listener_pid: int | None = None,
+             ancestor_ok: bool = True) -> tuple[bool, str]:
+    """Stop only a process this launcher started, still the same process, still the same program."""
     pid = int(record.get("pid") or 0)
     if pid <= 0:
         return False, "no owned pid"
+    if is_tunnel(live_command or "", live_exe or ""):
+        return False, "refusing to stop a Cloudflare tunnel"
     if pid == int(launcher_pid):
         return False, "refusing to stop the launcher"
     if live_pid is None:
@@ -121,10 +159,37 @@ def may_stop(record: dict, live_command: str | None, live_created: int | None, l
     script = str(record.get("script") or "")
     if not command_matches(live_command or "", script):
         return False, "command line is not the script this launcher started"
+    root = str(record.get("root") or "")
+    role = str(record.get("role") or "")
+    if root and role and not identity_ok(live_command or "", live_exe or "", root, role, str(record.get("cwd") or "")):
+        return False, "process identity does not match this project"
+    port = int(record.get("port") or 0)
+    if port and listener_pid and int(listener_pid) != pid and not ancestor_ok:
+        return False, "this pid does not own the service port"
     lowered = (live_command or "").lower()
     if any(name in lowered for name in ("claude", "cursor", "copilot")) and not command_matches(live_command or "", script):
         return False, "unrelated developer process"
     return True, "owned"
+
+
+CACHE_DIRS = (
+    ("frontend", ".next"),
+    ("frontend", "node_modules", ".cache"),
+)
+
+
+def cache_targets(root: str | Path) -> list[Path]:
+    """Regenerable frontend caches only. Runtime files are never returned."""
+    base = Path(root).resolve()
+    found = []
+    for parts in CACHE_DIRS:
+        path = base.joinpath(*parts).resolve()
+        if base not in path.parents:
+            continue
+        if any(part.lower() in {".env", "control.token", "logs", "data", "memory"} for part in path.parts):
+            continue
+        found.append(path)
+    return found
 
 
 def assess_port(*, listening: bool, healthy: bool, command: str, root: str, role: str,

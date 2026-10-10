@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import threading
 import tkinter as tk
-import webbrowser
 from pathlib import Path
 from tkinter import scrolledtext
 
@@ -67,8 +66,8 @@ class LauncherApp:
         self.root = root
         root.title("ZendAgent")
         root.configure(bg=BG)
-        root.geometry("460x820")
-        root.minsize(420, 740)
+        root.geometry("500x940")
+        root.minsize(460, 860)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         try:
             root.iconbitmap(str(self.root_dir / "launcher" / "zendagent.ico"))
@@ -105,6 +104,7 @@ class LauncherApp:
         switch.pack(anchor="w", pady=(6, 0))
         self.classic_btn = self._mode_button(switch, "Classic", "classic")
         self.next_btn = self._mode_button(switch, "Next.js dev", "next")
+        self.production_btn = self._mode_button(switch, "Production", "production")
         self.mode_label = tk.Label(body, bg=CARD, fg=INK, font=("Segoe UI", 10), wraplength=390, justify="left")
         self.mode_label.pack(anchor="w", padx=16, pady=(8, 4))
 
@@ -127,8 +127,15 @@ class LauncherApp:
 
         third = tk.Frame(root, bg=BG)
         third.pack(fill="x", padx=18)
-        self._wide(third, "Open dashboard", self.open_dashboard).pack(side="left", expand=True, fill="x", padx=(0, 6))
-        self._wide(third, "View logs", self.view_logs).pack(side="left", expand=True, fill="x", padx=(6, 0))
+        self._wide(third, "Open ZendAgent", self.open_zend, primary=True).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self._wide(third, "Open Classic", self.open_classic).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+        fourth = tk.Frame(root, bg=BG)
+        fourth.pack(fill="x", padx=18, pady=8)
+        self._wide(fourth, "Open logs", self.view_logs).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self._wide(fourth, "Refresh status", self.refresh_status).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+        self._wide(root, "Clean frontend cache", self.clean_cache).pack(fill="x", padx=18)
 
         self.event = tk.Label(root, bg=BG, fg=INK, font=("Segoe UI", 9), wraplength=410, justify="left", anchor="w")
         self.event.pack(fill="x", padx=22, pady=(12, 4))
@@ -174,13 +181,13 @@ class LauncherApp:
         dot = tk.Canvas(top, width=10, height=10, bg="#F8FBFF", highlightthickness=0)
         dot.pack(side="left", padx=(0, 8))
         mark = dot.create_oval(1, 1, 9, 9, fill=DOT["stopped"], outline="")
-        title = tk.Label(top, text=ROLES[name], bg="#F8FBFF", fg=INK, font=("Segoe UI", 10, "bold"))
+        title = tk.Label(top, text=self.supervisor.role_label(name), bg="#F8FBFF", fg=INK, font=("Segoe UI", 10, "bold"))
         title.pack(side="left")
         state = tk.Label(top, text="Stopped", bg="#F8FBFF", fg=MUTED, font=("Segoe UI", 9))
         state.pack(side="right")
         detail = tk.Label(frame, text="", bg="#F8FBFF", fg=MUTED, font=("Segoe UI", 8), anchor="w", justify="left", wraplength=370)
         detail.pack(fill="x", padx=28, pady=(0, 8))
-        return {"frame": frame, "dot": dot, "mark": mark, "state": state, "detail": detail}
+        return {"frame": frame, "dot": dot, "mark": mark, "title": title, "state": state, "detail": detail}
 
     def _wide(self, parent, text, command, primary=False):
         if primary:
@@ -198,15 +205,24 @@ class LauncherApp:
 
     def render(self) -> None:
         selected = self.supervisor.mode
-        for button, mode in ((self.classic_btn, "classic"), (self.next_btn, "next")):
+        for button, mode in ((self.classic_btn, "classic"), (self.next_btn, "next"), (self.production_btn, "production")):
             on = mode == selected
             button.configure(bg=BLUE if on else SOFT, fg="white" if on else INK, activebackground=BLUE if on else SOFT)
         self.mode_label.configure(text=self.supervisor.active_label())
         for name, widgets in self.rows.items():
             row = self.supervisor.status[name]
             state = row["state"]
+            widgets["title"].configure(text=self.supervisor.role_label(name))
             widgets["state"].configure(text=LABELS.get(state, state), fg=DOT.get(state, MUTED))
-            widgets["detail"].configure(text=row.get("detail") or "")
+            bits = [part for part in (
+                f"pid {row['pid']}" if row.get("pid") else "",
+                f"port {row['port']}" if row.get("port") else "",
+                row.get("health") or "",
+            ) if part]
+            lines = [" · ".join(bits), row.get("url") or "", row.get("detail") or ""]
+            if row.get("error") and row.get("error") != row.get("detail"):
+                lines.append(row["error"])
+            widgets["detail"].configure(text="\n".join(line for line in lines if line))
             widgets["dot"].itemconfigure(widgets["mark"], fill=DOT.get(state, MUTED))
         self.port_label.configure(text=self.supervisor.port_note)
         self.event.configure(text=self.supervisor.message)
@@ -273,7 +289,32 @@ class LauncherApp:
         self.render()
 
     def open_dashboard(self) -> None:
-        webbrowser.open(self.supervisor.sign_in_url())
+        self.open_zend()
+
+    def open_zend(self) -> None:
+        from launcher.desktop import open_desktop
+        self.supervisor.message = open_desktop(self.supervisor.sign_in_url())
+        self.render()
+
+    def open_classic(self) -> None:
+        from launcher.desktop import open_desktop
+        self.supervisor.message = open_desktop(self.supervisor.classic_sign_in_url())
+        self.render()
+
+    def refresh_status(self) -> None:
+        def work() -> str:
+            self.supervisor.refresh()
+            return "Status refreshed. Nothing was started or stopped."
+        self._run(work)
+
+    def clean_cache(self) -> None:
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+            "ZendAgent",
+            "Remove frontend/.next and frontend/node_modules/.cache?\n\nRuntime files, .env, and logs are left in place.",
+        ):
+            return
+        self._run(self.supervisor.clean_frontend_cache)
 
     def view_logs(self) -> None:
         window = tk.Toplevel(self.root)
@@ -385,17 +426,17 @@ class LauncherApp:
 
 
 def _instance_lock(root: Path):
+    """One launcher per Windows session. A second double-click is refused."""
     if os.name != "nt":
         return None
-    import msvcrt
+    import ctypes
 
-    path = root / "logs" / "launcher.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+")
-    try:
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        handle.close()
+    kernel = ctypes.windll.kernel32
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel.CreateMutexW.restype = ctypes.c_void_p
+    kernel.GetLastError.restype = ctypes.c_ulong
+    handle = kernel.CreateMutexW(None, False, "Local\\ZendAgentLauncher")
+    if not handle or kernel.GetLastError() == 183:
         raise SystemExit("ZendAgent Launcher is already running. Use its tray icon.")
     return handle
 

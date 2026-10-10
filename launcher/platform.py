@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from launcher.model import command_matches, may_stop, taskkill_args
+from launcher.model import command_matches, is_tunnel, kill_plan, may_stop
 from launcher.redact import redact
 
 CREATE_NEW_CONSOLE = 0x00000010
@@ -28,6 +28,8 @@ class LiveProcess:
     command: str
     name: str
     cwd: str = ""
+    exe: str = ""
+    launcher_owner: str = ""
 
 
 @dataclass
@@ -99,6 +101,37 @@ class WindowsPlatform:
                 found[port] = Listener(pid, "", "")
         return found
 
+    def owns_port(self, pid: int, port: int) -> bool:
+        listener = self.listeners().get(int(port))
+        if listener is None:
+            return False
+        return self.is_descendant(int(pid), int(listener.pid))
+
+    def is_descendant(self, ancestor: int, pid: int) -> bool:
+        if int(ancestor) == int(pid):
+            return True
+        current = int(pid)
+        for _ in range(12):
+            parent = _parent_pid(current)
+            if not parent or parent == current:
+                return False
+            if parent == int(ancestor):
+                return True
+            current = parent
+        return False
+
+    def descendants(self, pid: int) -> list[int]:
+        children = _child_map()
+        found = []
+        pending = list(children.get(int(pid), []))
+        while pending:
+            child = pending.pop()
+            if child in found:
+                continue
+            found.append(child)
+            pending.extend(children.get(child, []))
+        return found
+
     def describe(self, pid: int) -> LiveProcess | None:
         if os.name != "nt" or pid <= 0:
             return None
@@ -113,6 +146,7 @@ class WindowsPlatform:
         live = LiveProcess(
             pid=pid, create_time=created, command=command,
             name=_image_name(command), cwd=_process_cwd(pid),
+            exe=_exe_path(pid), launcher_owner=_env_value(pid, "ZEND_LAUNCHER_OWNER"),
         )
         self._described[pid] = (time.time(), live)
         return live
@@ -162,48 +196,65 @@ class WindowsPlatform:
 
     def stop(self, record: dict, graceful_s: float, launcher_pid: int) -> str:
         pid = int(record.get("pid") or 0)
-        live = self.describe(pid)
-        allowed, why = may_stop(
-            record,
-            live.command if live else None,
-            live.create_time if live else None,
-            live.pid if live else None,
-            launcher_pid,
-        )
+        allowed, why = self._may_stop(pid, record, launcher_pid)
         if not allowed:
             return why
         _signal_break(pid)
         if _wait_dead(pid, graceful_s):
             return "stopped"
-        live = self.describe(pid)
-        allowed, why = may_stop(
-            record,
-            live.command if live else None,
-            live.create_time if live else None,
-            live.pid if live else None,
-            launcher_pid,
-        )
-        if not allowed:
-            return why
-        if not command_matches(live.command if live else "", str(record.get("script") or "")):
-            return "command changed before stop"
-        _run_taskkill(taskkill_args(pid, force=False))
-        if _wait_dead(pid, 5):
+        targets = self._stop_targets(pid, record, launcher_pid)
+        if targets is None:
+            return "process identity changed before stop"
+        for args in kill_plan(targets, self._target_commands(targets), force=False):
+            _run_taskkill(args)
+        if all(not _running(item) for item in targets):
             return "stopped"
-        live = self.describe(pid)
-        allowed, why = may_stop(
-            record,
-            live.command if live else None,
-            live.create_time if live else None,
-            live.pid if live else None,
-            launcher_pid,
-        )
-        if not allowed:
-            return why
-        _run_taskkill(taskkill_args(pid, force=True))
-        if _wait_dead(pid, 5):
+        targets = self._stop_targets(pid, record, launcher_pid)
+        if targets is None:
+            return "process identity changed before stop"
+        for args in kill_plan(targets, self._target_commands(targets), force=True):
+            _run_taskkill(args)
+        if all(not _running(item) for item in targets):
             return "stopped"
         return "failed to stop"
+
+    def _may_stop(self, pid: int, record: dict, launcher_pid: int) -> tuple[bool, str]:
+        live = self.describe(pid)
+        listener = self.listeners().get(int(record.get("port") or 0))
+        ancestor_ok = True
+        if listener is not None:
+            ancestor_ok = self.is_descendant(pid, listener.pid)
+        return may_stop(
+            record,
+            live.command if live else None,
+            live.create_time if live else None,
+            live.pid if live else None,
+            launcher_pid,
+            live_exe=live.exe if live else "",
+            listener_pid=listener.pid if listener else None,
+            ancestor_ok=ancestor_ok,
+        )
+
+    def _stop_targets(self, pid: int, record: dict, launcher_pid: int) -> list[int] | None:
+        allowed, _why = self._may_stop(pid, record, launcher_pid)
+        if not allowed:
+            return None
+        targets = [pid]
+        for child in self.descendants(pid):
+            described = self.describe(child)
+            text = f"{described.command if described else ''} {described.exe if described else ''}"
+            if is_tunnel(text):
+                continue
+            if described and command_matches(described.command, str(record.get("script") or "")):
+                targets.append(child)
+        return targets
+
+    def _target_commands(self, pids: list[int]) -> dict[int, str]:
+        commands = {}
+        for pid in pids:
+            described = self.describe(pid)
+            commands[pid] = f"{described.command if described else ''} {described.exe if described else ''}"
+        return commands
 
 
 def _which(name: str) -> str | None:
@@ -364,6 +415,171 @@ def _process_cwd(pid: int) -> str:
         return ""
     finally:
         kernel.CloseHandle(handle)
+
+
+def _exe_path(pid: int) -> str:
+    if os.name != "nt" or pid <= 0:
+        return ""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = _kernel()
+    handle = kernel.OpenProcess(0x1000, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        kernel.QueryFullProcessImageNameW.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return buf.value
+    except OSError:
+        return ""
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _env_value(pid: int, key: str) -> str:
+    """One environment value from a process. Other variables are not returned."""
+    if os.name != "nt" or pid <= 0 or not key:
+        return ""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = _kernel()
+    handle = kernel.OpenProcess(0x0410, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        class Basic(ctypes.Structure):
+            _fields_ = [
+                ("Reserved1", ctypes.c_void_p),
+                ("PebBaseAddress", ctypes.c_void_p),
+                ("Reserved2", ctypes.c_void_p * 2),
+                ("UniqueProcessId", ctypes.c_void_p),
+                ("Reserved3", ctypes.c_void_p),
+            ]
+
+        ntdll = ctypes.windll.ntdll
+        ntdll.NtQueryInformationProcess.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+        kernel.ReadProcessMemory.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        kernel.ReadProcessMemory.restype = wintypes.BOOL
+        info = Basic()
+        needed = ctypes.c_ulong()
+        if ntdll.NtQueryInformationProcess(handle, 0, ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(needed)) != 0:
+            return ""
+        if not info.PebBaseAddress:
+            return ""
+
+        def read_at(address: int, size: int):
+            buf = ctypes.create_string_buffer(size)
+            got = ctypes.c_size_t()
+            if not address or not kernel.ReadProcessMemory(handle, ctypes.c_void_p(address), buf, size, ctypes.byref(got)):
+                return None
+            return buf.raw[:got.value]
+
+        params_raw = read_at(info.PebBaseAddress + 0x20, 8)
+        if not params_raw or len(params_raw) < 8:
+            return ""
+        params = int.from_bytes(params_raw[:8], "little")
+        header = read_at(params + 0x80, 8)
+        if not header or len(header) < 8:
+            return ""
+        address = int.from_bytes(header[:8], "little")
+        if not address:
+            return ""
+        chunks = []
+        for offset in range(0, 65536, 4096):
+            piece = read_at(address + offset, 4096)
+            if not piece:
+                break
+            chunks.append(piece)
+            if b"\x00\x00\x00\x00" in piece[-4:]:
+                break
+        raw = b"".join(chunks)
+        if not raw:
+            return ""
+        text = raw.decode("utf-16-le", "replace")
+        prefix = (key + "=").lower()
+        for item in text.split("\x00"):
+            if item.lower().startswith(prefix):
+                return item.split("=", 1)[1]
+        return ""
+    except (OSError, ValueError):
+        return ""
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _process_snapshot() -> tuple[dict[int, int], dict[int, list[int]]]:
+    """pid -> parent, and parent -> children. Empty when the snapshot cannot be read."""
+    parents: dict[int, int] = {}
+    children: dict[int, list[int]] = {}
+    if os.name != "nt":
+        return parents, children
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel = _kernel()
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(Entry)]
+    kernel.Process32FirstW.restype = wintypes.BOOL
+    kernel.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(Entry)]
+    kernel.Process32NextW.restype = wintypes.BOOL
+    snap = kernel.CreateToolhelp32Snapshot(2, 0)
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return parents, children
+    try:
+        entry = Entry()
+        entry.dwSize = ctypes.sizeof(Entry)
+        if not kernel.Process32FirstW(snap, ctypes.byref(entry)):
+            return parents, children
+        while True:
+            pid = int(entry.th32ProcessID)
+            parent = int(entry.th32ParentProcessID)
+            parents[pid] = parent
+            children.setdefault(parent, []).append(pid)
+            if not kernel.Process32NextW(snap, ctypes.byref(entry)):
+                break
+    finally:
+        kernel.CloseHandle(snap)
+    return parents, children
+
+
+def _parent_pid(pid: int) -> int:
+    parents, _children = _process_snapshot()
+    return int(parents.get(int(pid), 0))
+
+
+def _child_map() -> dict[int, list[int]]:
+    _parents, children = _process_snapshot()
+    return children
 
 
 def _kernel():
