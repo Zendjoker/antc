@@ -119,13 +119,24 @@ class WindowsPlatform:
 
     def http_ok(self, url: str, timeout: float = 2.0) -> bool:
         import urllib.error
+        import urllib.parse
         import urllib.request
 
+        headers = {}
+        if urllib.parse.urlsplit(url).path == "/live":  # (Jarvis's control link answers 403 without the local secret)
+            secret = control_token()
+            if secret:
+                headers["X-Jarvis-Token"] = secret
         try:
-            req = urllib.request.Request(url, method="GET")
+            req = urllib.request.Request(url, method="GET", headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 response.read(64)
                 return 200 <= response.status < 300
+        except urllib.error.HTTPError as e:  # (the dashboard says "locked" until a browser has signed in: it's up)
+            try:
+                return e.code == 401 and b"Dashboard locked" in e.read(2048)
+            except OSError:
+                return False
         except (OSError, urllib.error.URLError, TimeoutError, ValueError):
             return False
 
@@ -537,3 +548,12 @@ def _trim(path: Path, limit: int = 1_000_000, keep: int = 400_000) -> None:
 
 # Silence an unused import warning if a type checker looks at STILL_ACTIVE.
 _ = STILL_ACTIVE
+
+
+def control_token() -> str:
+    """Jarvis's local secret (room_agent/localauth.py), read when needed and never stored or logged by the launcher."""
+    path = os.getenv("CONTROL_TOKEN_FILE", "").strip() or str(Path(__file__).resolve().parents[1] / "control.token")
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""

@@ -273,7 +273,7 @@ class LauncherApp:
         self.render()
 
     def open_dashboard(self) -> None:
-        webbrowser.open(self.supervisor.active_url())
+        webbrowser.open(self.supervisor.sign_in_url())
 
     def view_logs(self) -> None:
         window = tk.Toplevel(self.root)

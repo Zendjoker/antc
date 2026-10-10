@@ -23,7 +23,7 @@ from launcher.model import (
     start_order,
     stop_order,
 )
-from launcher.platform import WindowsPlatform
+from launcher.platform import WindowsPlatform, control_token
 
 DASHBOARD_PORT = 8765
 NEXT_PORT = 3000
@@ -95,6 +95,18 @@ class Supervisor:
             "classic": f"http://127.0.0.1:{DASHBOARD_PORT}/",
             "next": f"http://127.0.0.1:{self._next_port()}/overview/",
         }
+
+    def sign_in_url(self) -> str:
+        """What "Open" opens: the Classic dashboard through its sign-in link (it sets the session cookie, then shows the
+        page; a bare address shows "Dashboard locked" in a browser that hasn't signed in). The secret is read now, never
+        stored."""
+        url = self.active_url()
+        secret = control_token()
+        if secret and url == f"http://127.0.0.1:{DASHBOARD_PORT}/":
+            import urllib.parse
+
+            return url + "?key=" + urllib.parse.quote(secret)
+        return url
 
     def active_url(self) -> str:
         urls = self.urls()
