@@ -20,8 +20,13 @@ def _detail():
             "can't change its delivery with this voice model")
 
 
+PERSONALITY_WORDS = (r"swear|curs(?:e|ing)|cuss|profan|slang|nickname|personality|call(?:ing)? me|tone it|intens|hype|"
+                     r"motivat|pep talk|old self|original self")
+# their own words must ask for a personality change (never an email's or a web page's say-so: actions/executor.py)
+PERSONALITY_ASK = re.compile(PERSONALITY_WORDS + r"|dial it|energy|street|friend|default|the way you talk|how you talk", re.I)
 register_group(Group("voice", re.compile(r"voice|speak|talk|slow|fast|pace|soft|loud|whisper|serious|tone|sound|patien|wait|"
-                                         r"pronounc|say (?:it|\w+) like|interrupt|cut me|rush|accent|calm|excit|normal", re.I)))
+                                         r"pronounc|say (?:it|\w+) like|interrupt|cut me|rush|accent|calm|excit|normal|"
+                                         + PERSONALITY_WORDS, re.I)))
 register_line("changing its voice, speaking pace and listening patience", _detail, available=tts_on)
 register_claim("voice", r"\b(switched|changed|swapped)\b.{0,30}\bvoices?\b|\bnew voice\b|\bthis is .{0,15}\bvoice now\b")
 register_claim("style", r"\b(talking|speaking|going|getting|sounding)\s+(more\s+)?(softly|softer|quieter|gentler|serious(ly)?|warmer)\b"
@@ -69,6 +74,91 @@ tool("set_voice", "Change your speaking voice. Give a voice name from list_voice
      "'woman'. The new voice is used from your next sentence on and kept.",
      params({"name": {"type": "string"}}, ["name"]), _call("set_voice", "name"), group="voice", claim="voice",
      available=tts_on)
+
+
+def _personality_state(args=None):
+    from dataclasses import asdict
+
+    from room_agent.social import personality
+
+    return {"saved": personality.snapshot(), "profile": asdict(personality.profile())}
+
+
+def _personality_changes(args):
+    if args.get("reset"):
+        return {"reset": True}
+    out = {k: args[k] for k in ("preset", "intensity", "slang", "profanity") if args.get(k)}
+    if args.get("stop_calling"):
+        out["never_call"] = args["stop_calling"]
+    if args.get("nicknames"):
+        out["address"] = args["nicknames"]
+    if isinstance(args.get("motivation"), bool):
+        out["motivation"] = args["motivation"]
+    return out
+
+
+def _set_personality(args):
+    from room_agent.social import personality
+
+    changes = _personality_changes(args)
+    if not changes:
+        return ("FAILED: nothing to change. Say what: the style (street or friend), intensity, slang, swearing, a nickname "
+                "to stop using, or motivation on/off.")
+    p, said = personality.update(**changes)
+    terms = p.terms()
+    return (f"OK: {said}; kept for good. Now: {p.preset} style, intensity {p.intensity}, slang {p.slang}, swearing "
+            f"{p.profanity}, nicknames {', '.join(terms) or 'none'}, motivation {'on' if p.motivation else 'off'}.")
+
+
+def _personality_applied(args, before, after):
+    """Read back: the profile now in effect says what they asked for."""
+    p = after["profile"]
+    changes = _personality_changes(args)
+    if changes.get("reset"):
+        return not after["saved"]
+    for k in ("preset", "intensity", "slang", "profanity", "motivation"):
+        if k in changes and p.get(k) != changes[k]:
+            return False
+    used = [t.lower() for t in p["address"] + p["casual_address"] if t.lower() not in (n.lower() for n in p["never_call"])]
+    stop = [t.strip().lower() for t in re.split(r"[,;]| and ", str(changes.get("never_call") or "")) if t.strip()]
+    if any(t in used for t in stop):
+        return False
+    want = [t.strip().lower() for t in re.split(r"[,;]| and ", str(changes.get("address") or "")) if t.strip()]
+    return not want or bool(p["address"]) and p["address"][0].lower() in want
+
+
+def _undo_personality(args, before, after):
+    from room_agent.social import personality
+
+    personality.restore(before["saved"])
+    return "OK: personality back to how it was."
+
+
+tool("set_personality", "Change how you come across and keep it: the style ('street': confident big-brother energy; "
+     "'friend': the original easygoing tone), intensity, slang, swearing, nicknames you use for them, or motivation (pushes, "
+     "calling out excuses). Use for 'stop swearing', 'tone it down', 'less slang', 'stop calling me bro', 'go back to your "
+     "old personality'. What to call them by name ('call me Mike') is memory's address_as, not this. How the VOICE sounds "
+     "(softer, more excited) is set_speaking_style.",
+     params({"preset": {"type": "string", "enum": ["street", "friend"]},
+             "intensity": {"type": "string", "enum": ["low", "medium", "high"]},
+             "slang": {"type": "string", "enum": ["off", "light", "full"]},
+             "profanity": {"type": "string", "enum": ["off", "mild"]},
+             "stop_calling": {"type": "string", "description": "A nickname to stop using, e.g. 'bro'"},
+             "nicknames": {"type": "string", "description": "Nicknames to use instead, main one first, e.g. 'boss'"},
+             "motivation": {"type": "boolean"},
+             "reset": {"type": "boolean", "description": "Back to the default personality"}}, []),
+     _set_personality, group="voice", observe=_personality_state, verify=_personality_applied, undo=_undo_personality,
+     undo_if=lambda before, after: before["saved"] != after["saved"], intent=PERSONALITY_ASK,
+     reflex=[(r"(?:stop|quit|no more|don'?t|no)\s+(?:swearing|cursing|cussing)(?:\s+(?:anymore|around me))?",
+              {"profanity": "off"}),
+             (r"(?:you can|it'?s (?:ok|okay|fine) to)\s+(?:swear|curse|cuss)(?:\s+(?:again|around me))?", {"profanity": "mild"}),
+             (r"(?:stop|quit|don'?t)\s+call(?:ing)?\s+me\s+(?P<stop_calling>bro|brother|boss|bruh|homie|chief|king|man|dude)"
+              r"(?:\s+anymore)?", {}),
+             (r"(?:tone it down|less intense|less hype|dial it (?:back|down))(?:\s+a (?:bit|little|notch))?", {"intensity": "low"}),
+             (r"(?:no|less|stop (?:using|with) the)\s+slang", {"slang": "off"}),
+             (r"(?:go\s+)?back\s+to\s+(?:your\s+)?(?:old|original)\s+(?:personality|self)", {"preset": "friend"}),
+             (r"(?:go\s+)?back\s+to\s+(?:your\s+)?(?:default|street)\s+personality", {"reset": True})],
+     reflex_say=lambda result: "Got it." if result.success else None)
 
 
 def _pron(fn_name):

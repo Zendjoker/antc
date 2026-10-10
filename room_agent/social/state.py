@@ -9,11 +9,14 @@ import time
 
 HALF_LIFE = {"frustration": 300, "annoyed": 300, "low": 900, "positive": 240, "excited": 180, "energy_up": 240,
              "energy_down": 900, "joking": 120, "serious": 600, "urgent": 180, "brief": 600, "talk": 300, "dismiss": 60,
-             "stop": 45}
+             "stop": 45, "motivate": 300, "excuse": 300, "win": 600}
+# what they're talking about, for the personality (social/personality.py: a push, an excuse to call out, a win to
+# celebrate), not how they are: never part of the mood, the mode or the confidence below
+TOPIC = ("motivate", "excuse", "win")
 KEEP_S = 1800      # evidence older than this is dropped
 TURN_HALF = 1.0    # ...and it also halves with every turn that doesn't renew it: a mood is about the moment it was
                    # expressed ("I'm just exhausted"), not the next topics (a plan, the gym, dinner)
-TURN_ONLY = ("dismiss", "stop")  # "whatever" / "enough" are about the reply to THAT utterance, never the next ones
+TURN_ONLY = ("dismiss", "stop") + TOPIC  # "whatever" / "enough" / "I did it" are about the reply to THAT utterance only
 HISTORY = 8        # recent exchanges kept for conversational context
 
 
@@ -95,8 +98,9 @@ class SocialState:
             mode = "casual"
         else:
             mode = "task"
-        top = max(v.values()) if v else 0.0
-        srcs = set().union(*(self.sources(d, now) for d, x in v.items() if x >= 0.3)) if top >= 0.3 else set()
+        mood_v = {d: x for d, x in v.items() if d not in TOPIC}
+        top = max(mood_v.values()) if mood_v else 0.0
+        srcs = set().union(*(self.sources(d, now) for d, x in mood_v.items() if x >= 0.3)) if top >= 0.3 else set()
         confidence = round(min(0.9, top * (0.6 + 0.15 * len(srcs))), 2) if known else 0.0  # (inferred: never certain)
         return {"mood_signal": mood, "energy": energy, "frustration": _level(frustr), "seriousness": _level(v["serious"]),
                 "urgency": _level(v["urgent"]), "interaction_mode": mode, "confidence": confidence, "values": v,

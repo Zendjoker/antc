@@ -322,6 +322,7 @@ DRIVE_CHECK_S = float(os.getenv("DRIVE_CHECK_S", "180"))  # while driving: how o
 MEETING_SOON_MIN = float(os.getenv("MEETING_SOON_MIN", "15"))  # a meeting this close is worth a call
 LOCATION_SOURCE = os.getenv("LOCATION_SOURCE", "auto").strip().lower()  # auto (Windows, then internet) / windows / ip / off
 PERSONA_FILE = Path(os.getenv("PERSONA_FILE", HERE / "room_agent" / "persona.md"))  # who Jarvis is (plain text)
+PERSONALITY = os.getenv("PERSONALITY", "street").strip().lower()  # street | friend (social/personality.py)
 LEARNING_DB = Path(os.getenv("LEARNING_DB", HERE / "learning.db"))  # learned preferences + interaction records (local only)
 LEARNING_TELEMETRY = os.getenv("LEARNING_TELEMETRY", "1") != "0"  # 0: learn preferences but keep no interaction records
 USER_PROFILE = os.getenv("USER_PROFILE", "").strip()  # whose preferences (default: USER_NAME)

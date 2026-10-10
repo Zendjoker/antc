@@ -179,7 +179,8 @@ requirements/            base.txt, local.txt (Whisper + Piper), gpu.txt (NVIDIA)
 deploy/                  Linux: install-service.sh, room-agent.service
 memory.db, settings.json what it remembers, chosen voice
 room_agent/
-  persona.md             who Jarvis is: edit it to tune the personality (no code)
+  persona.md             who Jarvis is: edit it to tune the personality (no code); the style (PERSONALITY=street: confident
+                         big-brother energy, or friend: the original easygoing tone) fills its slots (social/personality.py)
   config.py              every setting read from .env
   runtime.py             shared state: the current turn, the session, long-lived services
   prompt.py              assembles the system prompt (persona + rules + area rules) and the runtime context

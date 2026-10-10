@@ -58,7 +58,7 @@ def speak_checked(guard, sentence, spoken):
     sentence, style = split_style(sentence)  # a leading [soft]-style tag sets the delivery, and is never spoken
     if style:
         rt.turn_style = style
-    sentence = social.scrub(sentence) if sentence.strip() else sentence  # (no "Certainly!", no "Let me know if...")
+    sentence = social.scrub(sentence, spoken) if sentence.strip() else sentence  # (no "Certainly!", no "Let me know if...")
     if sentence.strip() and social.over_cap(spoken):
         return  # a tiny-reply turn ("whatever" -> "Alright.") has said enough
     if sentence.strip() and guard.admit(sentence):

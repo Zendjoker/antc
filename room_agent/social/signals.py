@@ -9,6 +9,7 @@ joking"), never conclusions about someone's inner state.
 
 Dimensions (0..1 strength each): frustration, annoyed (at Jarvis), low, positive, excited, energy_up, energy_down,
 joking, serious, urgent, brief (wants a quick answer), talk (wants to talk), dismiss (wants a tiny reply), stop.
+Topics, for the personality only (never mood): motivate (asks for a push), excuse (putting it off), win (did something).
 """
 
 import re
@@ -103,6 +104,22 @@ LANGUAGE = [
        {"dismiss": 0.8, "brief": 0.5}, clears=("talk",), why="wants a tiny reply"),
     _c(r"^\W*(enough|ok(ay)?,? ok(ay)?|shh+|hush|stop|stop it|that'?s enough|got it,? got it)\W*$",
        {"stop": 0.8, "brief": 0.6, "dismiss": 0.4}, why="wants Jarvis to stop"),
+    # topics for the personality (social/personality.py), not moods: asking for a push, putting it off, a real win
+    _c(r"\b(motivate me|hype me up|get me (going|hyped|motivated)|i need (a|some) (push|motivation|kick)|push me|"
+       r"kick my (butt|ass)|(keep|hold) me accountable|i (don'?t|do not) feel like (\w+ing|doing (it|anything|this|that))|"
+       r"i'?m (so |being )?(lazy|unmotivated|procrastinating)|procrastinat\w+|can'?t (get|make) myself|no motivation)\b",
+       {"motivate": 0.6}, why="wants a push"),
+    _c(r"\b(i'?ll (do|start|finish) it (tomorrow|later|next week|on monday|monday)|(start|do it|go) (tomorrow|next week|"
+       r"on monday)|maybe (tomorrow|later|next week)|i don'?t have (the )?time|no time (today|for)|too (tired|busy|late) "
+       r"(to|for)|skip(ping)? (the )?(gym|workout|run|class|studying|it today|today)|not (today|tonight),? (i'?m|i am)|"
+       r"i'?ll get to it (later|eventually)|i can'?t because|it'?s (too|kinda) (late|hard) to start)\b",
+       {"excuse": 0.55}, why="putting it off"),
+    _c(r"\b(i (finally )?(finished|completed|shipped|launched|passed|won|closed|landed|aced|beat|crushed|smashed|hit) "
+       r"(it|the|my|a|an|that|all|every)\b|i (got|landed) (the|a|my) (job|offer|promotion|deal|raise|client|contract)|"
+       r"got promoted|signed (the|a|my first) (deal|client|contract)|(made|got) my first (sale|client|customer|dollar)|"
+       r"first (sale|client|customer)|new (pr|personal (best|record))|lost \d+ (pounds|lbs|kilos|kg)|"
+       r"(\d+|ten|twenty|thirty) days (straight|in a row)|i did it|we did it|nailed it)\b",
+       {"win": 0.6}, why="a real win"),
 ]
 
 POSITIVE_WORDS = re.compile(r"\b(awesome|amazing|great|incredible|good|best|love|happy|excited|nice|fun)\b", re.I)

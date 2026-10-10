@@ -118,12 +118,27 @@ POOLS = {
 
 class Phrases:
     def __init__(self, pools=POOLS, avoid_recent=4):
-        self.pools = pools
+        self.base = pools
         # never repeat any of the last few lines of the same kind (fewer for small pools)
         self.recent = {k: collections.deque(maxlen=min(avoid_recent, len(v) - 1)) for k, v in pools.items()}
 
+    @property
+    def pools(self):
+        """The lines of each kind: the ones above, plus the personality's own (social/personality.py) for the built-in
+        pools, read each time so a change of personality applies at once."""
+        if self.base is not POOLS:
+            return self.base
+        try:
+            from room_agent.social import personality
+
+            extra = personality.extra_phrases()
+        except Exception:
+            extra = {}
+        return {k: v + [x for x in extra.get(k, []) if x not in v] for k, v in self.base.items()} if extra else self.base
+
     def pick(self, kind):
-        options = [p for p in self.pools[kind] if p not in self.recent[kind]] or self.pools[kind]
+        pool = self.pools[kind]
+        options = [p for p in pool if p not in self.recent[kind]] or pool
         choice = random.choice(options)
         self.recent[kind].append(choice)
         return choice
