@@ -65,19 +65,42 @@ def command_matches(command: str, script: str) -> bool:
     return script.lower().replace("/", "\\") in command.lower().replace("/", "\\")
 
 
-def looks_like_ours(command: str, root: str, role: str) -> bool:
-    """A process that belongs to this checkout, whether or not the launcher started it."""
+def looks_like_ours(command: str, root: str, role: str, cwd: str = "") -> bool:
+    """A process that belongs to this checkout, whether or not the launcher started it.
+
+    The running command may be relative (`main.py`, `scripts/dev.mjs`) while the
+    project path is only in the interpreter path or the process working directory.
+    """
     if not command:
         return False
     folded = command.lower().replace("/", "\\")
     root_f = str(root).lower().replace("/", "\\").rstrip("\\")
+    cwd_f = str(cwd or "").lower().replace("/", "\\").rstrip("\\")
+    in_tree = root_f in folded or cwd_f == root_f or cwd_f.startswith(root_f + "\\")
     if role == "backend":
-        return f"{root_f}\\main.py" in folded
+        return in_tree and _has_script(folded, "main.py")
     if role == "dashboard":
-        return f"{root_f}\\ui\\server.py" in folded
+        return in_tree and _has_script(folded, "ui\\server.py")
     if role == "frontend":
-        return f"{root_f}\\frontend\\scripts\\dev.mjs" in folded
+        front = root_f + "\\frontend"
+        in_front = front in folded or cwd_f == front or cwd_f.startswith(front + "\\")
+        return in_front and (_has_script(folded, "frontend\\scripts\\dev.mjs") or _has_script(folded, "scripts\\dev.mjs"))
     return False
+
+
+def _has_script(folded: str, script: str) -> bool:
+    script = script.lower().replace("/", "\\")
+    start = 0
+    while True:
+        index = folded.find(script, start)
+        if index < 0:
+            return False
+        end = index + len(script)
+        before = folded[index - 1] if index else " "
+        after = folded[end] if end < len(folded) else " "
+        if before in " \\/\"'" and after in " \\/\"'":
+            return True
+        start = index + 1
 
 
 def may_stop(record: dict, live_command: str | None, live_created: int | None, live_pid: int | None,
@@ -105,13 +128,13 @@ def may_stop(record: dict, live_command: str | None, live_created: int | None, l
 
 
 def assess_port(*, listening: bool, healthy: bool, command: str, root: str, role: str,
-                 owned_alive: bool) -> str:
+                 owned_alive: bool, cwd: str = "") -> str:
     """What a port means before the launcher decides to start anything."""
     if owned_alive:
         return RUNNING if healthy else STARTING
     if not listening and not healthy:
         return "free"
-    if healthy and looks_like_ours(command, root, role):
+    if healthy and looks_like_ours(command, root, role, cwd):
         return EXTERNAL
     if listening or healthy:
         return UNKNOWN

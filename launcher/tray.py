@@ -27,6 +27,7 @@ TPM_BOTTOMALIGN = 0x20
 LR_LOADFROMFILE = 0x10
 IMAGE_ICON = 1
 WM_QUIT = 0x0012
+HWND_MESSAGE = -3
 
 MENU = (
     (1, "Open Dashboard"),
@@ -68,19 +69,27 @@ class TrayIcon:
             user32.PostMessageW(self.hwnd, WM_QUIT, 0, 0)
 
     def _run(self) -> None:
-        user32 = ctypes.windll.user32
-        windll_class = _register()
-        self.hwnd = user32.CreateWindowExW(
-            0, windll_class, "ZendAgent", 0, 0, 0, 0, 0, 0, 0, 0, None,
-        )
-        self._icon = _load_icon(self.icon_path)
-        _icon(self.hwnd, NIM_ADD, self._icon, "ZendAgent")
-        self._ready.set()
-        message = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(message))
-            user32.DispatchMessageW(ctypes.byref(message))
-        _icon(self.hwnd, NIM_DELETE, self._icon, "")
+        try:
+            user32 = _user32()
+            class_name = _register()
+            self.hwnd = user32.CreateWindowExW(
+                0, class_name, "ZendAgent", 0,
+                0, 0, 0, 0, HWND_MESSAGE, None, None, None,
+            )
+            if not self.hwnd:
+                return
+            self._icon = _load_icon(self.icon_path)
+            if not _icon(self.hwnd, NIM_ADD, self._icon, "ZendAgent"):
+                self.hwnd = None
+                return
+            self._ready.set()
+            message = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(message))
+                user32.DispatchMessageW(ctypes.byref(message))
+            _icon(self.hwnd, NIM_DELETE, self._icon, "")
+        finally:
+            self._ready.set()
 
     def _notify(self, hwnd, text: str) -> None:
         data = _data(hwnd, self._icon, "ZendAgent")
@@ -88,18 +97,52 @@ class TrayIcon:
         data.szInfo = text[:255]
         data.szInfoTitle = "ZendAgent"
         data.dwInfoFlags = 1
-        ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data))
+        shell = _shell32()
+        shell.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data))
 
 
 _PROC = None
 _CLASS = None
 
 
+class _WndClass(ctypes.Structure):
+    _fields_ = [
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", ctypes.c_void_p),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HICON),
+        ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HBRUSH),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    ]
+
+
+def _user32():
+    user32 = ctypes.windll.user32
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.DefWindowProcW.restype = ctypes.c_ssize_t
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(_WndClass)]
+    user32.RegisterClassW.restype = wintypes.ATOM
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+    ]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+    user32.GetMessageW.restype = ctypes.c_int
+    user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    return user32
+
+
 def _register():
     global _PROC, _CLASS
-    user32 = ctypes.windll.user32
+    user32 = _user32()
+    wndproc = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
-    @ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
     def proc(hwnd, msg, wparam, lparam):
         if msg == WM_TRAY:
             if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
@@ -117,13 +160,15 @@ def _register():
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-    _PROC = proc
-    klass = wintypes.WNDCLASSW()
-    klass.lpfnWndProc = proc
+    _PROC = wndproc(proc)
+    klass = _WndClass()
+    klass.lpfnWndProc = ctypes.cast(_PROC, ctypes.c_void_p)
     klass.lpszClassName = "ZendAgentLauncherTray"
     klass.hInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
-    user32.RegisterClassW(ctypes.byref(klass))
+    atom = user32.RegisterClassW(ctypes.byref(klass))
     _CLASS = klass
+    if not atom and ctypes.windll.kernel32.GetLastError() != 1410:  # class already registered
+        raise OSError("tray window class was not registered")
     return klass.lpszClassName
 
 
@@ -179,11 +224,18 @@ def _data(hwnd, icon, tip: str) -> _NotifyData:
     return data
 
 
-def _icon(hwnd, action, icon, tip: str) -> None:
+def _shell32():
+    shell32 = ctypes.windll.shell32
+    shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(_NotifyData)]
+    shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+    return shell32
+
+
+def _icon(hwnd, action, icon, tip: str) -> bool:
     if not hwnd:
-        return
+        return False
     data = _data(hwnd, icon, tip or "ZendAgent")
-    ctypes.windll.shell32.Shell_NotifyIconW(action, ctypes.byref(data))
+    return bool(_shell32().Shell_NotifyIconW(action, ctypes.byref(data)))
 
 
 def _load_icon(path: Path):

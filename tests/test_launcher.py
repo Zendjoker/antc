@@ -163,6 +163,18 @@ def test_port_assessment_does_not_imply_a_kill():
     assert assess_port(
         listening=True, healthy=True, command=root + r"\main.py", root=root, role="backend", owned_alive=False,
     ) == EXTERNAL
+    relative = rf'"{root}\.venv\Scripts\python.exe" main.py'
+    assert assess_port(
+        listening=True, healthy=True, command=relative, root=root, role="backend", owned_alive=False,
+    ) == EXTERNAL
+    assert assess_port(
+        listening=True, healthy=True, command="node  scripts/dev.mjs", root=root, role="frontend",
+        owned_alive=False, cwd=root + r"\frontend",
+    ) == EXTERNAL
+    assert assess_port(
+        listening=True, healthy=True, command="node  scripts/dev.mjs", root=root, role="frontend",
+        owned_alive=False, cwd=r"C:\other\frontend",
+    ) == UNKNOWN
     assert assess_port(
         listening=True, healthy=False, command=r"C:\Tools\claude.exe", root=root, role="backend", owned_alive=False,
     ) == UNKNOWN
@@ -370,6 +382,37 @@ def test_live_assistant_is_only_observed(tmp_path):
         assert sup.status[name]["state"] in (EXTERNAL, UNKNOWN, "stopped", RUNNING)
         if sup.status[name]["state"] in (EXTERNAL, UNKNOWN):
             assert "not stop" in sup.status[name]["detail"].lower() or "did not stop" in sup.status[name]["detail"].lower()
+
+
+def test_windows_cwd_reads_this_process():
+    if os.name != "nt":
+        return
+    from launcher.platform import _process_cwd
+
+    assert Path(_process_cwd(os.getpid())).resolve() == Path.cwd().resolve()
+
+
+def test_windows_command_line_reads_this_process():
+    if os.name != "nt":
+        return
+    from launcher.platform import _command_line
+
+    text = _command_line(os.getpid()).lower()
+    assert "python" in text
+    assert "sk-" not in text
+
+
+def test_tray_icon_registers_and_removes():
+    if os.name != "nt":
+        return
+    from launcher.tray import TrayIcon
+
+    icon = PROJECT / "launcher" / "zendagent.ico"
+    if not icon.is_file():
+        png_to_ico(PROJECT / "UI" / "brand" / "zend-favicon.png", icon)
+    tray = TrayIcon(icon, lambda _action: None)
+    assert tray.start()
+    tray.stop()
 
 
 def _listener_pids():

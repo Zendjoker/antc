@@ -35,13 +35,15 @@ DOT = {
 
 
 class LauncherApp:
-    def __init__(self, root_dir: Path, screenshot: str | None = None):
+    def __init__(self, root_dir: Path, screenshot: str | None = None, autostart: bool = True):
         self.root_dir = Path(root_dir)
         self.screenshot = screenshot
+        self._autostart = autostart and not screenshot
         self.supervisor = Supervisor(self.root_dir)
         self._shots = []
         self.rows = {}
         self.tray = None
+        self._probing = False
         self._lock = _instance_lock(self.root_dir)
         self._prepare_icon()
         self._build()
@@ -65,8 +67,8 @@ class LauncherApp:
         self.root = root
         root.title("ZendAgent")
         root.configure(bg=BG)
-        root.geometry("460x760")
-        root.minsize(420, 680)
+        root.geometry("460x820")
+        root.minsize(420, 740)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         try:
             root.iconbitmap(str(self.root_dir / "launcher" / "zendagent.ico"))
@@ -219,15 +221,23 @@ class LauncherApp:
         self.supervisor.save_settings()
 
     def _probe(self) -> None:
-        if not self.supervisor.busy:
+        if self._autostart:
+            self._autostart = False
+            self.start_all()
+            self.root.after(2000, self._probe)
+            return
+        if not self.supervisor.busy and not self._probing:
+            self._probing = True
             threading.Thread(target=self._probe_work, daemon=True).start()
         self.root.after(2000, self._probe)
 
     def _probe_work(self) -> None:
-        if self.supervisor.busy:
-            return
-        self.supervisor.refresh()
-        self.root.after(0, self.render)
+        try:
+            if not self.supervisor.busy:
+                self.supervisor.refresh()
+                self.root.after(0, self.render)
+        finally:
+            self._probing = False
 
     def start_all(self) -> None:
         self._run(self.supervisor.start_all)
@@ -334,6 +344,9 @@ class LauncherApp:
         self.tray = TrayIcon(icon, on_action)
         if not self.tray.start():
             self.tray = None
+            if self.supervisor.message.startswith("Checking"):
+                self.supervisor.message = "Checking what is already running. The tray icon is unavailable."
+                self.render()
 
     def _tray_action(self, action: str) -> None:
         if action == "show":
@@ -361,12 +374,12 @@ class LauncherApp:
     def _capture_and_close(self) -> None:
         from launcher.capture import save_hwnd
 
-        detail = self.supervisor.status["backend"]["detail"]
-        if detail == "Not started by this launcher." and self._capture_waits < 20:
+        if not self.supervisor.probed and self._capture_waits < 40:
             self._capture_waits += 1
             self.root.after(400, self._capture_and_close)
             return
         self.root.update_idletasks()
+        self.root.update()
         save_hwnd(self.root.winfo_id(), self.screenshot)
         self.quit(stop=False)
 
@@ -387,12 +400,12 @@ def _instance_lock(root: Path):
     return handle
 
 
-def main(screenshot: str | None = None) -> None:
+def main(screenshot: str | None = None, autostart: bool = True) -> None:
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
         pass
     root = Path(__file__).resolve().parents[1]
-    app = LauncherApp(root, screenshot=screenshot)
+    app = LauncherApp(root, screenshot=screenshot, autostart=autostart)
     app.root.mainloop()

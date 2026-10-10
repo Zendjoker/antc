@@ -54,13 +54,14 @@ class Supervisor:
         self.stop_on_exit = False
         self._owned: dict[str, dict] = {}
         self.status: dict[str, dict] = {}
-        self.message = "Launcher is ready. Nothing has been started yet."
+        self.message = "Checking what is already running."
+        self.probed = False
         self.port_note = ""
         self.busy = False
         self._gate = threading.Lock()
         self._listeners: dict = {}
         for name in ("backend", "dashboard", "frontend"):
-            self.status[name] = {"state": STOPPED, "detail": "Not started by this launcher."}
+            self.status[name] = {"state": STOPPED, "detail": "Checking…"}
         self.load_settings()
         self._load_owned()
 
@@ -120,16 +121,25 @@ class Supervisor:
 
     def refresh(self) -> None:
         """Read-only status. Does not start or stop anything."""
-        self._listeners = self.platform.listeners()
-        phone = self._listeners.get(8770)
-        if phone:
-            name = phone.name or "process"
-            self.port_note = f"Port 8770 is in use by pid {phone.pid} ({name}). The launcher does not control that port."
-        else:
-            self.port_note = ""
-        self._refresh_role("backend")
-        self._refresh_role("dashboard")
-        self._refresh_role("frontend")
+        try:
+            self._listeners = self.platform.listeners()
+            phone = self._listeners.get(8770)
+            if phone:
+                described = self.platform.describe(phone.pid)
+                if described:
+                    phone.command = described.command
+                    phone.name = described.name
+                name = phone.name or "process"
+                self.port_note = f"Port 8770 is in use by pid {phone.pid} ({name}). The launcher does not control that port."
+            else:
+                self.port_note = ""
+            self._refresh_role("backend")
+            self._refresh_role("dashboard")
+            self._refresh_role("frontend")
+            if self.message.startswith("Checking"):
+                self.message = "Status updated. Nothing was started or stopped."
+        finally:
+            self.probed = True
 
     def start_all(self) -> str:
         if not self._gate.acquire(blocking=False):
@@ -323,11 +333,13 @@ class Supervisor:
         port = self._port(name)
         url = self._ready_url(name)
         listener = self._listeners.get(port)
-        if listener and not listener.command:
-            live = self.platform.describe(listener.pid)
-            if live:
-                listener.command = live.command
-                listener.name = live.name
+        cwd = ""
+        if listener:
+            described = self.platform.describe(listener.pid)
+            if described:
+                listener.command = described.command or listener.command
+                listener.name = described.name or listener.name
+                cwd = described.cwd
         healthy = self.platform.http_ok(url, timeout=1.5) if url else False
         record = self._owned.get(name)
         live = self.platform.describe(record["pid"]) if record else None
@@ -349,6 +361,7 @@ class Supervisor:
             root=str(self.root),
             role=name,
             owned_alive=False,
+            cwd=cwd,
         )
         if kind == "free":
             if self.status[name]["state"] not in (FAILED, STARTING, STOPPING):

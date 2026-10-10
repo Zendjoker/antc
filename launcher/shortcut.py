@@ -63,7 +63,7 @@ def install(root: Path, desktop: Path | None = None) -> Path:
         f"$s.WorkingDirectory = '{root_s}'; "
         "$s.Description = 'Start ZendAgent'; "
         f"$s.IconLocation = '{icon_s},0'; "
-        "$s.WindowStyle = 7; "
+        "$s.WindowStyle = 1; "
         "$s.Save()"
     )
     subprocess.run(
