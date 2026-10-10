@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -77,10 +78,25 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def ticket(outbound=False):
+    """What Twilio does before every relay connection: the signed voice webhook for this call (your carrier-verified
+    number calling in, or Jarvis's call reaching you), whose TwiML carries the call's one-time ticket. -> the ticket"""
+    form = ({"From": config.TWILIO_NUMBER, "To": config.MY_PHONE, "Direction": "outbound-api", "CallSid": "CA1"}
+            if outbound else {"From": config.MY_PHONE, "To": config.TWILIO_NUMBER, "Direction": "inbound",
+                              "CallSid": "CA1", "StirVerstat": "TN-Validation-Passed-A"})
+    async with aiohttp.ClientSession() as s:
+        async with s.post(URL + "/twilio/voice", data=form,
+                          headers={"X-Twilio-Signature": sign("/twilio/voice", form)}) as r:
+            return re.search(r'name="nonce" value="([^"]+)"', await r.text()).group(1)
+
+
 async def call(setup, prompts, signed=True):
     """Be Twilio's ConversationRelay for one call: send setup + prompts, collect what Jarvis says."""
     headers = {"X-Twilio-Signature": sign("/twilio/relay", ws=True)} if signed else {}
     said, closed = [], False
+    params = {**(setup.get("customParameters") or {}),
+              "nonce": await ticket(outbound=not str(setup.get("direction", "inbound")).startswith("inbound"))}
+    setup = {**setup, "customParameters": params}
     async with aiohttp.ClientSession() as s:
         try:
             async with s.ws_connect(URL.replace("http://", "ws://") + "/twilio/relay", headers=headers) as ws:
@@ -144,7 +160,8 @@ t.check("...location without the token is refused", status == 401)
 
 # ---------------------------------------------------------------- Twilio webhooks
 print("Twilio: who gets an answer:")
-form = {"From": config.MY_PHONE, "To": config.TWILIO_NUMBER, "Direction": "inbound", "CallSid": "CA1"}
+form = {"From": config.MY_PHONE, "To": config.TWILIO_NUMBER, "Direction": "inbound", "CallSid": "CA1",
+        "StirVerstat": "TN-Validation-Passed-A"}  # (the carrier vouches for your number: see test_security_hardening)
 status, _ = run(post("/twilio/voice", form=form))
 t.check("unsigned request -> 403", status == 403)
 stranger = {**form, "From": "+12125550000"}
@@ -255,7 +272,8 @@ async def call_until_end(prompt):
     async with aiohttp.ClientSession() as s:
         async with s.ws_connect(URL.replace("http://", "ws://") + "/twilio/relay",
                                 headers={"X-Twilio-Signature": sign("/twilio/relay", ws=True)}) as ws:
-            await ws.send_json({"type": "setup", "from": config.MY_PHONE, "direction": "inbound"})
+            await ws.send_json({"type": "setup", "callSid": "CA1", "from": config.MY_PHONE, "direction": "inbound",
+                                "customParameters": {"nonce": await ticket()}})
             await ws.send_json({"type": "prompt", "voicePrompt": prompt, "last": True})
             got = []
             for _ in range(10):

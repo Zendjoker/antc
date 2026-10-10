@@ -61,6 +61,7 @@ def setup_env(**extra):
         CONNECTIONS_FILE=os.path.join(tmp, "connections.json"), APPS_CACHE=os.path.join(tmp, "apps.json"),
         EXPERIENCE_DB=os.path.join(tmp, "experience.db"), ZIGBEE_EVENTS_FILE=os.path.join(tmp, "zigbee_events.json"), PROACTIVE_STATE_FILE=os.path.join(tmp, "proactive.json"), ACTIONS_JOURNAL_FILE=os.path.join(tmp, "journal.json"),
         HA_URL="", HA_TOKEN="", TRACE="0", AUDIO_DEBUG="0", PYTHONIOENCODING="utf-8",
+        CONTROL_TOKEN_FILE=os.path.join(tmp, "control.token"),  # (the local servers' secret: never the real one)
         PHONE_TUNNEL="", ZIGBEE="0",  # (never a real public tunnel or real Zigbee devices from a test, whatever .env says)
         SOCIAL_MEANING="0")  # (the meaning reader loads in the background: a test that wants it opts in and waits for it)
     env.update({k: str(v) for k, v in extra.items()})

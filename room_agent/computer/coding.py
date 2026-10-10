@@ -159,6 +159,9 @@ def _run(cmd, sb, timeout_s=None):
     if cmd[0] != sys.executable or cmd[1:3] not in (["-m", "unittest"], ["-m", "pytest"]):
         raise CodingError("only the allowlisted test commands run here")
     sandbox.check_argv(cmd)
+    if sys.platform != "win32" and not config.CODING_ALLOW_UNSANDBOXED:
+        raise CodingError("there's no process sandbox on this system (it needs Windows), so a project's code isn't run "
+                          "(set CODING_ALLOW_UNSANDBOXED=1 to allow it anyway)")
     job = sandbox.Job() if sys.platform == "win32" else None
     flags = (sandbox.CREATE_SUSPENDED | sandbox.CREATE_NO_WINDOW | sandbox.CREATE_NEW_PROCESS_GROUP) if job else 0
     try:

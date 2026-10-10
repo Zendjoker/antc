@@ -252,10 +252,26 @@ def _cancelled():
     return cancel.requested()
 
 
-def _run_with_timeout(plan, tool, args, timeout):
-    """-> (ActionResult or None if it timed out)."""
+# Steps that outlived their timeout (a Python thread can't be killed): (thread, tool, started, task id). While one is
+# still running, no other step OF THAT TASK starts - its outcome is UNKNOWN and it may still change things, so nothing in
+# the task builds on it or races it. A thread older than INFLIGHT_MAX_S is assumed hung and stops counting.
+_inflight = []
+INFLIGHT_MAX_S = 300.0
+
+
+def still_running(task_id=None):
+    """-> the timed-out steps that are still running (tool names), of one task or of all."""
+    now = time.time()
+    _inflight[:] = [x for x in _inflight if x[0].is_alive() and now - x[2] < INFLIGHT_MAX_S]
+    return [x[1] for x in _inflight if task_id is None or x[3] == task_id]
+
+
+def _run_with_timeout(plan, tool, args, timeout, late=None, owner=None):
+    """-> (ActionResult or None if it timed out). late(result): called if a timed-out step finishes after all.
+    owner: the task it belongs to (a step still running blocks that task's later steps)."""
     out = {}
     turn = rt.turn
+    gave_up = threading.Event()
 
     def go():
         try:
@@ -264,6 +280,13 @@ def _run_with_timeout(plan, tool, args, timeout):
             from room_agent.actions.executor import ActionResult
 
             out["r"] = ActionResult(False, tool, args, f"FAILED: {tool} hit an error ({e.__class__.__name__}).")
+        if gave_up.is_set():
+            log.warning("task step %s finished after its timeout: %s", tool, out["r"].message[:120])
+            if late is not None:
+                try:
+                    late(out["r"])
+                except Exception as e:  # noqa: BLE001
+                    log.debug("late result of %s not recorded: %s", tool, e)
     th = threading.Thread(target=go, name=f"task-step-{tool}", daemon=True)
     th.start()
     deadline = time.time() + timeout
@@ -272,9 +295,14 @@ def _run_with_timeout(plan, tool, args, timeout):
         if _cancelled():  # (the step itself checks too; give it a moment to stop cleanly)
             th.join(2.0)
             break
+    if th.is_alive():
+        gave_up.set()
+        _inflight.append((th, tool, time.time(), owner))
+        log.warning("task step %s is still running after %.0fs: its outcome is unknown, and no other step starts "
+                    "until it ends", tool, timeout)
     if rt.turn is not turn:
         rt.turn = turn
-    return out.get("r")
+    return out.get("r") if not th.is_alive() else None
 
 
 def _retry_safe(cap, result):
@@ -299,6 +327,7 @@ def run(t, only_pending=False):
 
     t0, cost0 = time.time(), budget.total()
     t["state"] = "RUNNING"
+    halted = False  # (stopped because a timed-out step may still be running: the task's outcome is UNKNOWN)
     plan = rt.current_plan if isinstance(rt.current_plan, Plan) else Plan()
     steps = {s["n"]: s for s in t["steps"]}
     for s in t["steps"]:
@@ -316,6 +345,19 @@ def run(t, only_pending=False):
                 if rest["state"] in ("PENDING", "BLOCKED", "WAITING"):
                     rest.update(state="CANCELED", result="not run: stopped")
             event(t, "stopped: the remaining steps were not run")
+            break
+        busy = still_running(t["id"])
+        if busy:  # (an earlier step timed out and is still going: nothing in this task may race it or build on it)
+            why = f"not run: {', '.join(busy)} timed out and may still be running; check it before going on"
+            for rest in t["steps"]:
+                if rest["state"] not in ("PENDING", "BLOCKED", "WAITING"):
+                    continue
+                if any(steps.get(d, {}).get("state") not in DONE for d in rest["depends_on"]):
+                    rest.update(state="BLOCKED", result=f"not run: it depends on a step that didn't complete ({why[9:]})")
+                else:
+                    rest.update(state="CANCELED", result=why)
+            event(t, f"stopped: {', '.join(busy)} is still running after its timeout")
+            halted = True
             break
         bad = [d for d in s["depends_on"] if steps.get(d, {}).get("state") not in DONE]
         if bad:
@@ -344,12 +386,18 @@ def run(t, only_pending=False):
         while True:
             s.update(state="RUNNING", started=time.time(), attempts=s["attempts"] + 1)
             _save()  # (a crash from here on leaves this step UNKNOWN, never re-run blindly)
-            result = _run_with_timeout(plan, s["tool"], s["args"], s["timeout_s"])
+            result = _run_with_timeout(plan, s["tool"], s["args"], s["timeout_s"],
+                                       late=lambda r, s=s: s.update(late_result=_redact(r.message, 300)), owner=t["id"])
             s["ended"] = time.time()
             if result is None:
                 supervisor.after(t, s, timed_out=True)
+                stopped = _cancelled()
                 if cap.changes_state:
-                    s.update(state="UNKNOWN", result=f"no answer within {s['timeout_s']:.0f}s: it may still have happened")
+                    s.update(state="UNKNOWN", result=("stopped before it answered" if stopped else
+                                                      f"no answer within {s['timeout_s']:.0f}s")
+                             + ": it may have happened, or may still happen")
+                elif stopped:
+                    s.update(state="CANCELED", result="stopped before it answered")
                 else:
                     s.update(state="FAILED", result=f"no answer within {s['timeout_s']:.0f}s")
                 event(t, f"step {s['n']} ({s['tool']}) timed out after {s['timeout_s']:.0f}s")
@@ -381,7 +429,8 @@ def run(t, only_pending=False):
             if result is not None and plan.steps and plan.steps[-1] is result:
                 plan.steps.pop()  # (the alternative replaces this attempt: it isn't "an earlier step that failed")
             ok, note = recovery.attempt(t, s, plan, s["result"], "success check failed" in s["result"],
-                                        lambda tool, args: _run_with_timeout(plan, tool, args, max(s["timeout_s"], 30.0)),
+                                        lambda tool, args: _run_with_timeout(plan, tool, args, max(s["timeout_s"], 30.0),
+                                                                             owner=t["id"]),
                                         run_check, config.TASK_MAX_RECOVERIES - len(rec))
             if note:
                 rec.append(_redact(note, 200))
@@ -400,6 +449,8 @@ def run(t, only_pending=False):
     t["seconds"] = round(t["seconds"] + time.time() - t0, 2)
     t["cost_usd"] = round(t["cost_usd"] + max(0.0, budget.total() - cost0), 5)
     t["state"] = final_state(t)
+    if (halted or still_running(t["id"])) and any(x["state"] == "UNKNOWN" for x in t["steps"]):
+        t["state"] = "UNKNOWN"  # (a step of THIS task may still be happening)
     if t["state"] == "COMPLETED":
         from room_agent.actions import supervisor
 

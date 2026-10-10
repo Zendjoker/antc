@@ -23,10 +23,15 @@ from aiohttp import WSMsgType, web
 
 from room_agent import config
 from room_agent.phone import state
-from room_agent.phone.twilio import Twilio, same_number, valid
+from room_agent.phone.twilio import Twilio, attested, same_number, valid
 
 log = logging.getLogger("room-agent")
 PENDING = {}  # call reason id -> {"greeting", "item", "at"}: why Jarvis is calling (read when the call connects)
+# One-time tickets from a signed /twilio/voice to its /twilio/relay connection: nonce -> {"verified", "call_sid", "at"}.
+# The relay's own signature is the same for every call (same URL), so a captured one could be replayed; the ticket can't:
+# it's random, used once, expires, and must name the same call.
+RELAY = {}
+RELAY_TTL_S = 120
 GREETINGS = ["Hey, what's up?", "Hey! What's going on?", "Hey, I'm here. What do you need?"]
 
 
@@ -117,8 +122,20 @@ async def voice(request):
     if not same_number(p.get("From") if inbound else p.get("To"), config.MY_PHONE):
         log.warning("phone: refused a call that isn't from/to your number")
         return _twiml("<Reject/>")
+    verified = not inbound or attested(p.get("StirVerstat"))  # (a call Jarvis placed to your number reached you)
+    if not verified and not config.PHONE_PIN:
+        log.warning("phone: declined a call from your number that the carrier didn't verify (StirVerstat %r): caller ID "
+                    "can be faked. Set PHONE_PIN in .env to allow such calls after a spoken PIN.",
+                    str(p.get("StirVerstat", ""))[:40])
+        return _twiml("<Say>Sorry, I can't verify this call, so I can't help on it.</Say><Hangup/>")
+    nonce = secrets.token_urlsafe(18)
+    RELAY[nonce] = {"verified": verified, "call_sid": str(p.get("CallSid", "")), "at": time.time()}
+    for old in [k for k, v in RELAY.items() if time.time() - v["at"] > RELAY_TTL_S]:
+        RELAY.pop(old, None)
     reason = request.query.get("reason", "")
     greeting = (PENDING.get(reason) or {}).get("greeting") or GREETINGS[int(time.time()) % len(GREETINGS)]
+    if not verified:
+        greeting = "Hi. This call isn't verified yet. Please say your PIN."
     voice_attrs = ""
     errand_call = ((PENDING.get(reason) or {}).get("item") or {}).get("kind") == "errand"
     provider = config.ERRAND_TTS_PROVIDER if errand_call else config.PHONE_TTS_PROVIDER
@@ -140,7 +157,8 @@ async def voice(request):
     welcome = "" if errand_call else f" welcomeGreeting={quoteattr(greeting)}"  # (an errand waits for them to answer)
     return _twiml(f"<Connect><ConversationRelay url={quoteattr(relay)}{welcome}"
                   f' interruptible="{interrupt}"{voice_attrs}>'
-                  f'<Parameter name="reason" value={quoteattr(reason)}/></ConversationRelay></Connect>')
+                  f'<Parameter name="reason" value={quoteattr(reason)}/><Parameter name="nonce" value={quoteattr(nonce)}/>'
+                  '</ConversationRelay></Connect>')
 
 
 async def relay(request):
@@ -166,12 +184,21 @@ async def relay(request):
             data = json.loads(msg.data)
             kind = data.get("type")
             if kind == "setup":
+                if session is not None:
+                    continue  # (one setup per connection)
+                params = data.get("customParameters") or {}
+                ticket = RELAY.pop(str(params.get("nonce", "")), None)
+                if (ticket is None or time.time() - ticket["at"] > RELAY_TTL_S
+                        or (ticket["call_sid"] and str(data.get("callSid", "")) != ticket["call_sid"])):
+                    log.warning("phone: closed a call connection without a valid one-time ticket (replayed or forged)")
+                    await ws.close()
+                    break
                 inbound = str(data.get("direction", "inbound")).startswith("inbound")
                 if not same_number(data.get("from") if inbound else data.get("to"), config.MY_PHONE):
                     log.warning("phone: closed a call that isn't from/to your number")
                     await ws.close()
                     break
-                pending = PENDING.pop((data.get("customParameters") or {}).get("reason", ""), None) or {}
+                pending = PENDING.pop(params.get("reason", ""), None) or {}
                 item = pending.get("item") or {}
                 if item.get("kind") == "errand":  # (a call FOR you: restricted session, no tools - phone/errand.py)
                     from room_agent.phone import errand
@@ -185,7 +212,8 @@ async def relay(request):
                 else:
                     from room_agent.phone.session import CallSession
 
-                    session = CallSession(send, pending.get("greeting", ""), pending.get("item"), hang_up=hang_up)
+                    session = CallSession(send, pending.get("greeting", ""), pending.get("item"), hang_up=hang_up,
+                                          verified=ticket["verified"])
                 state.call_started("inbound" if inbound else "outbound")
                 log.info("phone: call connected (%s)", "they called" if inbound else "Jarvis called")
             elif kind == "prompt" and session and data.get("last", True) and str(data.get("voicePrompt", "")).strip():

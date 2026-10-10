@@ -47,11 +47,38 @@ def _call(args):
     return ha_call(args["domain"], args["service"], args["entity_id"], args.get("data"))
 
 
+def _prepare(args):
+    """Refused services never get as far as a confirmation question; the rest are normalized, so the yes is matched
+    against exactly what will run."""
+    from room_agent.tools.home_assistant import check_call
+
+    _, ids = check_call(args.get("domain"), args.get("service"), args.get("entity_id"), args.get("data"))
+    return {**args, "domain": str(args["domain"]).strip().lower(), "service": str(args["service"]).strip().lower(),
+            "entity_id": ", ".join(ids)}
+
+
+def _risk(args):
+    from room_agent.actions.core import Risk
+    from room_agent.tools.home_assistant import Refused, check_call
+
+    try:
+        return check_call(args.get("domain"), args.get("service"), args.get("entity_id"), args.get("data"))[0]
+    except Refused:
+        return Risk.SENSITIVE  # (refused outright by _prepare / ha_call anyway; never "safe")
+
+
+def _describe(args):
+    from room_agent.tools.home_assistant import describe_call
+
+    return describe_call(args.get("domain"), args.get("service"), args.get("entity_id"), args.get("data"))
+
+
 tool("home_assistant_states", "List Home Assistant entities with their friendly names and current state. Filter by domain "
      "like light, switch, climate, media_player, sensor.", params({"domain": {"type": "string"}}), _states, group="home",
      changes_state=False)
 tool("home_assistant", "Call a Home Assistant service, e.g. domain=light service=turn_on entity_id=light.bedroom "
-     "data={\"brightness_pct\": 40}.",
+     "data={\"brightness_pct\": 40}. Locks, alarms, covers / garage doors, scripts, automations and scenes always need "
+     "their yes first (Jarvis asks); name devices by entity id.",
      params({"domain": {"type": "string"}, "service": {"type": "string"}, "entity_id": {"type": "string"},
              "data": {"type": "object", "description": "Extra service data, optional"}}, ["domain", "service", "entity_id"]),
-     _call, group="home", claim="home")
+     _call, group="home", claim="home", prepare=_prepare, risk_for=_risk, describe=_describe)

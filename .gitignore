@@ -45,3 +45,7 @@ event_reminders.json
 eval/
 tasks.json
 google_auth.env
+control.token
+control.token.*.tmp
+.env.*.tmp
+.env.setup.tmp

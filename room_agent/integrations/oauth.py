@@ -64,9 +64,10 @@ def run_browser_flow(app: OAuthApp, scopes, open_browser=None, timeout=300, logi
                 self.send_response(404)
                 self.end_headers()
                 return
-            if q.get("state", [""])[0] != state:
-                result["error"] = "state_mismatch"  # not our request: ignore its code entirely
-                title, text = "Sign-in failed", "This sign-in didn't come from Jarvis, so it was ignored."
+            forged = not secrets.compare_digest(q.get("state", [""])[0].encode(), state.encode())
+            if forged:  # not our request: its code is ignored, and the real sign-in keeps waiting (no denial of service)
+                result["ignored"] = result.get("ignored", 0) + 1
+                title, text = "Sign-in ignored", "This sign-in didn't come from Jarvis, so it was ignored."
             elif "error" in q:
                 result["error"] = q["error"][0]
                 title, text = "Sign-in canceled", "Nothing was connected. You can close this tab."
@@ -79,7 +80,8 @@ def run_browser_flow(app: OAuthApp, scopes, open_browser=None, timeout=300, logi
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-            done.set()
+            if not forged:
+                done.set()
 
         def log_message(self, *args):  # the request line carries the code: never log it
             pass
@@ -100,10 +102,10 @@ def run_browser_flow(app: OAuthApp, scopes, open_browser=None, timeout=300, logi
             server.handle_request()
     finally:
         server.server_close()
+    if result.get("ignored"):
+        log.warning("sign-in: ignored %d callback(s) whose state didn't match (not from this sign-in)", result["ignored"])
     if not done.is_set():
         raise AuthCanceled(app.provider, "timed out")
-    if result.get("error") == "state_mismatch":
-        raise IntegrationError(app.provider, "state mismatch")
     if result.get("error"):
         raise AuthCanceled(app.provider, result["error"])
     data = {"code": result["code"], "client_id": app.client_id, "redirect_uri": redirect,

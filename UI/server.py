@@ -1,23 +1,27 @@
 """Local web dashboard for the room agent: live status + an editable .env settings page.
 
-Run:  python UI/server.py        then open http://127.0.0.1:8765
-Binds to localhost only — this page can read and write API keys, never expose the port to a network.
+Run:  python UI/server.py        it opens http://127.0.0.1:8765/?key=... (and prints that link) once; the browser then
+                                  keeps a session cookie, so http://127.0.0.1:8765 works from then on
+Binds to localhost only — this page can read and write API keys, never expose the port to a network. Every /api request
+needs the session cookie (room_agent/localauth.py): another program or user account on this PC can't use the page's
+powers just by reaching 127.0.0.1.
 
 Settings are written straight to .env. Most of them are only read once at startup
 (room_agent/config.py), so the running agent needs a restart to pick up changes.
 """
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from room_agent import config  # noqa: E402
+from room_agent import config, localauth  # noqa: E402
 from room_agent.audio.voices import ELEVEN_VOICES, PIPER_VOICES  # noqa: E402
 
 ENV_FILE = ROOT / ".env"
@@ -28,7 +32,7 @@ BOOL_KEYS = {
     "BARGE_VERIFY", "BARGE_DUCK", "SPEAKER_VERIFY", "FILLERS", "PROMPT_CACHE", "MEMORY_BATCH",
 }
 # Keys that hold a secret and should never be sent to the browser in full.
-SECRET_HINTS = ("KEY", "TOKEN", "SECRET")
+SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "SID")
 
 OPTIONS = {
     "LLM_PROVIDER": ["claude", "ollama"],
@@ -50,15 +54,17 @@ KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def is_secret(key):
-    return any(h in key for h in SECRET_HINTS)
+    return any(h in key for h in SECRET_HINTS) or key == "PIN" or key.endswith("_PIN")
 
 
 def mask(value):
+    """Never enough of a secret to help guess it: nothing for short ones, only the last 4 characters of a long API key
+    (to tell keys apart)."""
     if not value:
         return ""
-    if len(value) <= 8:
+    if len(value) < 24:
         return "••••••••"
-    return f"{value[:4]}…{value[-4:]}"
+    return f"••••••••{value[-4:]}"
 
 
 def split_value_comment(rest):
@@ -105,7 +111,8 @@ def read_env():
 
 
 def write_env(changes):
-    """Rewrite only the lines for keys in `changes`. A blank value for a secret means "leave it alone"."""
+    """Rewrite only the lines for keys in `changes`. A blank value for a secret means "leave it alone". Written to a temp
+    file next to .env and swapped in at once: a crash or a bad value never leaves .env half-written or empty."""
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     out = []
     for line in lines:
@@ -120,7 +127,21 @@ def write_env(changes):
             continue
         _, comment = split_value_comment(vm.group(2))
         out.append(f"{key}={new_value}{comment}")
-    ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
+    atomic_write(ENV_FILE, "\n".join(out) + "\n")
+
+
+def atomic_write(path, text):
+    data = text.encode("utf-8")  # (fails here, before anything is touched, for text that can't be written)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent), static_url_path="")
@@ -132,8 +153,24 @@ def no_stale_pages(resp):
     return resp
 
 
+LOCKED = ("<!doctype html><meta charset=utf-8><title>Jarvis dashboard</title><body style='font-family:system-ui;"
+          "background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0'><div style='max-width:32em;"
+          "text-align:center'><h2>Dashboard locked</h2><p>Open it with the link that <code>python UI/server.py</code> "
+          "printed (it opens it for you when it starts). This keeps other programs on this PC from using it.</p></div>")
+
+
 @app.get("/")
 def index():
+    key = request.args.get("key", "")
+    if key:
+        if not localauth.valid(key):
+            return LOCKED, 403
+        resp = redirect("/")  # (the key leaves the address bar at once; it stays valid, so keep that link private)
+        resp.set_cookie(localauth.COOKIE, localauth.token(), max_age=localauth.COOKIE_MAX_AGE, httponly=True,
+                        samesite="Strict", path="/")
+        return resp
+    if not localauth.valid(request.cookies.get(localauth.COOKIE, "")):
+        return LOCKED, 401
     return send_from_directory(app.static_folder, "index.html")
 
 
@@ -153,7 +190,14 @@ def api_post_env():
     for key, value in body.items():
         if not KEY_RE.match(key):
             continue
-        changes[key] = str(value).replace("\n", " ").replace("\r", " ").strip()
+        value = str(value).replace("\n", " ").replace("\r", " ").strip()
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return jsonify(error=f"{key}: that value has characters that can't be saved; nothing was changed"), 400
+        if any(ord(ch) < 32 for ch in value):
+            return jsonify(error=f"{key}: control characters aren't allowed; nothing was changed"), 400
+        changes[key] = value
     if not changes:
         return jsonify(error="no valid settings in request"), 400
     write_env(changes)
@@ -163,13 +207,17 @@ def api_post_env():
 JARVIS = f"http://127.0.0.1:{config.CONTROL_PORT}"
 
 
+def _to_jarvis():
+    return {"X-Jarvis": "1", localauth.HEADER: localauth.token()}
+
+
 @app.get("/api/live")
 def api_live():
     """What Jarvis is doing right now (from the running Jarvis; offline if it isn't running)."""
     import requests
 
     try:
-        return jsonify(requests.get(f"{JARVIS}/live", timeout=2).json())
+        return jsonify(requests.get(f"{JARVIS}/live", timeout=2, headers=_to_jarvis()).json())
     except Exception:
         return jsonify(online=False)
 
@@ -182,7 +230,7 @@ def api_command():
         return bad
     try:
         r = requests.post(f"{JARVIS}/command", json=request.get_json(silent=True) or {}, timeout=90,
-                          headers={"X-Jarvis": "1"})
+                          headers=_to_jarvis())
         return jsonify(r.json()), r.status_code
     except Exception:
         return jsonify(error="Jarvis isn't running. Start it with: python main.py"), 503
@@ -194,7 +242,7 @@ def api_knowledge():
     import requests
 
     try:
-        return jsonify(requests.get(f"{JARVIS}/knowledge", timeout=4).json())
+        return jsonify(requests.get(f"{JARVIS}/knowledge", timeout=4, headers=_to_jarvis()).json())
     except Exception:
         return jsonify(error="Jarvis isn't running. Start it with: python main.py"), 503
 
@@ -205,7 +253,8 @@ def api_missions():
     import requests
 
     try:
-        r = requests.get(f"{JARVIS}/missions", params={"id": request.args.get("id", "")[:40]}, timeout=6)
+        r = requests.get(f"{JARVIS}/missions", params={"id": request.args.get("id", "")[:40]}, timeout=6,
+                         headers=_to_jarvis())
         return jsonify(r.json()), r.status_code
     except Exception:
         return jsonify(error="Jarvis isn't running. Start it with: python main.py"), 503
@@ -220,7 +269,7 @@ def api_action():
         return bad
     try:
         r = requests.post(f"{JARVIS}/action", json=request.get_json(silent=True) or {}, timeout=30,
-                          headers={"X-Jarvis": "1"})
+                          headers=_to_jarvis())
         return jsonify(r.json()), r.status_code
     except Exception:
         return jsonify(ok=False, message="Jarvis isn't running. Start it with: python main.py"), 503
@@ -281,6 +330,8 @@ def _only_local():
 
     if not local_host(request.headers.get("Host", "")):
         return jsonify(error="refused: not a local request"), 403
+    if request.path.startswith("/api/") and not localauth.valid(request.cookies.get(localauth.COOKIE, "")):
+        return jsonify(error="locked: open the dashboard with the link that python UI/server.py printed"), 401
     return None
 
 
@@ -385,4 +436,10 @@ def api_disconnect(pid):
 
 
 if __name__ == "__main__":
+    link = f"http://127.0.0.1:8765/?key={localauth.token()}"
+    print(f"Jarvis dashboard: {link}\n(open this link once; after that http://127.0.0.1:8765 works in this browser)")
+    if os.getenv("DASHBOARD_OPEN_BROWSER", "1") == "1":
+        import webbrowser
+
+        threading.Timer(1.0, lambda: webbrowser.open(link)).start()
     app.run(host="127.0.0.1", port=8765, debug=False)

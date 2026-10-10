@@ -43,6 +43,14 @@ YES_WORDS = _re.compile(r"\b(yes|yeah|yep|yup|sure|ok(ay)?|do it|go ahead|go for
                         r"definitely|correct|confirm(ed)?|i'?m sure|that'?s (right|fine|good)|sounds good)\b", _re.I)
 NO_WORDS = _re.compile(r"\b(no|nope|nah|don'?t|do not|wait|hold on|not (now|yet)|never ?mind|leave it|forget it|"
                        r"stop|cancel)\b", _re.I)
+NO_IDIOMS = _re.compile(r"\bno (problem|worries)\b", _re.I)  # ("no problem, go ahead" is a yes, not a "no")
+# A yes with a condition, a delay, a change or doubt attached isn't permission to do the exact thing asked about now:
+# "okay hold off", "send it later", "yes, but change it first", "ok let me think", "sure, in an hour".
+HEDGE = _re.compile(r"\b(later|tomorrow|tonight|soon|after(wards?)?|before|first|instead|but|except|unless|until|once|"
+                    r"when|if|maybe|perhaps|probably|i guess|not sure|unsure|don'?t know|think(ing)?|hmm+|hold (off|it)|"
+                    r"hang on|one (sec|second|moment|minute)|in an? (minute|bit|sec|second|moment|while|hour|few)|"
+                    r"in \d+|change|edit|fix|rewrite|different|another|other|rather|actually|check|let me|lemme|"
+                    r"for now|in a while)\b", _re.I)
 
 
 def said_yes(text, cap=None, what=""):
@@ -55,9 +63,9 @@ def said_yes(text, cap=None, what=""):
         return False
     own = set(_re.findall(r"[a-z]+", (getattr(cap, "name", "") or "").lower())[:1])
     own |= set(_re.findall(r"^\W*([a-z]+)", str(what or "").lower()))
-    clauses = [c for c in _re.split(r"[.;!]+|,?\s*\b(?:but|actually)\b|,\s*(?=wait\b)", t) if c and c.strip()]
-    last = clauses[-1] if clauses else t
-    if any(m.group(0).lower() not in own for m in NO_WORDS.finditer(last)):
+    if any(m.group(0).lower() not in own for m in NO_WORDS.finditer(NO_IDIOMS.sub("", t))):
+        return False  # (any no anywhere: "No. Yes." is ambiguous, and ambiguity never runs anything)
+    if HEDGE.search(t):
         return False
     if YES_WORDS.search(t):
         return True
@@ -230,6 +238,7 @@ def execute(name, args):
 # Read-only tools stay free; safety tools (stop / pause / cancel) are never held back.
 TAINT_S = 180
 TAINT_EXEMPT = {"emergency_stop", "cancel_task", "pause_mission", "go_quiet", "mute", "cancel_shutdown"}
+UNVERIFIED_CALLER_OK = {"end_call", "emergency_stop"}  # (all an unverified phone caller can make happen)
 # Ungated tools that can send data out, act in the physical world, persist, or destroy: held back for the whole window
 # (other ungated tools - volume, windows, timers - only in the same turn as the read).
 RISKY_UNGATED = {"browser_navigate", "browser_search", "home_assistant", "set_light",
@@ -246,13 +255,73 @@ def tainted():
     return _taint["turn"] is rt.turn or (time.time() - _taint["at"] < TAINT_S)
 
 
-def _hosts_in(text):
+_BARE_HOST = re.compile(r"^(?:www\.)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})(?::\d+)?([/?#]\S*)?$", re.I)
+_URL_KEYS = {"url", "site", "link", "href", "uri", "address", "website", "target", "source", "page"}
+_SAID_HOST = re.compile(r"(?<![\w@.-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})(?![\w-])", re.I)
+_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu", "or", "ne", "go", "gob", "nic"}
+
+
+def _strings(value, key=""):
+    """-> (the argument's name, its text) for every string inside the arguments."""
+    if isinstance(value, str):
+        yield key, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(v, str(k).lower())
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v, key)
+
+
+def _hosts_in(args):
+    """Every web host a call would reach: full URLs anywhere in its arguments, and an argument that IS a bare address
+    ("evil.com/?d=..." - what open_url turns into https://evil.com/...): one with a path or query, or any value of an
+    address-type argument (url, site, link...). Prose that merely mentions a domain, or a file name like notes.txt in a
+    name argument, isn't one."""
     out = set()
-    for u in _URL.findall(str(text or "")):
-        h = urllib.parse.urlparse(u if "://" in u else "https://" + u).hostname or ""
-        if h:
-            out.add(h.lower().removeprefix("www."))
+    for key, s in _strings(args):
+        for u in _URL.findall(s):
+            try:
+                h = urllib.parse.urlparse(u if "://" in u else "https://" + u).hostname or ""
+            except ValueError:
+                h = "invalid-address"
+            if h:
+                out.add(h.lower().rstrip(".").removeprefix("www."))
+        m = None if _URL.search(s) else _BARE_HOST.match(s.strip())
+        if m and (key in _URL_KEYS or m.group(2)):
+            out.add(m.group(1).lower().rstrip(".").removeprefix("www."))
     return out
+
+
+def registrable(host):
+    """'a.b.evil.co.uk' -> 'evil.co.uk', 'x.evil.com' -> 'evil.com' (who owns the name; no public-suffix list needed for
+    this: a wrong guess only makes Jarvis ask more often)."""
+    parts = [p for p in str(host or "").lower().strip(".").split(".") if p]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _SECOND_LEVEL:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def user_named_host(host, words):
+    """Did THEIR words name this host? Only whole names count: the address itself or a domain it belongs to
+    ("github.com" covers gist.github.com), spoken "github dot com", or a site Jarvis knows by name ("YouTube" ->
+    youtube.com). Never a fragment: 'a.evil.com' isn't named by the word "a", nor 'the.evil.com' by "the"."""
+    host = str(host or "").lower().removeprefix("www.")
+    if not host:
+        return False
+    text = re.sub(r"\s+dot\s+", ".", str(words or "").lower())
+    for named in _SAID_HOST.findall(text):
+        named = named.removeprefix("www.")
+        if host == named or host.endswith("." + named):
+            return True
+    from room_agent.computer.browsers import SITES
+
+    for alias, url in SITES.items():
+        if re.search(rf"(?<![\w.]){re.escape(alias)}(?![\w.])", text):
+            site = (urllib.parse.urlparse(url).hostname or "").removeprefix("www.")
+            if host == site or host.endswith("." + registrable(site)):
+                return True
+    return False
 
 
 def _taint_check(cap, args, awaiting_yes):
@@ -261,13 +330,15 @@ def _taint_check(cap, args, awaiting_yes):
         return ""
     if awaiting_yes and _confirmed(cap.name, args, cap):  # (their yes, on a later turn, in their own words, same action)
         return ""
-    said = (rt.turn_text or "").lower()
     same_turn = _taint["turn"] is rt.turn
     if cap.changes_state and cap.intent is None and (same_turn or cap.name in RISKY_UNGATED):
         return (f"this turn read outside content ({_taint['source']}), which can contain instructions that aren't "
                 f"theirs, and they didn't ask for {cap.name} themselves.")
-    for host in _hosts_in(json.dumps(args, default=str)):
-        if host not in said and host.split(".")[0] not in said:
+    if getattr(cap, "runs_code", False):  # (a page can't pick a project for Jarvis to run, whatever the words were)
+        return (f"{cap.name} runs a project's own code, and this turn read outside content ({_taint['source']}) that "
+                "could have chosen what to run.")
+    for host in sorted(_hosts_in(args)):
+        if not user_named_host(host, rt.turn_text or ""):
             return (f"the address {host} came from outside content ({_taint['source']}), not from them.")
     return ""
 
@@ -298,6 +369,10 @@ def _execute(name, args):
     cap = core.get(name)  # 1. resolve
     if cap is None:
         return _finish("REFUSED", _result(name, args, f"UNAVAILABLE: there's no tool called {name}."))
+    if getattr(getattr(rt.turn, "output", None), "unverified_caller", False) and name not in UNVERIFIED_CALLER_OK:
+        # 1a. a phone caller whose identity isn't established (caller ID can be faked): nothing runs, nothing is read
+        return _finish("REFUSED", _result(name, args, "FAILED: not done: this phone caller isn't verified yet (they "
+                                                      "haven't said their PIN), so Jarvis can't act or look anything up."))
     available = name in {t["name"] for t in core.offered()}  # 2. availability
     trace.note("CAPABILITY", f"{name}={str(available).lower()}")
     if not available:
@@ -356,13 +431,14 @@ def _execute(name, args):
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: they didn't ask for this "
                                                        f"in their own words ({what}). Ask them first, in one short "
                                                        "question; only if they say yes, call it again."))
+    risk = risk_of(cap, clean)
     if (getattr(rt.turn, "uncertain", False) and not confirmed and cap.changes_state
-            and (cap.risk != core.Risk.SAFE or cap.undo is None)):  # 4c. misheard? never something that can't be undone
+            and (risk != core.Risk.SAFE or cap.undo is None)):  # 4c. misheard? never something that can't be undone
         pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done: speech recognition wasn't "
                                                        f"sure it heard them right ({what}). Say what you heard in a few "
                                                        "words and ask if that's right."))
-    if cap.risk == core.Risk.SENSITIVE and not confirmed:  # 4b. risk: always asked first
+    if risk == core.Risk.SENSITIVE and not confirmed:  # 4b. risk (of this exact call): always asked first
         pending.confirming(name, clean)
         return _finish("CLARIFY", _result(name, clean, "NEEDS_CONFIRMATION: nothing was done. This can't be taken back "
                                                        f"easily ({what}), so ask one short yes/no question first; if they "
@@ -522,10 +598,41 @@ def _confirmed(name, args=None, cap=None):
     if not said_yes(text, cap, what):
         return False
     if args is not None:
-        keys = (cap.confirm_keys if cap and cap.confirm_keys else [k for k in p.get("args", {}) if k != "confidence"])
-        if any(str(p.get("args", {}).get(k)) != str(args.get(k)) for k in keys):
+        keep = set(cap.confirm_keys or ()) if cap else set()  # (code-made keys like a draft's fingerprint count too)
+        asked, now = _norm_args(name, p.get("args", {}), keep), _norm_args(name, args, keep)
+        keys = (cap.confirm_keys if cap and cap.confirm_keys else set(asked) | set(now))  # (an added argument counts too)
+        if any(asked.get(k) != now.get(k) for k in keys):
             return False  # a different action than the one they said yes to
     return True
+
+
+def _norm_args(name, args, keep=()):
+    """Arguments as the tool will get them (schema keys only, plus `keep`; types coerced, empties dropped), for
+    comparing the call they said yes to with the call being made now."""
+    from room_agent.tools.validate import SCHEMAS, _coerce
+
+    props = (SCHEMAS.get(name) or {}).get("properties", {})
+    out = {}
+    for k, v in (args or {}).items():
+        if k == "confidence" or v is None or v == "" or v == [] or v == {} or (props and k not in props and k not in keep):
+            continue
+        try:
+            v = _coerce(v, props.get(k, {}))
+        except (ValueError, TypeError):
+            pass
+        out[k] = json.dumps(v, sort_keys=True, default=str)
+    return out
+
+
+def risk_of(cap, args):
+    """The risk of THIS call: a capability may be safe for a lamp and sensitive for a door lock (Capability.risk_for)."""
+    if cap.risk_for is not None:
+        try:
+            return cap.risk_for(dict(args or {})) or cap.risk
+        except Exception as e:  # noqa: BLE001 (a broken classifier never lowers the risk)
+            log.warning("risk check of %s failed (%s): treated as sensitive", cap.name, e)
+            return core.Risk.SENSITIVE
+    return cap.risk
 
 
 def _update_context(cap, result):
@@ -580,7 +687,7 @@ class Plan:
         """An action that adds something (a timer, an email, an event) or can't be taken back, asked for again with the
         same arguments in a LATER round of the same request, already ran: running it again could make two. That includes
         an earlier attempt whose outcome is UNKNOWN (it may have happened). (Several in the same round are deliberate.)"""
-        if not cap or (cap.event not in self.ADDITIVE and cap.risk != core.Risk.SENSITIVE):
+        if not cap or (cap.event not in self.ADDITIVE and risk_of(cap, args) != core.Risk.SENSITIVE):
             return None
         key = {k: v for k, v in args.items() if k != "confidence"}
         return next((s for s in self.steps if (s.success or s.outcome == "unknown") and s.capability == name

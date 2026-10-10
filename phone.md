@@ -6,6 +6,12 @@ Already done: Twilio is set up in `.env`, your number is verified, and `PHONE_TU
 2. Call Jarvis: **+1 (279) 266-8448**. Or have it call you: `python main.py --test-call`.
 3. On a call, say "bye" or "you can hang up" and Jarvis ends the call.
 
+**Who Jarvis trusts on the line:** caller ID can be faked, so a call from `MY_PHONE` gets full access only when your
+carrier vouches for the number (Twilio's STIR/SHAKEN result, level A by default: `PHONE_TRUSTED_ATTESTATION`). Any
+other call from your number is declined, unless `PHONE_PIN` is set: then Jarvis asks for the PIN first and does nothing
+else until you say it (3 tries per call; after 10 wrong PINs in an hour, PIN entry is locked for a while). Calls Jarvis
+places to you are always trusted. If your own calls are declined, set `PHONE_PIN` (6+ digits).
+
 **Later, for the driving calls (needs a fixed address):**
 1. Install Tailscale (`winget install --id tailscale.tailscale -e`), sign in, then run `tailscale funnel --bg 8770`.
 2. In `.env`: remove `PHONE_TUNNEL=cloudflared` and set `PUBLIC_URL=` to the `https://...ts.net` address.

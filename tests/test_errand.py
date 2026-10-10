@@ -9,6 +9,7 @@ Run:  .venv\\Scripts\\python -m tests.test_errand
 
 import asyncio
 import json
+import re
 import socket
 import time
 
@@ -78,16 +79,17 @@ def sign(path, params=None, ws=False):
 
 async def call(reason, prompts):
     """Be Twilio: the voice webhook, then the relay: setup + what 'the restaurant' says. -> (twiml, lines, ended)"""
-    form = {"Direction": "outbound-api", "To": config.MY_PHONE, "From": config.TWILIO_NUMBER}
+    form = {"Direction": "outbound-api", "To": config.MY_PHONE, "From": config.TWILIO_NUMBER, "CallSid": "CA1"}
     path = f"/twilio/voice?reason={reason}"
     async with aiohttp.ClientSession() as s:
         async with s.post(URL + path, data=form, headers={"X-Twilio-Signature": sign(path, form)}) as r:
             twiml = await r.text()
+        nonce = (re.search(r'name="nonce" value="([^"]+)"', twiml) or [None, ""])[1]  # (Twilio hands the ticket back)
         said, ended = [], False
         async with s.ws_connect(URL.replace("http://", "ws://") + "/twilio/relay",
                                 headers={"X-Twilio-Signature": sign("/twilio/relay", ws=True)}) as ws:
             await ws.send_json({"type": "setup", "callSid": "CA1", "direction": "outbound-api", "to": config.MY_PHONE,
-                                "from": config.TWILIO_NUMBER, "customParameters": {"reason": reason}})
+                                "from": config.TWILIO_NUMBER, "customParameters": {"reason": reason, "nonce": nonce}})
             for p in prompts:
                 if ended:
                     break

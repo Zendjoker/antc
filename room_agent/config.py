@@ -75,6 +75,7 @@ EXPERIENCE_TTL_DAYS = int(os.getenv("EXPERIENCE_TTL_DAYS", "") or "90")  # learn
 CODING = os.getenv("CODING", "1") == "1"  # run_tests (free, sandboxed copy); fix_code needs CODING_FIXER + budget
 CODING_FIXER = os.getenv("CODING_FIXER", "none").strip().lower()  # none (default) | anthropic: a paid model proposes fixes
 CODING_MAX_USD = float(os.getenv("CODING_MAX_USD", "") or "0.50")  # most one fix_code call may reserve (paid fixer only)
+CODING_ALLOW_UNSANDBOXED = os.getenv("CODING_ALLOW_UNSANDBOXED", "0") == "1"  # run project tests without the Windows Job sandbox
 CODING_ROOTS = [p for p in os.getenv("CODING_ROOTS", "").split(";") if p.strip()]  # extra project roots (default: home)
 
 # ---------- audio devices and rates ----------
@@ -242,6 +243,9 @@ SPEECH_DEBUG = os.getenv("SPEECH_DEBUG", "0") == "1"  # log SEMANTIC / STRATEGY 
 # ---------- integrations ----------
 HA_URL = os.getenv("HA_URL", "").rstrip("/")
 HA_TOKEN = os.getenv("HA_TOKEN", "")
+# Home Assistant entities that always need the user's yes even in an everyday domain (a garage opener wired as a switch,
+# a smart plug on a heater): comma-separated entity ids. Locks, alarms, covers, scripts... always do (tools/home_assistant.py).
+HA_SENSITIVE_ENTITIES = {e.strip().lower() for e in os.getenv("HA_SENSITIVE_ENTITIES", "").split(",") if e.strip()}
 # Zigbee sensors and lights through Zigbee2MQTT on this PC (tools/zigbee.py). Off if it isn't running.
 ZIGBEE = os.getenv("ZIGBEE", "1") == "1"
 ZIGBEE_MQTT_HOST = os.getenv("ZIGBEE_MQTT_HOST", "127.0.0.1")
@@ -286,6 +290,12 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "").strip()  # Jarvis's number, +1...
 MY_PHONE = os.getenv("MY_PHONE", "").strip()  # your number, +1... (the only number Jarvis talks to)
+# Caller ID can be faked, so an incoming call from MY_PHONE is only trusted when the carrier vouches for it (Twilio's
+# StirVerstat, STIR/SHAKEN attestation level A by default; "off" trusts none). Any other incoming call must say PHONE_PIN
+# (digits) before Jarvis does anything; with no PIN set, such a call is declined. Calls Jarvis places to you are trusted.
+PHONE_TRUSTED_ATTESTATION = {a.strip().upper() for a in os.getenv("PHONE_TRUSTED_ATTESTATION", "A").split(",")
+                             if a.strip() and a.strip().lower() != "off"}
+PHONE_PIN = "".join(ch for ch in os.getenv("PHONE_PIN", "") if ch.isdigit())
 PHONE_TTS_PROVIDER = os.getenv("PHONE_TTS_PROVIDER", "").strip()  # optional: Google / Amazon / ElevenLabs (Twilio's)
 PHONE_VOICE = os.getenv("PHONE_VOICE", "").strip()  # optional voice id for that provider
 ERRAND_TTS_PROVIDER = os.getenv("ERRAND_TTS_PROVIDER", "ElevenLabs").strip()  # errand calls' voice (through Twilio)

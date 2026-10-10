@@ -61,7 +61,9 @@ def verified_done(plan, n, spoken, guard):
     if not steps or guard.held or len(steps) != n or not _single_request(rt.turn_text):
         return None
     caps = [core.get(s.capability) for s in steps]
-    if any(c is None or not c.changes_state or c.risk != core.Risk.SAFE for c in caps):
+    from room_agent.actions.executor import risk_of
+
+    if any(c is None or not c.changes_state or risk_of(c, s.parameters) != core.Risk.SAFE for c, s in zip(caps, steps)):
         return None
     if any(not (s.success and s.verified) or s.message.rstrip().endswith("?") for s in steps):
         return None

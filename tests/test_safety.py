@@ -35,6 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "UI"))
 import server as ui  # noqa: E402
 
 client = ui.app.test_client()
+from room_agent import localauth  # noqa: E402
+
+client.get(f"/?key={localauth.token()}", headers={"Host": "127.0.0.1:8765"})  # (signed in like the user's browser)
+ui.ENV_FILE = Path(tmp) / ".env"  # (never the real .env)
+ui.ENV_FILE.write_text("OPENAI_API_KEY=sk-test-not-real-0123456789abcdef\nUNITS=imperial\n", encoding="utf-8")
 r = client.get("/api/env", headers={"Host": "attacker.example:8765"})
 t.check("the dashboard refuses a page whose Host isn't this PC (can't read settings)", r.status_code == 403)
 r = client.get("/api/env", headers={"Host": "127.0.0.1:8765"})
