@@ -7,7 +7,7 @@ from room_agent import runtime as rt
 from room_agent import social
 from room_agent.actions import pending
 from room_agent.audio.speaker import say
-from room_agent.audio.styles import split_style
+from room_agent.audio.styles import split_style, strip_tags
 from room_agent.config import USER_NAME
 from room_agent.truth import ClaimGuard
 from room_agent.tools.validate import SCHEMAS, current_pending
@@ -58,6 +58,7 @@ def speak_checked(guard, sentence, spoken):
     sentence, style = split_style(sentence)  # a leading [soft]-style tag sets the delivery, and is never spoken
     if style:
         rt.turn_style = style
+    sentence = strip_tags(sentence)  # (a delivery tag inside a sentence is never spoken, shown or stored either)
     sentence = social.scrub(sentence, spoken) if sentence.strip() else sentence  # (no "Certainly!", no "Let me know if...")
     if sentence.strip() and social.over_cap(spoken):
         return  # a tiny-reply turn ("whatever" -> "Alright.") has said enough

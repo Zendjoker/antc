@@ -20,8 +20,13 @@ STYLE_TAGS = {
     "sighs": "[sighs]",
 }
 BASE_STYLES = ("normal", "soft", "whisper", "warm", "engaged", "excited", "serious", "playful")  # can be made permanent
+# documented ElevenLabs v3/v4 tags a model might copy into its words: delivery only, never content
+DELIVERY_TAGS = ("whispers", "laughs harder", "starts laughing", "laughs softly", "giggles", "exhales", "gasps", "clears throat",
+                 "short pause", "long pause", "pause", "curious", "sarcastic", "mischievously", "crying", "thoughtful",
+                 "shouts", "softly", "warmly")
 _LEADING_TAG = re.compile(r"^\s*\[([A-Za-z ]{2,20})\]\s*")
-_ANY_STYLE_TAG = re.compile(r"\[(?:%s)\]\s*" % "|".join(STYLE_TAGS), re.I)
+_ANY_STYLE_TAG = re.compile(r"\[(?:%s)\]\s*" % "|".join(sorted(set(STYLE_TAGS) | set(DELIVERY_TAGS), key=len, reverse=True)),
+                            re.I)
 
 
 class Spoken(str):
@@ -33,6 +38,14 @@ class Spoken(str):
 
 def supported():
     return config.EL_MODEL.startswith(("eleven_v3", "eleven_v4")) and voices.provider() != "piper"
+
+
+def hints_allowed():
+    """The model may suggest a delivery tag: a tag model, and expressive speech not turned off."""
+    from room_agent.speech import director
+
+    level, emotion, _ = director.settings()
+    return supported() and level != "off" and emotion
 
 
 def split_style(text):
@@ -51,6 +64,31 @@ def split_style(text):
 def strip_tags(text):
     """Remove style tags from words that are being saved or shown."""
     return _ANY_STYLE_TAG.sub("", text)
+
+
+def clean_args(value):
+    """A tool call's arguments without delivery tags (an email body, a text, a note never carries "[excited]"), changed
+    in place so the call that runs and the call kept in the history are the same. -> the number of tags taken out."""
+    removed = 0
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, str):
+                new = strip_tags(v)
+                if new != v:
+                    removed += 1
+                    value[k] = new
+            else:
+                removed += clean_args(v)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            if isinstance(v, str):
+                new = strip_tags(v)
+                if new != v:
+                    removed += 1
+                    value[i] = new
+            else:
+                removed += clean_args(v)
+    return removed
 
 
 def semantic_content(content):

@@ -16,6 +16,7 @@ from room_agent.config import OLLAMA_KEEP_ALIVE, OLLAMA_MODEL, OLLAMA_URL
 from room_agent.llm.guard import (correction_note, interrupted_now, new_guard, release_checked, speak_checked,
                                   stop_for_interruption)
 from room_agent.prompt import system_prompt
+from room_agent.audio.styles import clean_args
 from room_agent.tools.registry import active_tools, run_tool
 
 log = logging.getLogger("room-agent")
@@ -131,6 +132,9 @@ def ask_ollama(history, model=None):
             args = fn.get("arguments") or {}
             if isinstance(args, str):
                 args = json.loads(args or "{}")
+            if clean_args(args):  # (speech direction never reaches a tool's arguments, nor the history's copy of them)
+                fn["arguments"] = args if isinstance(fn.get("arguments"), dict) else json.dumps(args)
+                log.info("delivery tags removed from %s's arguments", fn["name"])
             log.info("tool %s %s", fn["name"], json.dumps(args))
             if interrupted_now():  # (they countermanded it: the remaining actions don't run)
                 out = "FAILED: not run, they interrupted."

@@ -9,8 +9,17 @@ Engines: the local voice (Piper) always; ElevenLabs when a real key is set, with
 is the only thing that differs.
 
     .venv\\Scripts\\python -m tests.voice_audition            generate clips + objective checks
+    .venv\\Scripts\\python -m tests.voice_audition compare    four-way ElevenLabs comparison (paid: asks first, see below)
     .venv\\Scripts\\python -m tests.voice_audition serve      blind listening page on http://127.0.0.1:8773
     .venv\\Scripts\\python -m tests.voice_audition score      unblind your ratings
+
+compare: the same scenarios, the same voice and seed, four ways (blind, random order per item):
+    baseline           the delivery and model you use today (ELEVENLABS_MODEL, or AUDITION_BASELINE_MODEL)
+    v4-turbo-plain     eleven_v4_turbo, the words only (no direction)
+    v4-turbo-directed  eleven_v4_turbo through the new SpeechDirector (what Jarvis sends now)
+    v4-directed        eleven_v4 through the new SpeechDirector (quality reference; not a real-time model)
+It prints the characters it will use and waits for --yes; each sentence's time to first audio is measured (HTTP stream,
+or the Text to Dialogue WebSocket when the HTTP stream refuses a model). --selftest runs it against a local fake.
 
 Objective checks per clip (Whisper listens back): words heard vs the semantic text (did anything get dropped,
 changed, or a [tag] read out loud?), duration, speaking rate, loudness. Clips stay in bench/audition/ (gitignored,
@@ -93,8 +102,8 @@ def _items(sentences):
         item.style = rt.turn_style or (delivery.style if delivery else "")
         item.delivery = delivery
         rt.turn_speech.append(s)
+        rt.spoken_count += 1  # (counted before it's performed, exactly like say())
         item.performance = speech.perform(s)
-        rt.spoken_count += 1
         items.append((item, list(rt.turn_speech)))
     return items
 
@@ -302,13 +311,13 @@ def page(key, run_id):
             f'''<div class="clip"><div class="lab">Version {n}</div><audio controls preload="none" src="clips/{k["clips"][n]}"></audio>
             <div class="rate">{''.join(f'<label>{q}<select data-k="{html.escape(item_id)}|{n}|{q}"><option value="">-</option>'
                                        + ''.join(f'<option>{v}</option>' for v in range(1, 6)) + '</select></label>'
-                                       for q in ("human", "fits", "clear"))}</div></div>''' for n in ("1", "2"))
+                                       for q in ("human", "fits", "clear"))}</div></div>''' for n in sorted(k["clips"]))
         cards.append(f'''<section><h2>{i + 1}. {html.escape(k["kind"])} <small>{engine}</small></h2>
         <p class="ctx"><b>They said:</b> “{html.escape(k["user"])}”<br><b>Jarvis says:</b> “{html.escape(k["reply"])}”</p>
-        <div class="pair">{clips}</div>
+        <div class="pair{' n4' if len(k['clips']) > 2 else ''}">{clips}</div>
         <div class="pref">Which one would you rather hear here?
           {''.join(f'<label><input type="radio" name="p{i}" value="{v}" data-k="{html.escape(item_id)}|pref"> {t}</label>'
-                   for v, t in (("1", "Version 1"), ("2", "Version 2"), ("same", "No real difference")))}</div>
+                   for v, t in [(n, f"Version {n}") for n in sorted(k["clips"])] + [("same", "No real difference")])}</div>
         <input class="note" placeholder="Anything off? (optional)" data-k="{html.escape(item_id)}|note"></section>''')
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Voice Audition</title><style>
@@ -319,7 +328,8 @@ main{{max-width:880px;margin:0 auto}} h1{{font-size:22px;margin:0 0 4px}} .sub{{
 section{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:0 0 14px}}
 h2{{font-size:16px;margin:0 0 6px}} h2 small{{color:var(--muted);font-weight:400;margin-left:6px}}
 .ctx{{color:var(--muted);margin:0 0 10px}} .pair{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
-@media (max-width:640px){{.pair{{grid-template-columns:1fr}}}}
+.pair.n4{{grid-template-columns:1fr 1fr}}
+@media (max-width:640px){{.pair,.pair.n4{{grid-template-columns:1fr}}}}
 .clip{{border:1px solid var(--line);border-radius:8px;padding:10px}} .lab{{font-weight:600;margin-bottom:6px}}
 audio{{width:100%}} .rate{{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:13px}} .rate select{{margin-left:4px}}
 .pref{{margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}} .note{{width:100%;margin-top:8px;padding:6px;box-sizing:border-box;
@@ -327,7 +337,7 @@ background:transparent;color:var(--fg);border:1px solid var(--line);border-radiu
 .bar{{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 16px;display:flex;
 gap:12px;align-items:center;justify-content:center}} button{{background:var(--accent);color:var(--bg);border:0;border-radius:6px;padding:8px 16px;
 font-weight:600;cursor:pointer}} #st{{color:var(--muted)}}</style></head><body><main>
-<h1>Voice audition</h1><p class="sub">Run {run_id}. Each pair is the same sentence in the same moment, delivered two ways, in random order.
+<h1>Voice audition</h1><p class="sub">Run {run_id}. Each item is the same sentence in the same moment, delivered in different ways, in random order.
 Rate 1-5: <b>human</b> (sounds like a person talking), <b>fits</b> (right for what they said), <b>clear</b> (every word easy to catch).
 Headphones help. Nothing is revealed until you score.</p>{''.join(cards)}</main>
 <div class="bar"><button id="save">Save ratings</button><span id="st"></span></div>
@@ -386,13 +396,14 @@ def score():
     ratings = json.loads((folder / "ratings.json").read_text(encoding="utf-8"))
     out = {}
     for engine in sorted({k["engine"] for k in key.values()}):
-        agg = {c: {q: [] for q in ("human", "fits", "clear")} for c in ("A", "B")}
-        pref = {"A": 0, "B": 0, "same": 0}
+        conds = sorted({k[n] for k in key.values() if k["engine"] == engine for n in k["clips"]})
+        agg = {c: {q: [] for q in ("human", "fits", "clear")} for c in conds}
+        pref = {**{c: 0 for c in conds}, "same": 0}
         by_kind = []
         for item_id, k in key.items():
             if k["engine"] != engine:
                 continue
-            for n in ("1", "2"):
+            for n in k["clips"]:
                 for q in ("human", "fits", "clear"):
                     v = ratings.get(f"{item_id}|{n}|{q}")
                     if v:
@@ -401,19 +412,204 @@ def score():
             if p:
                 pref["same" if p == "same" else k[p]] += 1
                 by_kind.append((k["kind"], "same" if p == "same" else k[p], ratings.get(f"{item_id}|note", "")))
-        n = pref["A"] + pref["B"]
-        p_value = sum(comb(n, i) for i in range(max(pref["A"], pref["B"]), n + 1)) / 2 ** n * 2 if n else 1.0
         out[engine] = {"mean": {c: {q: round(float(np.mean(v)), 2) if v else None for q, v in d.items()} for c, d in agg.items()},
-                       "preferred": pref, "sign_test_p": round(min(1.0, p_value), 3), "items": by_kind}
-        print(f"\n{engine}:  (A = previous, B = new)")
+                       "preferred": pref, "items": by_kind}
+        names = {"A": "previous", "B": "new"} if conds == ["A", "B"] else {c: c for c in conds}
+        if conds == ["A", "B"]:
+            n = pref["A"] + pref["B"]
+            p_value = sum(comb(n, i) for i in range(max(pref["A"], pref["B"]), n + 1)) / 2 ** n * 2 if n else 1.0
+            out[engine]["sign_test_p"] = round(min(1.0, p_value), 3)
+        print(f"\n{engine}:" + ("  (A = previous, B = new)" if conds == ["A", "B"] else ""))
         for q in ("human", "fits", "clear"):
-            print(f"  {q:6} A {out[engine]['mean']['A'][q]}  B {out[engine]['mean']['B'][q]}")
-        print(f"  preferred: new {pref['B']}, previous {pref['A']}, no difference {pref['same']}  (sign test p = {out[engine]['sign_test_p']})")
+            print(f"  {q:6} " + "  ".join(f"{names[c]} {out[engine]['mean'][c][q]}" for c in conds))
+        print("  preferred: " + ", ".join(f"{names[c]} {pref[c]}" for c in conds) + f", no difference {pref['same']}"
+              + (f"  (sign test p = {out[engine]['sign_test_p']})" if "sign_test_p" in out[engine] else ""))
         for kind, which, note in by_kind:
-            print(f"    {kind:36} -> {'new' if which == 'B' else 'previous' if which == 'A' else 'same'}  {note}")
+            print(f"    {kind:36} -> {names.get(which, which)}  {note}")
     (folder / "report.json").write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------------------------------- four-way comparison
+HTTP_BASE = "https://api.elevenlabs.io"
+
+
+def _conditions():
+    from room_agent.config import EL_MODEL
+
+    base = os.getenv("AUDITION_BASELINE_MODEL", "").strip() or EL_MODEL
+    return [("baseline", base, "previous"), ("v4-turbo-plain", "eleven_v4_turbo", "plain"),
+            ("v4-turbo-directed", "eleven_v4_turbo", "directed"), ("v4-directed", "eleven_v4", "directed")]
+
+
+def _body(item, model, mode):
+    """The request body for one sentence in one condition (the voice and seed are the same for all of them)."""
+    from room_agent import runtime as rt
+    from room_agent import speech
+    from room_agent.audio import speaker, styles
+    from room_agent.social.delivery import elevenlabs_speed
+    from room_agent.speech import director, elevenlabs as el, normalize
+
+    if mode == "directed":
+        return speaker._payload(item, model)
+    if mode == "previous":  # (what Jarvis sent before the SpeechDirector: the social layer's style tag, speed only)
+        tag = styles.STYLE_TAGS.get(item.style or "", "") if el.caps(model)["tags"] else ""
+        body = {"text": f"{tag} {item}" if tag else str(item), "model_id": model}
+        speed = elevenlabs_speed(rt.speech_rate, item.delivery)
+        if speed != 1.0 and "speed" in el.caps(model)["settings"]:
+            body["voice_settings"] = {"speed": speed}
+        return body
+    words = speech.clean_for_speech(str(item))  # plain: the same words, no direction at all
+    level = el.caps(model)["normalize"]
+    text = normalize.speech_text(words, "full", acronyms=()) if level == "numbers" else normalize.speech_text(words, "light")
+    return el.request_body(text, director.SpeechPerformance(words), model)
+
+
+def _synthesize(session, body, model, voice, key, sr):
+    """-> (pcm, first audio s, total s, transport). HTTP stream first; the dialogue WebSocket if HTTP refuses the model."""
+    from room_agent.speech import dialogue_ws, elevenlabs as el
+
+    t0 = time.time()
+    r = session.post(f"{HTTP_BASE}/v1/text-to-speech/{voice}/stream?output_format=pcm_{sr}", headers={"xi-api-key": key},
+                     json=body, stream=True, timeout=(5, 60))
+    if r.status_code == 200:
+        first, pcm = None, b""
+        for chunk in r.iter_content(4096):
+            if chunk and first is None:
+                first = time.time() - t0
+            pcm += chunk
+        return pcm[: len(pcm) // 2 * 2], first, time.time() - t0, "http"
+    if r.status_code in (400, 404, 422) and el.caps(model).get("dialogue"):
+        got = []
+        t0 = time.time()
+        _, first = dialogue_ws.speak(body["text"], key, voice, model, sr, got.append, lambda: False,
+                                     reply_id=f"audition-{time.time()}")
+        pcm = b"".join(got)
+        return pcm[: len(pcm) // 2 * 2], first, time.time() - t0, "dialogue websocket"
+    raise RuntimeError(f"ElevenLabs {model}: status {r.status_code}: {r.text[:200]}")
+
+
+def compare(argv=()):
+    global OUT
+    selftest = "--selftest" in argv
+    if selftest:  # (a throwaway folder: nothing written into the project)
+        import tempfile
+
+        OUT = Path(tempfile.mkdtemp(prefix="audition-selftest-"))
+    env = {"SOCIAL_MEANING": "1", "SETTINGS_FILE": str(OUT / "settings.json")}
+    if selftest:
+        env.update(ELEVENLABS_API_KEY="fake-key", ELEVENLABS_MODEL="eleven_flash_v2_5", SOCIAL_MEANING="0")
+    setup_env(**env)
+    import requests
+
+    from room_agent import runtime as rt
+    from room_agent.audio import voices
+    from room_agent.config import EL_KEY, OUT_SR
+    from room_agent.speech import dialogue_ws
+
+    global HTTP_BASE  # noqa: PLW0603
+    conds = _conditions()
+    scenarios = SCENARIOS[:3] if selftest else SCENARIOS
+    chars = sum(len(" ".join(reply)) for _, _, _, _, reply, _ in scenarios) * len(conds)
+    print(f"Four-way comparison: {len(scenarios)} scenarios x {len(conds)} conditions, about {chars} characters of your "
+          f"ElevenLabs quota.\nConditions: " + "; ".join(f"{n} = {m} ({mode})" for n, m, mode in conds))
+    if selftest:
+        sys.path.insert(0, ROOT)
+        from tests import tts_bench
+
+        import socket
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        tts_bench.fake_elevenlabs(port)
+        HTTP_BASE, dialogue_ws.BASE = f"http://127.0.0.1:{port}", f"ws://127.0.0.1:{port}"
+    elif "--yes" not in argv:
+        print("Nothing generated. Run again with --yes to spend those characters.")
+        return
+    if not EL_KEY or EL_KEY in ("...",) or EL_KEY.startswith("el-test"):
+        print("No ElevenLabs key (ELEVENLABS_API_KEY): nothing to compare.")
+        return
+    if not selftest:
+        from room_agent.social import meaning
+
+        meaning.load()
+    rt.tts_enabled = True
+    run_id = time.strftime("%Y%m%d-%H%M%S") + "-compare"
+    folder = OUT / run_id
+    (folder / "clips").mkdir(parents=True, exist_ok=True)
+    rng = random.Random(f"{run_id}-{SEED}")
+    session = requests.Session()
+    key, rows = {}, []
+    for sid, kind, user, fails, reply, lang in scenarios:
+        clips = {}
+        for label, model, mode in conds:
+            _moment(user, fails)
+            items = _items(reply)
+            voices.current.fallback = False
+            pcm, sent, firsts, totals, how = b"", [], [], [], set()
+            try:
+                for item, so_far in items:
+                    rt.turn_speech.clear()
+                    rt.turn_speech.extend(so_far)
+                    body = _body(item, model, mode)
+                    body["seed"] = SEED
+                    sent.append(body["text"])
+                    part, first, total, transport = _synthesize(session, body, model, voices.current.eleven, EL_KEY, OUT_SR)
+                    pcm += part
+                    firsts.append(first)
+                    totals.append(total)
+                    how.add(transport)
+            except Exception as e:
+                print(f"  {sid} {label}: FAILED {e}")
+                continue
+            name = f"{rng.getrandbits(48):012x}.wav"
+            _write_wav(folder / "clips" / name, pcm, OUT_SR)
+            try:
+                m = measures(pcm, OUT_SR, " ".join(reply), lang, sent)
+            except ImportError:  # (no Whisper here: timing only, listening by ear)
+                m = {"duration_s": round(len(pcm) / 2 / OUT_SR, 2), "heard": "", "wer": None, "tag_words_spoken": []}
+            clips[label] = name
+            rows.append({"scenario": sid, "kind": kind, "condition": label, "model": model, "mode": mode, "clip": name,
+                         "sent": sent, "first_audio_s": [round(f, 3) if f is not None else None for f in firsts],
+                         "sentence_total_s": [round(x, 3) for x in totals], "transport": sorted(how), **m})
+            print(f"  {sid:12} {label:18} first audio {firsts[0] if firsts and firsts[0] is not None else float('nan'):.2f}s  "
+                  f"{'/'.join(sorted(how))}  sent: {' | '.join(sent)[:80]}")
+        if len(clips) >= 2:
+            order = list(clips)
+            rng.shuffle(order)
+            numbered = {str(i + 1): c for i, c in enumerate(order)}
+            key[f"{sid}|elevenlabs"] = {**numbered, "clips": {n: clips[c] for n, c in numbered.items()}, "kind": kind,
+                                        "user": user, "reply": " ".join(reply), "engine": "elevenlabs"}
+    (folder / "key.json").write_text(json.dumps(key, indent=1, ensure_ascii=False), encoding="utf-8")
+    (folder / "measures.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+    (folder / "index.html").write_text(page(key, run_id), encoding="utf-8")
+    (OUT / "latest.txt").write_text(run_id, encoding="utf-8")
+    print("\nTime to first audio per condition (median of first sentences / of all sentences):")
+    for label, _, _ in conds:
+        rs = [r for r in rows if r["condition"] == label]
+        firsts = [r["first_audio_s"][0] for r in rs if r["first_audio_s"] and r["first_audio_s"][0] is not None]
+        every = [f for r in rs for f in r["first_audio_s"] if f is not None]
+        if rs:
+            print(f"  {label:18} {np.median(firsts) if firsts else float('nan'):.3f}s / {np.median(every) if every else float('nan'):.3f}s"
+                  f"  ({len(rs)} clips, {', '.join(sorted({t for r in rs for t in r['transport']}))})")
+    dialogue_ws.close()
+    print(f"\n{len(key)} blind items in {folder}\nListen: .venv\\Scripts\\python -m tests.voice_audition serve, then score")
+    return key, rows
+
+
+def _write_wav(path, pcm, sr):
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm)
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "generate"
-    {"generate": generate, "serve": serve, "score": score}[cmd]()
+    if cmd == "compare":
+        compare(sys.argv[2:])
+    else:
+        {"generate": generate, "serve": serve, "score": score}[cmd]()

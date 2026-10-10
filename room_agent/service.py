@@ -83,7 +83,10 @@ def clean_logs(now=None):
 def health(port=None, timeout=5):
     """The running Jarvis's health from its live link, or None if it doesn't answer."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port or _port()}/live", timeout=timeout) as r:
+        from room_agent import localauth  # (the live link needs the local secret, or it answers 403)
+
+        req = urllib.request.Request(f"http://127.0.0.1:{port or _port()}/live", headers={localauth.HEADER: localauth.token()})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8")).get("health") or {}
     except Exception:
         return None

@@ -20,12 +20,14 @@ from room_agent.tools.validate import contracts
 from room_agent.truth import capabilities, render_registry  # noqa: F401 (capabilities: re-exported for the CLI)
 
 STYLE_RULES = (
-    "\n- You can color how a sentence sounds by starting it with one tag in square brackets from: [soft] [warm] [engaged] "
-    "[excited] [serious] [playful] [whisper] [laughs] [chuckles] [sighs]. Use one only when it fits the moment (late at night "
-    "or someone tired: [soft]; good news: [excited]; something heavy: [serious]; chatting: [engaged]), and keep the same one "
-    "for the whole reply. Tags are never spoken, so never use any other square brackets. If they ask you to talk softer, more "
-    "seriously, more engaged or normal again, call set_speaking_style."
-    if styles.supported() else "")
+    "\n- Your voice performs your words by itself (warmth, energy, calm for serious things), so just write natural spoken "
+    "sentences. Only if a reply clearly needs a different color, start it with ONE tag from: [soft] [warm] [engaged] "
+    "[excited] [serious] [playful] [whisper] [laughs] [chuckles] [sighs] (late at night or someone tired: [soft]; real good "
+    "news: [excited]; something heavy: [serious]). Most replies need none, and never on a warning, a yes/no question about "
+    "an action, money, codes or anything serious. Tags only ever start your spoken reply: never inside a sentence, never in "
+    "tool arguments, emails, texts or anything written for someone else, and no other square brackets. If they ask you to "
+    "talk softer, more seriously, more engaged or normal again, call set_speaking_style."
+    if styles.hints_allowed() else "")
 
 SIGNAL_RULES = ("- If they ask for something a tool does but a REQUIRED detail (see tool_contracts) is entirely absent from what they "
                 "said, don't ask: reply with "
